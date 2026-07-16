@@ -158,12 +158,14 @@ describe('transparent viewport export', () => {
       viewportWidth: 1000,
       viewportHeight: 1000,
       longEdge: 4096,
+      supersample: 1,
       runtime,
     })
 
     expect(result.width).toBe(4096)
     expect(result.height).toBe(4096)
     expect(result.dpi).toBe(300)
+    expect(result.supersample).toBe(1)
     expect(result.blob.type).toBe('image/png')
     expect(renderViews.map(({ x, y }) => [x, y])).toEqual([[0, 0], [2048, 0], [0, 2048], [2048, 2048]])
     expect(renderViews.every((view) => !view.guideVisible && view.background === null)).toBe(true)
@@ -173,6 +175,146 @@ describe('transparent viewport export', () => {
     expect(camera.position.toArray()).toEqual([2, -2, 3])
     expect(disposed).toBe(true)
     expect(contextLost).toBe(true)
+  })
+
+  it('renders a default 2× 4K export in GPU-safe tiles with complete logical coverage', async () => {
+    const draws: number[][] = []
+    const renderSizes: Array<[number, number]> = []
+    const renderViews: Array<{
+      fullWidth: number
+      fullHeight: number
+      x: number
+      y: number
+      width: number
+      height: number
+    }> = []
+    let smoothingEnabled = false
+    let smoothingQuality: ImageSmoothingQuality = 'low'
+    const outputContext = {
+      clearRect: () => undefined,
+      drawImage: (...args: unknown[]) => draws.push(args.slice(1).map(Number)),
+      get imageSmoothingEnabled() { return smoothingEnabled },
+      set imageSmoothingEnabled(value: boolean) { smoothingEnabled = value },
+      get imageSmoothingQuality() { return smoothingQuality },
+      set imageSmoothingQuality(value: ImageSmoothingQuality) { smoothingQuality = value },
+    } as unknown as CanvasRenderingContext2D
+
+    function fakeCanvas(context: CanvasRenderingContext2D | null): HTMLCanvasElement {
+      let width = 300
+      let height = 150
+      return {
+        get width() { return width },
+        set width(value: number) { width = value },
+        get height() { return height },
+        set height(value: number) { height = value },
+        getContext: (kind: string) => kind === '2d' ? context : null,
+        toBlob: (callback: BlobCallback) => {
+          const bytes = samplePngWithDensity()
+          const payload = new ArrayBuffer(bytes.byteLength)
+          new Uint8Array(payload).set(bytes)
+          callback(new Blob([payload], { type: 'image/png' }))
+        },
+      } as unknown as HTMLCanvasElement
+    }
+
+    const canvases = [fakeCanvas(outputContext), fakeCanvas(null)]
+    const tileCanvas = canvases[1]!
+    const gl = {
+      MAX_VIEWPORT_DIMS: 1,
+      MAX_TEXTURE_SIZE: 2,
+      MAX_RENDERBUFFER_SIZE: 3,
+      getParameter: (parameter: number) => parameter === 1 ? new Int32Array([2048, 2048]) : 2048,
+    }
+    const fakeRenderer = {
+      domElement: tileCanvas,
+      outputColorSpace: THREE.SRGBColorSpace,
+      toneMapping: THREE.NoToneMapping,
+      toneMappingExposure: 1,
+      shadowMap: { enabled: false, type: THREE.PCFShadowMap },
+      setPixelRatio: () => undefined,
+      setClearColor: () => undefined,
+      getContext: () => gl,
+      setSize: (width: number, height: number) => {
+        renderSizes.push([width, height])
+        tileCanvas.width = width
+        tileCanvas.height = height
+      },
+      render: (_scene: THREE.Scene, renderCamera: THREE.PerspectiveCamera) => {
+        const view = renderCamera.view
+        if (!view) throw new Error('Expected a tiled camera view.')
+        renderViews.push({
+          fullWidth: view.fullWidth,
+          fullHeight: view.fullHeight,
+          x: view.offsetX,
+          y: view.offsetY,
+          width: view.width,
+          height: view.height,
+        })
+      },
+      dispose: () => undefined,
+      forceContextLoss: () => undefined,
+    } as unknown as THREE.WebGLRenderer
+    const liveRenderer = {
+      outputColorSpace: THREE.SRGBColorSpace,
+      toneMapping: THREE.NoToneMapping,
+      toneMappingExposure: 1,
+      shadowMap: { enabled: false, type: THREE.PCFShadowMap },
+    } as unknown as THREE.WebGLRenderer
+    const runtime: ViewportExportRuntime = {
+      createCanvas: () => canvases.shift()!,
+      createRenderer: () => fakeRenderer,
+    }
+
+    const result = await renderTransparentViewportPng({
+      scene: new THREE.Scene(),
+      camera: new THREE.PerspectiveCamera(38, 1, 0.01, 100),
+      liveRenderer,
+      viewportWidth: 1000,
+      viewportHeight: 1000,
+      longEdge: 4096,
+      runtime,
+    })
+
+    expect(result).toMatchObject({ width: 4096, height: 4096, dpi: 300, supersample: 2 })
+    expect(smoothingEnabled).toBe(true)
+    expect(smoothingQuality).toBe('high')
+    expect(renderSizes).toHaveLength(16)
+    expect(renderSizes.every(([width, height]) => width === 2048 && height === 2048)).toBe(true)
+    expect(renderViews[0]).toEqual({
+      fullWidth: 8192,
+      fullHeight: 8192,
+      x: 0,
+      y: 0,
+      width: 2048,
+      height: 2048,
+    })
+    expect(renderViews.at(-1)).toEqual({
+      fullWidth: 8192,
+      fullHeight: 8192,
+      x: 6144,
+      y: 6144,
+      width: 2048,
+      height: 2048,
+    })
+    expect(renderViews.map(({ x, y }) => [x, y])).toEqual([
+      [0, 0], [2048, 0], [4096, 0], [6144, 0],
+      [0, 2048], [2048, 2048], [4096, 2048], [6144, 2048],
+      [0, 4096], [2048, 4096], [4096, 4096], [6144, 4096],
+      [0, 6144], [2048, 6144], [4096, 6144], [6144, 6144],
+    ])
+
+    const coverage = new Uint8Array(4096 * 4096)
+    for (const draw of draws) {
+      const [sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height] = draw
+      expect([sourceX, sourceY, sourceWidth, sourceHeight]).toEqual([0, 0, 2048, 2048])
+      expect([width, height]).toEqual([1024, 1024])
+      for (let row = y!; row < y! + height!; row += 1) {
+        for (let column = x!; column < x! + width!; column += 1) {
+          coverage[row * 4096 + column] += 1
+        }
+      }
+    }
+    expect(coverage.every((count) => count === 1)).toBe(true)
   })
 
   it('replaces browser density metadata with one 300-PPI pHYs chunk', () => {

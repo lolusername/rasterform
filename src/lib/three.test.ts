@@ -1,6 +1,41 @@
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
-import { claySurface, createDefaultAppearanceSettings, createMaterial, heightGradientColors } from './three'
+import {
+  addStudioLighting,
+  claySurface,
+  configureStudioRenderer,
+  createDefaultAppearanceSettings,
+  createFinalRenderScene,
+  createMaterial,
+  createStudioFloor,
+  createThreeMesh,
+  heightGradientColors,
+  placeStudioFloor,
+} from './three'
+import type { MeshData } from '../types'
+
+function meshFixture(): MeshData {
+  return {
+    positions: new Float32Array([
+      -1, -1, 0,
+      1, -1, 0.1,
+      -1, 1, 0.2,
+      1, 1, 0.4,
+    ]),
+    indices: new Uint32Array([0, 1, 2, 1, 3, 2]),
+    colors: new Float32Array([
+      1, 0, 0,
+      0, 1, 0,
+      0, 0, 1,
+      1, 1, 1,
+    ]),
+    uvs: new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]),
+    heights: new Float32Array([0, 0.25, 0.5, 1]),
+    width: 1,
+    height: 1,
+    mode: 'plane',
+  }
+}
 
 describe('viewport materials', () => {
   it('maps the low, movable midpoint, and high gradient colors exactly', () => {
@@ -52,5 +87,101 @@ describe('viewport materials', () => {
       expect(material.wireframe).toBe(mode === 'wireframe')
       material.dispose()
     }
+  })
+})
+
+describe('studio rendering', () => {
+  it('configures color management, AgX tone mapping, and soft shadow maps', () => {
+    const renderer = {
+      outputColorSpace: THREE.LinearSRGBColorSpace,
+      toneMapping: THREE.NoToneMapping,
+      toneMappingExposure: 1,
+      shadowMap: { enabled: false, type: THREE.BasicShadowMap },
+    } as unknown as THREE.WebGLRenderer
+
+    configureStudioRenderer(renderer)
+
+    expect(renderer.outputColorSpace).toBe(THREE.SRGBColorSpace)
+    expect(renderer.toneMapping).toBe(THREE.AgXToneMapping)
+    expect(renderer.toneMappingExposure).toBe(1.15)
+    expect(renderer.shadowMap.enabled).toBe(true)
+    expect(renderer.shadowMap.type).toBe(THREE.PCFSoftShadowMap)
+  })
+
+  it('makes relief meshes participate in the studio shadow pass', () => {
+    const object = createThreeMesh(meshFixture(), 'original')
+    expect(object.name).toBe('Rasterform_plane')
+    expect(object.castShadow).toBe(true)
+    expect(object.receiveShadow).toBe(true)
+    object.geometry.dispose()
+    ;(object.material as THREE.Material).dispose()
+  })
+
+  it('adds named area lights and a shadow-tuned key light', () => {
+    const scene = new THREE.Scene()
+    const lights = addStudioLighting(scene)
+
+    expect(lights.hemisphere.name).toBe('Rasterform_Hemisphere')
+    expect(lights.key.name).toBe('Rasterform_Key')
+    expect(lights.key.castShadow).toBe(true)
+    expect(lights.key.shadow.mapSize.toArray()).toEqual([2048, 2048])
+    expect(lights.key.shadow.normalBias).toBe(0.025)
+    expect(lights.key.target).toBe(lights.keyTarget)
+    expect(lights.fill).toBeInstanceOf(THREE.RectAreaLight)
+    expect(lights.rim).toBeInstanceOf(THREE.RectAreaLight)
+    expect(scene.getObjectByName('Rasterform_Fill')).toBe(lights.fill)
+    expect(scene.getObjectByName('Rasterform_Rim')).toBe(lights.rim)
+  })
+
+  it('creates and positions a rough standard-material floor below the relief bounds', () => {
+    const object = createThreeMesh(meshFixture(), 'clay')
+    const floor = placeStudioFloor(createStudioFloor(), object)
+    const bounds = new THREE.Box3().setFromObject(object)
+
+    expect(floor.name).toBe('Rasterform_StudioFloor')
+    expect(floor.material).toBeInstanceOf(THREE.MeshStandardMaterial)
+    expect(floor.material.roughness).toBe(0.92)
+    expect(floor.receiveShadow).toBe(true)
+    expect(floor.castShadow).toBe(false)
+    expect(floor.position.z).toBeLessThan(bounds.min.z)
+    expect(floor.scale.x).toBe(7)
+    expect(floor.scale.y).toBe(7)
+
+    object.geometry.dispose()
+    ;(object.material as THREE.Material).dispose()
+    floor.geometry.dispose()
+    floor.material.dispose()
+  })
+
+  it('builds an isolated final scene with its own resources and HDR environment reference', () => {
+    const environment = new THREE.Texture()
+    environment.name = 'Test_HDR'
+    const first = createFinalRenderScene(
+      meshFixture(),
+      'height',
+      createDefaultAppearanceSettings(),
+      environment,
+    )
+    const second = createFinalRenderScene(meshFixture(), 'height')
+
+    expect(first.scene.name).toBe('Rasterform_FinalRender')
+    expect(first.scene.environment).toBe(environment)
+    expect(first.scene.background).toBeInstanceOf(THREE.Color)
+    expect((first.scene.background as THREE.Color).getHex()).toBe(0x080a0e)
+    expect(first.scene.children).toContain(first.object)
+    expect(first.scene.children).toContain(first.floor)
+    expect(first.floor.position.z).toBeLessThan(0)
+    expect(first.lights.fill).toBeInstanceOf(THREE.RectAreaLight)
+    expect(first.object.geometry).not.toBe(second.object.geometry)
+    expect(first.object.material).not.toBe(second.object.material)
+    expect(second.scene.environment).toBeNull()
+
+    for (const renderScene of [first, second]) {
+      renderScene.object.geometry.dispose()
+      ;(renderScene.object.material as THREE.Material).dispose()
+      renderScene.floor.geometry.dispose()
+      renderScene.floor.material.dispose()
+    }
+    environment.dispose()
   })
 })

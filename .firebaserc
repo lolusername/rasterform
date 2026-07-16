@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "data-viz-abarreda"
+  },
+  "targets": {
+    "data-viz-abarreda": {
+      "hosting": {
+        "rasterform": [
+          "rasterform-atilio"
+        ]
+      }
+    }
+  }
+}

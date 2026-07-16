@@ -7,6 +7,7 @@ import { createDemoImage, drawPixelImage, drawScalarField, fileToPixelImage } fr
 import { buildMesh } from './lib/mesh'
 import { inspectTopology } from './lib/topology'
 import { downloadBlob, exportGlb, exportHeightPng, exportRecipe, exportStl } from './lib/export'
+import type { ProgressiveRenderSnapshot } from './lib/progressive-render'
 import { createDefaultAppearanceSettings } from './lib/three'
 import type {
   AppearanceSettings,
@@ -19,15 +20,25 @@ import type {
   HeightSource,
   MeshSettings,
   Recipe,
+  RenderMode,
   ViewportExportLongEdge,
+  ViewportSupersample,
 } from './types'
 
 interface ThreePreviewHandle {
-  captureTransparentPng: (longEdge: ViewportExportLongEdge) => Promise<{
+  captureTransparentPng: (longEdge: ViewportExportLongEdge, supersample: ViewportSupersample) => Promise<{
     blob: Blob
     width: number
     height: number
     dpi: number
+    supersample: ViewportSupersample
+  }>
+  captureFinalPng: () => Promise<{
+    blob: Blob
+    width: number
+    height: number
+    dpi: number
+    samples: number
   }>
 }
 
@@ -39,9 +50,20 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const status = ref('Demo image · 360 × 270')
 const exporting = ref(false)
 const exportingViewport = ref(false)
+const exportingFinal = ref(false)
 const dragging = ref(false)
 const colorMode = ref<ColorMode>('original')
+const renderMode = ref<RenderMode>('realtime')
 const viewportExportLongEdge = ref<ViewportExportLongEdge>(4096)
+const viewportSupersample = ref<ViewportSupersample>(2)
+const finalTargetSamples = 64
+const finalRender = reactive<ProgressiveRenderSnapshot>({
+  state: 'idle',
+  samples: 0,
+  targetSamples: finalTargetSamples,
+  preparation: 0,
+  error: '',
+})
 const appearance = reactive<AppearanceSettings>(createDefaultAppearanceSettings())
 let channelSequence = 0
 
@@ -169,6 +191,19 @@ const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
 const gradientPreviewStyle = computed(() => ({
   background: `linear-gradient(90deg, ${appearance.heightGradient.low} 0%, ${appearance.heightGradient.mid} ${Math.round(appearance.heightGradient.midpoint * 100)}%, ${appearance.heightGradient.high} 100%)`,
 }))
+const finalRenderLabel = computed(() => {
+  switch (finalRender.state) {
+    case 'preparing': return `Building render scene · ${Math.round(finalRender.preparation * 100)}%`
+    case 'rendering': return `Path tracing · ${finalRender.samples} / ${finalRender.targetSamples} spp`
+    case 'complete': return `Final render · ${finalRender.samples} spp`
+    case 'error': return finalRender.error || 'Final render unavailable'
+    default: return 'Final render idle'
+  }
+})
+const finalRenderProgress = computed(() => finalRender.state === 'preparing'
+  ? finalRender.preparation * finalRender.targetSamples
+  : finalRender.samples)
+const canDownloadFinal = computed(() => renderMode.value === 'final' && finalRender.samples > 0)
 
 const rawField = computed(() => composeChannelStack(image.value, channelLayers))
 const heightField = computed(() => processScalarField(rawField.value, fieldSettings))
@@ -193,6 +228,32 @@ function sourceLabel(source: HeightSource): string {
 
 function blendLabel(blend: ChannelBlendMode): string {
   return blendModes.find((item) => item.value === blend)?.label ?? blend
+}
+
+function selectColorMode(mode: ColorMode) {
+  if (mode === 'wireframe' && renderMode.value === 'final') {
+    renderMode.value = 'realtime'
+    status.value = 'Wireframe uses the interactive renderer.'
+  }
+  colorMode.value = mode
+}
+
+function selectRenderMode(mode: RenderMode) {
+  if (mode === 'final' && colorMode.value === 'wireframe') {
+    status.value = 'Choose Photo, Height, or Clay before starting Final Render.'
+    return
+  }
+  renderMode.value = mode
+  if (mode === 'final') status.value = 'Preparing progressive Final Render…'
+}
+
+function handleFinalProgress(snapshot: ProgressiveRenderSnapshot) {
+  Object.assign(finalRender, snapshot)
+}
+
+function handleFinalInvalidated() {
+  renderMode.value = 'realtime'
+  status.value = 'Final Render stopped because the scene changed. Start it again when ready.'
 }
 
 function addChannel() {
@@ -289,7 +350,7 @@ async function downloadGlb() {
   status.value = 'Exporting GLB…'
   try {
     await exportGlb(mesh.value, colorMode.value, appearance)
-    status.value = 'GLB exported'
+    status.value = 'GLB exported for Blender / Cycles'
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'GLB export failed.'
   } finally {
@@ -306,16 +367,30 @@ function downloadStl() {
 async function downloadViewportPng() {
   if (!threePreview.value) return
   exportingViewport.value = true
-  status.value = `Rendering ${viewportExportLongEdge.value / 1024}K PNG…`
+  status.value = `Rendering ${viewportExportLongEdge.value / 1024}K PNG · ${viewportSupersample.value}× supersampling…`
   try {
-    const result = await threePreview.value.captureTransparentPng(viewportExportLongEdge.value)
+    const result = await threePreview.value.captureTransparentPng(viewportExportLongEdge.value, viewportSupersample.value)
     const view = previewModes.find((mode) => mode.value === colorMode.value)?.label.toLowerCase() ?? colorMode.value
     downloadBlob(`rasterform-${view}-${result.width}x${result.height}-transparent.png`, result.blob)
-    status.value = `PNG · ${result.width} × ${result.height} · transparent · ${result.dpi} PPI`
+    status.value = `PNG · ${result.width} × ${result.height} · ${result.supersample}× SSAA · transparent · ${result.dpi} PPI`
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'Viewport PNG failed.'
   } finally {
     exportingViewport.value = false
+  }
+}
+
+async function downloadFinalPng() {
+  if (!threePreview.value || !canDownloadFinal.value) return
+  exportingFinal.value = true
+  try {
+    const result = await threePreview.value.captureFinalPng()
+    downloadBlob(`rasterform-final-${result.samples}spp-${result.width}x${result.height}.png`, result.blob)
+    status.value = `Final PNG · ${result.width} × ${result.height} · ${result.samples} spp · ${result.dpi} PPI`
+  } catch (error) {
+    status.value = error instanceof Error ? error.message : 'Final Render PNG failed.'
+  } finally {
+    exportingFinal.value = false
   }
 }
 </script>
@@ -484,8 +559,12 @@ async function downloadViewportPng() {
             <strong>{{ activeGeometry.label }} / {{ stackSummary }}</strong>
           </div>
           <div class="preview-tools">
+            <div class="render-switcher" role="group" aria-label="Rendering mode">
+              <button type="button" :aria-pressed="renderMode === 'realtime'" @click="selectRenderMode('realtime')">Interactive</button>
+              <button type="button" :aria-pressed="renderMode === 'final'" :disabled="colorMode === 'wireframe'" @click="selectRenderMode('final')">Final render</button>
+            </div>
             <div class="view-switcher" role="group" aria-label="Viewport material">
-              <button v-for="mode in previewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="colorMode = mode.value">
+              <button v-for="mode in previewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">
                 {{ mode.label }}
               </button>
             </div>
@@ -494,6 +573,11 @@ async function downloadViewportPng() {
               <select id="viewport-export-size" v-model.number="viewportExportLongEdge" aria-label="Transparent PNG size">
                 <option :value="4096">4K · 4096px</option>
                 <option :value="8192">8K · 8192px</option>
+              </select>
+              <label class="sr-only" for="viewport-export-quality">PNG antialiasing quality</label>
+              <select id="viewport-export-quality" v-model.number="viewportSupersample" aria-label="Transparent PNG supersampling">
+                <option :value="1">1× · Fast</option>
+                <option :value="2">2× · SSAA</option>
               </select>
               <button type="button" :disabled="exportingViewport" @click="downloadViewportPng">
                 {{ exportingViewport ? 'Rendering…' : 'Transparent PNG' }}
@@ -545,7 +629,25 @@ async function downloadViewportPng() {
         </div>
 
         <div class="three-stage">
-          <ThreePreview ref="threePreview" :mesh="mesh" :color-mode="colorMode" :appearance="appearance" />
+          <ThreePreview
+            ref="threePreview"
+            :mesh="mesh"
+            :color-mode="colorMode"
+            :appearance="appearance"
+            :render-mode="renderMode"
+            :final-target-samples="finalTargetSamples"
+            @final-progress="handleFinalProgress"
+            @final-invalidated="handleFinalInvalidated"
+          />
+          <div v-if="renderMode === 'final'" :class="['final-render-meter', { 'has-error': finalRender.state === 'error' }]">
+            <div>
+              <span>{{ finalRenderLabel }}</span>
+              <progress :value="finalRenderProgress" :max="finalRender.targetSamples">{{ finalRenderProgress }}</progress>
+            </div>
+            <button type="button" :disabled="!canDownloadFinal || exportingFinal" @click="downloadFinalPng">
+              {{ exportingFinal ? 'Saving…' : 'Save final PNG' }}
+            </button>
+          </div>
           <div v-if="dragging" class="drop-curtain">Drop image</div>
         </div>
 
@@ -591,7 +693,7 @@ async function downloadViewportPng() {
             <p role="status" aria-live="polite">{{ status }}</p>
           </div>
           <div class="export-actions">
-            <button type="button" class="export-button primary" :disabled="exporting" @click="downloadGlb">{{ exporting ? 'Exporting…' : 'Export GLB' }}</button>
+            <button type="button" class="export-button primary" :disabled="exporting" @click="downloadGlb">{{ exporting ? 'Exporting…' : 'GLB for Blender / Cycles' }}</button>
             <button type="button" class="export-button" :disabled="!topology.watertight" @click="downloadStl">Export STL</button>
             <button type="button" class="export-button" @click="exportHeightPng(heightField)">Height PNG</button>
             <button type="button" class="export-button" @click="exportRecipe(recipe())">Recipe JSON</button>

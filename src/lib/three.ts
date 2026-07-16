@@ -1,5 +1,32 @@
 import * as THREE from 'three'
+import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js'
 import type { AppearanceSettings, ClayFinish, ColorMode, HeightGradientSettings, MeshData } from '../types'
+
+export type StudioFloor = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>
+
+export interface StudioLighting {
+  hemisphere: THREE.HemisphereLight
+  key: THREE.DirectionalLight
+  fill: THREE.RectAreaLight
+  rim: THREE.RectAreaLight
+  keyTarget: THREE.Object3D
+}
+
+export interface FinalRenderScene {
+  scene: THREE.Scene
+  object: THREE.Mesh
+  floor: StudioFloor
+  lights: StudioLighting
+}
+
+/** Apply the same color-management and shadow settings to live and export renderers. */
+export function configureStudioRenderer(renderer: THREE.WebGLRenderer): void {
+  renderer.outputColorSpace = THREE.SRGBColorSpace
+  renderer.toneMapping = THREE.AgXToneMapping
+  renderer.toneMappingExposure = 1.15
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+}
 
 export function createDefaultAppearanceSettings(): AppearanceSettings {
   return {
@@ -99,15 +126,106 @@ export function createThreeMesh(
     createMaterial(colorMode, appearance),
   )
   object.name = `Rasterform_${mesh.mode}`
+  object.castShadow = true
+  object.receiveShadow = true
   return object
 }
 
-export function addStudioLighting(scene: THREE.Scene): void {
-  scene.add(new THREE.HemisphereLight(0xfff4df, 0x283141, 2.2))
-  const key = new THREE.DirectionalLight(0xffffff, 3.1)
-  key.position.set(-2.4, -1.4, 4)
-  scene.add(key)
-  const rim = new THREE.DirectionalLight(0xb9d7ff, 1.8)
-  rim.position.set(3, 2, 1.5)
-  scene.add(rim)
+/** A neutral, rough receiver that grounds the relief without competing with its color. */
+export function createStudioFloor(): StudioFloor {
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshStandardMaterial({
+      color: 0x171a1f,
+      roughness: 0.92,
+      metalness: 0.02,
+      side: THREE.FrontSide,
+    }),
+  )
+  floor.name = 'Rasterform_StudioFloor'
+  floor.receiveShadow = true
+  floor.castShadow = false
+  return floor
+}
+
+/** Place and scale the studio floor from the relief's world-space bounds. */
+export function placeStudioFloor<T extends THREE.Mesh>(floor: T, meshObject: THREE.Object3D): T {
+  meshObject.updateWorldMatrix(true, true)
+  const bounds = new THREE.Box3().setFromObject(meshObject)
+  if (bounds.isEmpty()) {
+    floor.position.set(0, 0, -0.05)
+    floor.scale.set(6, 6, 1)
+    floor.updateMatrixWorld(true)
+    return floor
+  }
+
+  const size = bounds.getSize(new THREE.Vector3())
+  const center = bounds.getCenter(new THREE.Vector3())
+  const largestDimension = Math.max(size.x, size.y, size.z, 1)
+  const clearance = Math.max(0.025, size.z * 0.05)
+  const floorSize = largestDimension * 3.5
+  floor.position.set(center.x, center.y, bounds.min.z - clearance)
+  floor.scale.set(floorSize, floorSize, 1)
+  floor.updateMatrixWorld(true)
+  return floor
+}
+
+/** Add named, inspectable studio lights. The directional key provides soft shadows. */
+export function addStudioLighting(scene: THREE.Scene): StudioLighting {
+  RectAreaLightUniformsLib.init()
+
+  const hemisphere = new THREE.HemisphereLight(0xfff3df, 0x172033, 0.65)
+  hemisphere.name = 'Rasterform_Hemisphere'
+
+  const key = new THREE.DirectionalLight(0xfff7ed, 3.4)
+  key.name = 'Rasterform_Key'
+  key.position.set(-3.2, 3.8, 5.8)
+  key.castShadow = true
+  key.shadow.mapSize.set(2048, 2048)
+  key.shadow.bias = -0.0002
+  key.shadow.normalBias = 0.025
+  key.shadow.camera.near = 0.1
+  key.shadow.camera.far = 20
+  key.shadow.camera.left = -3.5
+  key.shadow.camera.right = 3.5
+  key.shadow.camera.top = 3.5
+  key.shadow.camera.bottom = -3.5
+
+  const keyTarget = new THREE.Object3D()
+  keyTarget.name = 'Rasterform_KeyTarget'
+  keyTarget.position.set(0, 0, 0.12)
+  key.target = keyTarget
+
+  const fill = new THREE.RectAreaLight(0xc9ddff, 7.5, 4.5, 4.5)
+  fill.name = 'Rasterform_Fill'
+  fill.position.set(3.6, 0.8, 3.8)
+  fill.lookAt(0, 0, 0.1)
+
+  const rim = new THREE.RectAreaLight(0xffc8a8, 9, 3, 4)
+  rim.name = 'Rasterform_Rim'
+  rim.position.set(-1.4, 2.6, -3.2)
+  rim.lookAt(0, 0, 0.15)
+
+  scene.add(hemisphere, key, keyTarget, fill, rim)
+  return { hemisphere, key, fill, rim, keyTarget }
+}
+
+/** Build an isolated scene so final rendering never mutates the interactive viewport. */
+export function createFinalRenderScene(
+  mesh: MeshData,
+  colorMode: ColorMode,
+  appearance: AppearanceSettings = createDefaultAppearanceSettings(),
+  environment: THREE.Texture | null = null,
+): FinalRenderScene {
+  const scene = new THREE.Scene()
+  scene.name = 'Rasterform_FinalRender'
+  scene.background = new THREE.Color(0x080a0e)
+  scene.environment = environment
+  scene.environmentIntensity = environment ? 0.85 : 1
+
+  const object = createThreeMesh(mesh, colorMode, appearance)
+  const floor = placeStudioFloor(createStudioFloor(), object)
+  scene.add(object, floor)
+  const lights = addStudioLighting(scene)
+  return { scene, object, floor, lights }
 }

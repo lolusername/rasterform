@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { ViewportExportLongEdge } from '../types'
+import type { ViewportExportLongEdge, ViewportSupersample } from '../types'
 
 export const GUIDE_LAYER = 31
 export const PNG_DPI = 300
@@ -17,6 +17,7 @@ export interface RenderTile extends ViewportDimensions {
 export interface ViewportPngResult extends ViewportDimensions {
   blob: Blob
   dpi: number
+  supersample: ViewportSupersample
 }
 
 export interface ViewportExportRuntime {
@@ -153,6 +154,7 @@ export async function renderTransparentViewportPng(options: {
   viewportWidth: number
   viewportHeight: number
   longEdge: ViewportExportLongEdge
+  supersample?: ViewportSupersample
   runtime?: ViewportExportRuntime
 }): Promise<ViewportPngResult> {
   const { width, height } = calculateViewportDimensions(
@@ -160,6 +162,7 @@ export async function renderTransparentViewportPng(options: {
     options.viewportHeight,
     options.longEdge,
   )
+  const supersample = options.supersample ?? 2
   const runtime = options.runtime ?? {
     createCanvas: () => document.createElement('canvas'),
     createRenderer: (canvas: HTMLCanvasElement) => new THREE.WebGLRenderer({
@@ -178,6 +181,8 @@ export async function renderTransparentViewportPng(options: {
     throw new Error(`${options.longEdge / 1024}K canvas unavailable. Try 4K.`)
   }
   output.clearRect(0, 0, width, height)
+  output.imageSmoothingEnabled = true
+  output.imageSmoothingQuality = 'high'
 
   const tileCanvas = runtime.createCanvas()
   let tileRenderer: THREE.WebGLRenderer | null = null
@@ -195,14 +200,20 @@ export async function renderTransparentViewportPng(options: {
 
     const gl = tileRenderer.getContext()
     const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array
-    const tileEdge = Math.max(1, Math.min(
+    const renderTileEdge = Math.max(1, Math.min(
       2048,
       Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 2048,
       Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 2048,
       Number(viewport[0]) || 2048,
       Number(viewport[1]) || 2048,
     ))
+    if (renderTileEdge < supersample) {
+      throw new Error(`The GPU viewport limit is too small for ${supersample}× supersampling.`)
+    }
+    const tileEdge = Math.max(1, Math.floor(renderTileEdge / supersample))
     const tiles = calculateRenderTiles(width, height, tileEdge)
+    const renderWidth = width * supersample
+    const renderHeight = height * supersample
     const exportCamera = options.camera.clone()
     exportCamera.aspect = width / height
     exportCamera.clearViewOffset()
@@ -212,16 +223,29 @@ export async function renderTransparentViewportPng(options: {
     options.scene.updateMatrixWorld(true)
 
     for (const tile of tiles) {
-      tileRenderer.setSize(tile.width, tile.height, false)
-      exportCamera.setViewOffset(width, height, tile.x, tile.y, tile.width, tile.height)
+      const supersampledTile = {
+        x: tile.x * supersample,
+        y: tile.y * supersample,
+        width: tile.width * supersample,
+        height: tile.height * supersample,
+      }
+      tileRenderer.setSize(supersampledTile.width, supersampledTile.height, false)
+      exportCamera.setViewOffset(
+        renderWidth,
+        renderHeight,
+        supersampledTile.x,
+        supersampledTile.y,
+        supersampledTile.width,
+        supersampledTile.height,
+      )
       exportCamera.updateProjectionMatrix()
       tileRenderer.render(options.scene, exportCamera)
       output.drawImage(
         tileRenderer.domElement,
         0,
         0,
-        tile.width,
-        tile.height,
+        supersampledTile.width,
+        supersampledTile.height,
         tile.x,
         tile.y,
         tile.width,
@@ -234,7 +258,13 @@ export async function renderTransparentViewportPng(options: {
     const png = setPngDensity(new Uint8Array(await raw.arrayBuffer()), PNG_DPI)
     const payload = new ArrayBuffer(png.byteLength)
     new Uint8Array(payload).set(png)
-    return { blob: new Blob([payload], { type: 'image/png' }), width, height, dpi: PNG_DPI }
+    return {
+      blob: new Blob([payload], { type: 'image/png' }),
+      width,
+      height,
+      dpi: PNG_DPI,
+      supersample,
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : 'Unknown rendering error.'
     throw new Error(`Viewport PNG failed: ${detail}`)
