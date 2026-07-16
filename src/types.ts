@@ -1,0 +1,106 @@
+export type HeightSource =
+  | 'luminance'
+  | 'hue'
+  | 'saturation'
+  | 'value'
+  | 'red'
+  | 'green'
+  | 'blue'
+  | 'alpha'
+  | 'edges'
+
+export type GeometryMode = 'plane' | 'centered' | 'solid'
+export type ColorMode = 'original' | 'height' | 'clay' | 'wireframe'
+export type ChannelBlendMode = 'normal' | 'add' | 'subtract' | 'multiply' | 'screen' | 'max' | 'min'
+export type ClayFinish = 'matte' | 'glossy' | 'metallic'
+export type ViewportExportLongEdge = 4096 | 8192
+
+export interface PixelImage {
+  width: number
+  height: number
+  data: Uint8ClampedArray
+  name: string
+}
+
+export interface ScalarField {
+  width: number
+  height: number
+  values: Float32Array
+}
+
+export interface FieldSettings {
+  invert: boolean
+  blur: number
+  contrast: number
+  quantize: number
+}
+
+export interface ChannelLayer {
+  id: string
+  source: HeightSource
+  blend: ChannelBlendMode
+  amount: number
+  invert: boolean
+  hueOrigin: number
+  enabled: boolean
+}
+
+export interface HeightGradientSettings {
+  low: string
+  mid: string
+  high: string
+  midpoint: number
+}
+
+export interface ClaySettings {
+  color: string
+  finish: ClayFinish
+}
+
+export interface AppearanceSettings {
+  heightGradient: HeightGradientSettings
+  clay: ClaySettings
+}
+
+export interface MeshSettings {
+  mode: GeometryMode
+  resolution: number
+  depth: number
+  midpoint: number
+  baseThickness: number
+}
+
+export interface MeshData {
+  positions: Float32Array
+  indices: Uint32Array
+  colors: Float32Array
+  uvs: Float32Array
+  heights: Float32Array
+  width: number
+  height: number
+  mode: GeometryMode
+}
+
+export interface TopologyReport {
+  vertices: number
+  edges: number
+  faces: number
+  boundaryEdges: number
+  boundaryLoops: number
+  connectedComponents: number
+  nonManifoldEdges: number
+  eulerCharacteristic: number
+  watertight: boolean
+  degenerateFaces: number
+}
+
+export interface Recipe {
+  version: 3
+  app: 'Rasterform'
+  image: { name: string; width: number; height: number }
+  channels: ChannelLayer[]
+  field: FieldSettings
+  mesh: MeshSettings
+  appearance: AppearanceSettings
+  createdAt: string
+}
