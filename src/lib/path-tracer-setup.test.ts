@@ -52,4 +52,23 @@ describe('path tracer scene setup', () => {
 
     expect(events).toEqual(['set-worker', 'build-scene', 'dispose-worker'])
   })
+
+  it('disposes the worker even when worker registration itself fails', async () => {
+    const worker = { generate: vi.fn(), dispose: vi.fn() }
+    const tracer = {
+      setBVHWorker: vi.fn(() => { throw new Error('Worker unavailable') }),
+      setSceneAsync: vi.fn(),
+    }
+
+    await expect(buildPathTracingScene(
+      tracer as unknown as WebGLPathTracer,
+      worker as unknown as BVHWorker & { dispose: () => void },
+      {} as Scene,
+      {} as Camera,
+      vi.fn(),
+    )).rejects.toThrow('Worker unavailable')
+
+    expect(worker.dispose).toHaveBeenCalledOnce()
+    expect(tracer.setSceneAsync).not.toHaveBeenCalled()
+  })
 })

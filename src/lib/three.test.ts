@@ -170,8 +170,9 @@ describe('studio rendering', () => {
     expect((first.scene.background as THREE.Color).getHex()).toBe(0x080a0e)
     expect(first.scene.children).toContain(first.object)
     expect(first.scene.children).toContain(first.floor)
-    expect(first.floor.position.z).toBeLessThan(0)
+    expect(first.floor!.position.z).toBeLessThan(0)
     expect(first.lights.fill).toBeInstanceOf(THREE.RectAreaLight)
+    expect(first.lights.hemisphere.intensity).toBe(0)
     expect(first.object.geometry).not.toBe(second.object.geometry)
     expect(first.object.material).not.toBe(second.object.material)
     expect(second.scene.environment).toBeNull()
@@ -179,9 +180,30 @@ describe('studio rendering', () => {
     for (const renderScene of [first, second]) {
       renderScene.object.geometry.dispose()
       ;(renderScene.object.material as THREE.Material).dispose()
-      renderScene.floor.geometry.dispose()
-      renderScene.floor.material.dispose()
+      renderScene.floor?.geometry.dispose()
+      renderScene.floor?.material.dispose()
     }
+    environment.dispose()
+  })
+
+  it('keeps HDR lighting but removes the background and floor for transparent image exports', () => {
+    const environment = new THREE.Texture()
+    const renderScene = createFinalRenderScene(
+      meshFixture(),
+      'original',
+      createDefaultAppearanceSettings(),
+      environment,
+      'transparent',
+    )
+
+    expect(renderScene.scene.background).toBeNull()
+    expect(renderScene.scene.environment).toBe(environment)
+    expect(renderScene.floor).toBeNull()
+    expect(renderScene.scene.children).toContain(renderScene.object)
+    expect(renderScene.scene.getObjectByName('Rasterform_StudioFloor')).toBeUndefined()
+
+    renderScene.object.geometry.dispose()
+    ;(renderScene.object.material as THREE.Material).dispose()
     environment.dispose()
   })
 })

@@ -13,8 +13,9 @@ export type GeometryMode = 'plane' | 'centered' | 'solid'
 export type ColorMode = 'original' | 'height' | 'clay' | 'wireframe'
 export type ChannelBlendMode = 'normal' | 'add' | 'subtract' | 'multiply' | 'screen' | 'max' | 'min'
 export type ClayFinish = 'matte' | 'glossy' | 'metallic'
-export type RenderMode = 'realtime' | 'final'
-export type ViewportExportLongEdge = 4096 | 8192
+export type ImageExportQuality = 'high' | 'final'
+export type ImageExportBackground = 'transparent' | 'studio'
+export type ImageExportLongEdge = 2048 | 4096 | 8192
 export type ViewportSupersample = 1 | 2
 
 export interface PixelImage {

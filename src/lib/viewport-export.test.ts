@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import {
   GUIDE_LAYER,
+  assertCanvasHasTransparentBackground,
+  assertPngContract,
   calculateRenderTiles,
   calculateViewportDimensions,
-  renderTransparentViewportPng,
+  inspectPngHeader,
+  padRenderTile,
+  renderViewportPng,
   setPngDensity,
 } from './viewport-export'
 import type { ViewportExportRuntime } from './viewport-export'
@@ -18,10 +22,16 @@ function pngChunk(type: string, data: Uint8Array): Uint8Array {
   return chunk
 }
 
-function samplePngWithDensity(): Uint8Array {
+function samplePngWithDensity(width = 1, height = 1, colorType = 6): Uint8Array {
+  const header = new Uint8Array(13)
+  const headerView = new DataView(header.buffer)
+  headerView.setUint32(0, width, false)
+  headerView.setUint32(4, height, false)
+  header[8] = 8
+  header[9] = colorType
   const parts = [
     new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
-    pngChunk('IHDR', new Uint8Array(13)),
+    pngChunk('IHDR', header),
     pngChunk('pHYs', new Uint8Array(9)),
     pngChunk('IEND', new Uint8Array()),
   ]
@@ -55,6 +65,13 @@ describe('transparent viewport export', () => {
     expect(tiles.at(-1)).toEqual({ x: 6, y: 3, width: 1, height: 2 })
   })
 
+  it('adds bounded gutters around internal High-quality tiles', () => {
+    expect(padRenderTile({ x: 0, y: 0, width: 1020, height: 1020 }, 4096, 4096, 2))
+      .toMatchObject({ renderX: 0, renderY: 0, renderWidth: 1022, renderHeight: 1022 })
+    expect(padRenderTile({ x: 1020, y: 1020, width: 1020, height: 1020 }, 4096, 4096, 2))
+      .toMatchObject({ renderX: 1018, renderY: 1018, renderWidth: 1024, renderHeight: 1024 })
+  })
+
   it('excludes the guide layer while retaining the mesh layer', () => {
     const liveCamera = new THREE.PerspectiveCamera()
     liveCamera.layers.enable(GUIDE_LAYER)
@@ -78,6 +95,12 @@ describe('transparent viewport export', () => {
     const outputContext = {
       clearRect: () => undefined,
       drawImage: (...args: unknown[]) => draws.push(args),
+      save: () => undefined,
+      beginPath: () => undefined,
+      rect: () => undefined,
+      clip: () => undefined,
+      restore: () => undefined,
+      getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 0]) }),
     } as unknown as CanvasRenderingContext2D
 
     function fakeCanvas(context: CanvasRenderingContext2D | null): HTMLCanvasElement {
@@ -90,7 +113,7 @@ describe('transparent viewport export', () => {
         set height(value: number) { height = value },
         getContext: (kind: string) => kind === '2d' ? context : null,
         toBlob: (callback: BlobCallback) => {
-          const bytes = samplePngWithDensity()
+          const bytes = samplePngWithDensity(width, height)
           const payload = new ArrayBuffer(bytes.byteLength)
           new Uint8Array(payload).set(bytes)
           callback(new Blob([payload], { type: 'image/png' }))
@@ -102,8 +125,7 @@ describe('transparent viewport export', () => {
     const guide = new THREE.Object3D()
     guide.layers.set(GUIDE_LAYER)
     const scene = new THREE.Scene()
-    const liveBackground = new THREE.Color('#123456')
-    scene.background = liveBackground
+    scene.background = null
     scene.add(guide, new THREE.Object3D())
     const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100)
     camera.layers.enable(GUIDE_LAYER)
@@ -151,13 +173,12 @@ describe('transparent viewport export', () => {
       createRenderer: () => fakeRenderer,
     }
 
-    const result = await renderTransparentViewportPng({
+    const result = await renderViewportPng({
       scene,
       camera,
       liveRenderer,
-      viewportWidth: 1000,
-      viewportHeight: 1000,
-      longEdge: 4096,
+      width: 4096,
+      height: 4096,
       supersample: 1,
       runtime,
     })
@@ -171,7 +192,7 @@ describe('transparent viewport export', () => {
     expect(renderViews.every((view) => !view.guideVisible && view.background === null)).toBe(true)
     expect(draws.map((args) => [args[5], args[6]])).toEqual([[0, 0], [2048, 0], [0, 2048], [2048, 2048]])
     expect(clearAlpha).toBe(0)
-    expect(scene.background).toBe(liveBackground)
+    expect(scene.background).toBeNull()
     expect(camera.position.toArray()).toEqual([2, -2, 3])
     expect(disposed).toBe(true)
     expect(contextLost).toBe(true)
@@ -179,6 +200,7 @@ describe('transparent viewport export', () => {
 
   it('renders a default 2× 4K export in GPU-safe tiles with complete logical coverage', async () => {
     const draws: number[][] = []
+    const clips: number[][] = []
     const renderSizes: Array<[number, number]> = []
     const renderViews: Array<{
       fullWidth: number
@@ -193,10 +215,16 @@ describe('transparent viewport export', () => {
     const outputContext = {
       clearRect: () => undefined,
       drawImage: (...args: unknown[]) => draws.push(args.slice(1).map(Number)),
+      save: () => undefined,
+      beginPath: () => undefined,
+      rect: (...args: number[]) => clips.push(args),
+      clip: () => undefined,
+      restore: () => undefined,
       get imageSmoothingEnabled() { return smoothingEnabled },
       set imageSmoothingEnabled(value: boolean) { smoothingEnabled = value },
       get imageSmoothingQuality() { return smoothingQuality },
       set imageSmoothingQuality(value: ImageSmoothingQuality) { smoothingQuality = value },
+      getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 0]) }),
     } as unknown as CanvasRenderingContext2D
 
     function fakeCanvas(context: CanvasRenderingContext2D | null): HTMLCanvasElement {
@@ -209,7 +237,7 @@ describe('transparent viewport export', () => {
         set height(value: number) { height = value },
         getContext: (kind: string) => kind === '2d' ? context : null,
         toBlob: (callback: BlobCallback) => {
-          const bytes = samplePngWithDensity()
+          const bytes = samplePngWithDensity(width, height)
           const payload = new ArrayBuffer(bytes.byteLength)
           new Uint8Array(payload).set(bytes)
           callback(new Blob([payload], { type: 'image/png' }))
@@ -265,55 +293,47 @@ describe('transparent viewport export', () => {
       createRenderer: () => fakeRenderer,
     }
 
-    const result = await renderTransparentViewportPng({
+    const result = await renderViewportPng({
       scene: new THREE.Scene(),
       camera: new THREE.PerspectiveCamera(38, 1, 0.01, 100),
       liveRenderer,
-      viewportWidth: 1000,
-      viewportHeight: 1000,
-      longEdge: 4096,
+      width: 4096,
+      height: 4096,
       runtime,
     })
 
     expect(result).toMatchObject({ width: 4096, height: 4096, dpi: 300, supersample: 2 })
     expect(smoothingEnabled).toBe(true)
     expect(smoothingQuality).toBe('high')
-    expect(renderSizes).toHaveLength(16)
-    expect(renderSizes.every(([width, height]) => width === 2048 && height === 2048)).toBe(true)
+    expect(renderSizes).toHaveLength(25)
+    expect(renderSizes.every(([width, height]) => width <= 2048 && height <= 2048)).toBe(true)
     expect(renderViews[0]).toEqual({
       fullWidth: 8192,
       fullHeight: 8192,
       x: 0,
       y: 0,
-      width: 2048,
-      height: 2048,
+      width: 2044,
+      height: 2044,
     })
     expect(renderViews.at(-1)).toEqual({
       fullWidth: 8192,
       fullHeight: 8192,
-      x: 6144,
-      y: 6144,
-      width: 2048,
-      height: 2048,
+      x: 8156,
+      y: 8156,
+      width: 36,
+      height: 36,
     })
-    expect(renderViews.map(({ x, y }) => [x, y])).toEqual([
-      [0, 0], [2048, 0], [4096, 0], [6144, 0],
-      [0, 2048], [2048, 2048], [4096, 2048], [6144, 2048],
-      [0, 4096], [2048, 4096], [4096, 4096], [6144, 4096],
-      [0, 6144], [2048, 6144], [4096, 6144], [6144, 6144],
-    ])
+    expect(renderViews[1]).toMatchObject({ x: 2036, y: 0, width: 2048, height: 2044 })
 
     const coverage = new Uint8Array(4096 * 4096)
-    for (const draw of draws) {
-      const [sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height] = draw
-      expect([sourceX, sourceY, sourceWidth, sourceHeight]).toEqual([0, 0, 2048, 2048])
-      expect([width, height]).toEqual([1024, 1024])
+    for (const [x, y, width, height] of clips) {
       for (let row = y!; row < y! + height!; row += 1) {
         for (let column = x!; column < x! + width!; column += 1) {
           coverage[row * 4096 + column] += 1
         }
       }
     }
+    expect(draws).toHaveLength(25)
     expect(coverage.every((count) => count === 1)).toBe(true)
   })
 
@@ -336,5 +356,27 @@ describe('transparent viewport export', () => {
     expect(view.getUint32(4, false)).toBe(11811)
     expect(view.getUint8(8)).toBe(1)
     expect(new DataView(png.buffer, png.byteOffset + densityOffset + 17, 4).getUint32(0, false)).toBe(0x78a53f76)
+  })
+
+  it('verifies encoded dimensions and an alpha-capable PNG color type', () => {
+    const rgba = samplePngWithDensity(4096, 2560, 6)
+    expect(inspectPngHeader(rgba)).toMatchObject({
+      width: 4096,
+      height: 2560,
+      bitDepth: 8,
+      colorType: 6,
+      hasAlpha: true,
+    })
+    expect(() => assertPngContract(rgba, 4096, 2560, true)).not.toThrow()
+    expect(() => assertPngContract(samplePngWithDensity(4096, 2560, 2), 4096, 2560, true))
+      .toThrow('no alpha channel')
+  })
+
+  it('refuses to label an image transparent when every sampled corner is opaque', () => {
+    const context = {
+      getImageData: () => ({ data: new Uint8ClampedArray([12, 20, 30, 255]) }),
+    } as unknown as CanvasRenderingContext2D
+    expect(() => assertCanvasHasTransparentBackground(context, 4096, 3072))
+      .toThrow('Transparency check failed')
   })
 })

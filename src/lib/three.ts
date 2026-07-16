@@ -1,6 +1,13 @@
 import * as THREE from 'three'
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js'
-import type { AppearanceSettings, ClayFinish, ColorMode, HeightGradientSettings, MeshData } from '../types'
+import type {
+  AppearanceSettings,
+  ClayFinish,
+  ColorMode,
+  HeightGradientSettings,
+  ImageExportBackground,
+  MeshData,
+} from '../types'
 
 export type StudioFloor = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>
 
@@ -15,7 +22,7 @@ export interface StudioLighting {
 export interface FinalRenderScene {
   scene: THREE.Scene
   object: THREE.Mesh
-  floor: StudioFloor
+  floor: StudioFloor | null
   lights: StudioLighting
 }
 
@@ -216,16 +223,31 @@ export function createFinalRenderScene(
   colorMode: ColorMode,
   appearance: AppearanceSettings = createDefaultAppearanceSettings(),
   environment: THREE.Texture | null = null,
+  background: ImageExportBackground = 'studio',
 ): FinalRenderScene {
   const scene = new THREE.Scene()
   scene.name = 'Rasterform_FinalRender'
-  scene.background = new THREE.Color(0x080a0e)
+  scene.background = background === 'transparent' ? null : new THREE.Color(0x080a0e)
   scene.environment = environment
   scene.environmentIntensity = environment ? 0.85 : 1
 
   const object = createThreeMesh(mesh, colorMode, appearance)
-  const floor = placeStudioFloor(createStudioFloor(), object)
-  scene.add(object, floor)
+  const floor = background === 'studio' ? placeStudioFloor(createStudioFloor(), object) : null
+  scene.add(object)
+  if (floor) scene.add(floor)
   const lights = addStudioLighting(scene)
+  // HemisphereLight is not represented by the path tracer; the shared HDR environment
+  // provides ambient fill so High and Final exports start from the same light rig.
+  lights.hemisphere.intensity = 0
   return { scene, object, floor, lights }
+}
+
+/** Dispose resources owned by an isolated image-render scene, never its shared HDR environment. */
+export function disposeFinalRenderScene(renderScene: FinalRenderScene): void {
+  renderScene.object.geometry.dispose()
+  const objectMaterial = renderScene.object.material
+  if (Array.isArray(objectMaterial)) objectMaterial.forEach((material) => material.dispose())
+  else objectMaterial.dispose()
+  renderScene.floor?.geometry.dispose()
+  renderScene.floor?.material.dispose()
 }

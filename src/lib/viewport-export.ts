@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { ViewportExportLongEdge, ViewportSupersample } from '../types'
+import type { ImageExportLongEdge, ViewportSupersample } from '../types'
 
 export const GUIDE_LAYER = 31
 export const PNG_DPI = 300
@@ -14,6 +14,13 @@ export interface RenderTile extends ViewportDimensions {
   y: number
 }
 
+export interface PaddedRenderTile extends RenderTile {
+  renderX: number
+  renderY: number
+  renderWidth: number
+  renderHeight: number
+}
+
 export interface ViewportPngResult extends ViewportDimensions {
   blob: Blob
   dpi: number
@@ -25,10 +32,18 @@ export interface ViewportExportRuntime {
   createRenderer: (canvas: HTMLCanvasElement) => THREE.WebGLRenderer
 }
 
+export interface PngHeader {
+  width: number
+  height: number
+  bitDepth: number
+  colorType: number
+  hasAlpha: boolean
+}
+
 export function calculateViewportDimensions(
   viewportWidth: number,
   viewportHeight: number,
-  longEdge: ViewportExportLongEdge,
+  longEdge: ImageExportLongEdge,
 ): ViewportDimensions {
   const sourceWidth = Math.max(1, Number.isFinite(viewportWidth) ? viewportWidth : 1)
   const sourceHeight = Math.max(1, Number.isFinite(viewportHeight) ? viewportHeight : 1)
@@ -62,6 +77,26 @@ export function calculateRenderTiles(width: number, height: number, tileEdge: nu
   return tiles
 }
 
+export function padRenderTile(
+  tile: RenderTile,
+  fullWidth: number,
+  fullHeight: number,
+  padding: number,
+): PaddedRenderTile {
+  const gutter = Math.max(0, Math.round(padding))
+  const renderX = Math.max(0, tile.x - gutter)
+  const renderY = Math.max(0, tile.y - gutter)
+  const renderRight = Math.min(fullWidth, tile.x + tile.width + gutter)
+  const renderBottom = Math.min(fullHeight, tile.y + tile.height + gutter)
+  return {
+    ...tile,
+    renderX,
+    renderY,
+    renderWidth: renderRight - renderX,
+    renderHeight: renderBottom - renderY,
+  }
+}
+
 const crcTable = (() => {
   const table = new Uint32Array(256)
   for (let value = 0; value < 256; value += 1) {
@@ -89,6 +124,50 @@ function chunkType(bytes: Uint8Array, offset: number): string {
     bytes[offset + 6] ?? 0,
     bytes[offset + 7] ?? 0,
   )
+}
+
+/** Read the encoded file contract instead of trusting the canvas element that produced it. */
+export function inspectPngHeader(bytes: Uint8Array): PngHeader {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10]
+  if (bytes.length < 33 || signature.some((value, index) => bytes[index] !== value)) {
+    throw new Error('The image encoder did not return a valid PNG.')
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (chunkType(bytes, 8) !== 'IHDR' || view.getUint32(8, false) !== 13) {
+    throw new Error('The PNG is missing a valid image header.')
+  }
+  let hasTransparencyChunk = false
+  let offset = 8
+  while (offset + 12 <= bytes.length) {
+    const length = view.getUint32(offset, false)
+    const type = chunkType(bytes, offset)
+    if (type === 'tRNS') hasTransparencyChunk = true
+    offset += length + 12
+    if (type === 'IEND') break
+  }
+  const colorType = bytes[25] ?? -1
+  return {
+    width: view.getUint32(16, false),
+    height: view.getUint32(20, false),
+    bitDepth: bytes[24] ?? 0,
+    colorType,
+    hasAlpha: colorType === 4 || colorType === 6 || hasTransparencyChunk,
+  }
+}
+
+export function assertPngContract(
+  bytes: Uint8Array,
+  width: number,
+  height: number,
+  transparent: boolean,
+): void {
+  const header = inspectPngHeader(bytes)
+  if (header.width !== width || header.height !== height) {
+    throw new Error(`PNG dimension check failed: expected ${width} × ${height}, got ${header.width} × ${header.height}.`)
+  }
+  if (transparent && !header.hasAlpha) {
+    throw new Error('Transparency check failed: the encoded PNG has no alpha channel.')
+  }
 }
 
 function createDensityChunk(dpi: number): Uint8Array {
@@ -147,21 +226,17 @@ async function canvasPng(canvas: HTMLCanvasElement): Promise<Blob> {
   return blob
 }
 
-export async function renderTransparentViewportPng(options: {
+export async function renderViewportPng(options: {
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   liveRenderer: THREE.WebGLRenderer
-  viewportWidth: number
-  viewportHeight: number
-  longEdge: ViewportExportLongEdge
+  width: number
+  height: number
   supersample?: ViewportSupersample
   runtime?: ViewportExportRuntime
 }): Promise<ViewportPngResult> {
-  const { width, height } = calculateViewportDimensions(
-    options.viewportWidth,
-    options.viewportHeight,
-    options.longEdge,
-  )
+  const width = Math.max(1, Math.round(options.width))
+  const height = Math.max(1, Math.round(options.height))
   const supersample = options.supersample ?? 2
   const runtime = options.runtime ?? {
     createCanvas: () => document.createElement('canvas'),
@@ -178,7 +253,8 @@ export async function renderTransparentViewportPng(options: {
   outputCanvas.height = height
   const output = outputCanvas.getContext('2d', { alpha: true })
   if (!output || outputCanvas.width !== width || outputCanvas.height !== height) {
-    throw new Error(`${options.longEdge / 1024}K canvas unavailable. Try 4K.`)
+    const size = Math.round(Math.max(width, height) / 1024)
+    throw new Error(`${size}K canvas unavailable. Try a smaller size.`)
   }
   output.clearRect(0, 0, width, height)
   output.imageSmoothingEnabled = true
@@ -186,9 +262,8 @@ export async function renderTransparentViewportPng(options: {
 
   const tileCanvas = runtime.createCanvas()
   let tileRenderer: THREE.WebGLRenderer | null = null
-  const liveBackground = options.scene.background
+  const transparent = options.scene.background === null
   try {
-    options.scene.background = null
     tileRenderer = runtime.createRenderer(tileCanvas)
     tileRenderer.setPixelRatio(1)
     tileRenderer.outputColorSpace = options.liveRenderer.outputColorSpace
@@ -196,7 +271,7 @@ export async function renderTransparentViewportPng(options: {
     tileRenderer.toneMappingExposure = options.liveRenderer.toneMappingExposure
     tileRenderer.shadowMap.enabled = options.liveRenderer.shadowMap.enabled
     tileRenderer.shadowMap.type = options.liveRenderer.shadowMap.type
-    tileRenderer.setClearColor(0x000000, 0)
+    tileRenderer.setClearColor(0x000000, transparent ? 0 : 1)
 
     const gl = tileRenderer.getContext()
     const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array
@@ -210,7 +285,8 @@ export async function renderTransparentViewportPng(options: {
     if (renderTileEdge < supersample) {
       throw new Error(`The GPU viewport limit is too small for ${supersample}× supersampling.`)
     }
-    const tileEdge = Math.max(1, Math.floor(renderTileEdge / supersample))
+    const gutter = supersample > 1 ? 2 : 0
+    const tileEdge = Math.max(1, Math.floor(renderTileEdge / supersample) - gutter * 2)
     const tiles = calculateRenderTiles(width, height, tileEdge)
     const renderWidth = width * supersample
     const renderHeight = height * supersample
@@ -223,11 +299,12 @@ export async function renderTransparentViewportPng(options: {
     options.scene.updateMatrixWorld(true)
 
     for (const tile of tiles) {
+      const paddedTile = padRenderTile(tile, width, height, gutter)
       const supersampledTile = {
-        x: tile.x * supersample,
-        y: tile.y * supersample,
-        width: tile.width * supersample,
-        height: tile.height * supersample,
+        x: paddedTile.renderX * supersample,
+        y: paddedTile.renderY * supersample,
+        width: paddedTile.renderWidth * supersample,
+        height: paddedTile.renderHeight * supersample,
       }
       tileRenderer.setSize(supersampledTile.width, supersampledTile.height, false)
       exportCamera.setViewOffset(
@@ -240,22 +317,27 @@ export async function renderTransparentViewportPng(options: {
       )
       exportCamera.updateProjectionMatrix()
       tileRenderer.render(options.scene, exportCamera)
+      output.save()
+      output.beginPath()
+      output.rect(tile.x, tile.y, tile.width, tile.height)
+      output.clip()
       output.drawImage(
         tileRenderer.domElement,
         0,
         0,
         supersampledTile.width,
         supersampledTile.height,
-        tile.x,
-        tile.y,
-        tile.width,
-        tile.height,
+        paddedTile.renderX,
+        paddedTile.renderY,
+        paddedTile.renderWidth,
+        paddedTile.renderHeight,
       )
+      output.restore()
     }
 
-    options.scene.background = liveBackground
     const raw = await canvasPng(outputCanvas)
     const png = setPngDensity(new Uint8Array(await raw.arrayBuffer()), PNG_DPI)
+    assertPngContract(png, width, height, transparent)
     const payload = new ArrayBuffer(png.byteLength)
     new Uint8Array(payload).set(png)
     return {
@@ -269,12 +351,29 @@ export async function renderTransparentViewportPng(options: {
     const detail = error instanceof Error ? error.message : 'Unknown rendering error.'
     throw new Error(`Viewport PNG failed: ${detail}`)
   } finally {
-    options.scene.background = liveBackground
     tileRenderer?.dispose()
     tileRenderer?.forceContextLoss()
     tileCanvas.width = 1
     tileCanvas.height = 1
     outputCanvas.width = 1
     outputCanvas.height = 1
+  }
+}
+
+/** Catch the most damaging export regression: a PNG advertised as transparent but filled opaque. */
+export function assertCanvasHasTransparentBackground(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): void {
+  const points = [
+    [0, 0],
+    [Math.max(0, width - 1), 0],
+    [0, Math.max(0, height - 1)],
+    [Math.max(0, width - 1), Math.max(0, height - 1)],
+  ] as const
+  const hasTransparentCorner = points.some(([x, y]) => context.getImageData(x, y, 1, 1).data[3] === 0)
+  if (!hasTransparentCorner) {
+    throw new Error('Transparency check failed: the PNG background is opaque.')
   }
 }

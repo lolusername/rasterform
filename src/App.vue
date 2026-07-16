@@ -7,8 +7,13 @@ import { createDemoImage, drawPixelImage, drawScalarField, fileToPixelImage } fr
 import { buildMesh } from './lib/mesh'
 import { inspectTopology } from './lib/topology'
 import { downloadBlob, exportGlb, exportHeightPng, exportRecipe, exportStl } from './lib/export'
-import type { ProgressiveRenderSnapshot } from './lib/progressive-render'
+import {
+  finalSampleTarget,
+  type FinalExportProgress,
+  type FinalImagePngResult,
+} from './lib/final-image-export'
 import { createDefaultAppearanceSettings } from './lib/three'
+import { calculateViewportDimensions, type ViewportPngResult } from './lib/viewport-export'
 import type {
   AppearanceSettings,
   ChannelBlendMode,
@@ -18,28 +23,23 @@ import type {
   FieldSettings,
   GeometryMode,
   HeightSource,
+  ImageExportBackground,
+  ImageExportLongEdge,
+  ImageExportQuality,
   MeshSettings,
   Recipe,
-  RenderMode,
-  ViewportExportLongEdge,
-  ViewportSupersample,
 } from './types'
 
 interface ThreePreviewHandle {
-  captureTransparentPng: (longEdge: ViewportExportLongEdge, supersample: ViewportSupersample) => Promise<{
-    blob: Blob
-    width: number
-    height: number
-    dpi: number
-    supersample: ViewportSupersample
-  }>
-  captureFinalPng: () => Promise<{
-    blob: Blob
-    width: number
-    height: number
-    dpi: number
-    samples: number
-  }>
+  captureHighPng: (
+    dimensions: { width: number; height: number },
+    background: ImageExportBackground,
+  ) => Promise<ViewportPngResult>
+  captureFinalPng: (
+    dimensions: { width: number; height: number },
+    background: ImageExportBackground,
+  ) => Promise<FinalImagePngResult>
+  cancelImageExport: () => void
 }
 
 const image = shallowRef(createDemoImage())
@@ -49,20 +49,23 @@ const heightCanvas = ref<HTMLCanvasElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const status = ref('Demo image · 360 × 270')
 const exporting = ref(false)
-const exportingViewport = ref(false)
-const exportingFinal = ref(false)
 const dragging = ref(false)
 const colorMode = ref<ColorMode>('original')
-const renderMode = ref<RenderMode>('realtime')
-const viewportExportLongEdge = ref<ViewportExportLongEdge>(4096)
-const viewportSupersample = ref<ViewportSupersample>(2)
-const finalTargetSamples = 64
-const finalRender = reactive<ProgressiveRenderSnapshot>({
-  state: 'idle',
+const imageExportOpen = ref(false)
+const exportingImage = ref(false)
+const imageExportQuality = ref<ImageExportQuality>('high')
+const imageExportLongEdge = ref<ImageExportLongEdge>(4096)
+const imageExportBackground = ref<ImageExportBackground>('transparent')
+const imageExportError = ref('')
+const imageExportNotice = ref('')
+const imageExportAnnouncement = ref('')
+const imageExportProgress = reactive<FinalExportProgress>({
+  phase: 'preparing',
+  progress: 0,
+  tile: 0,
+  tiles: 0,
   samples: 0,
-  targetSamples: finalTargetSamples,
-  preparation: 0,
-  error: '',
+  targetSamples: 256,
 })
 const appearance = reactive<AppearanceSettings>(createDefaultAppearanceSettings())
 let channelSequence = 0
@@ -191,19 +194,32 @@ const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
 const gradientPreviewStyle = computed(() => ({
   background: `linear-gradient(90deg, ${appearance.heightGradient.low} 0%, ${appearance.heightGradient.mid} ${Math.round(appearance.heightGradient.midpoint * 100)}%, ${appearance.heightGradient.high} 100%)`,
 }))
-const finalRenderLabel = computed(() => {
-  switch (finalRender.state) {
-    case 'preparing': return `Building render scene · ${Math.round(finalRender.preparation * 100)}%`
-    case 'rendering': return `Path tracing · ${finalRender.samples} / ${finalRender.targetSamples} spp`
-    case 'complete': return `Final render · ${finalRender.samples} spp`
-    case 'error': return finalRender.error || 'Final render unavailable'
-    default: return 'Final render idle'
-  }
+const imageExportDimensions = computed(() => calculateViewportDimensions(
+  image.value.width,
+  image.value.height,
+  imageExportLongEdge.value,
+))
+const imageExportUnsupported = computed(() =>
+  imageExportQuality.value === 'final'
+  && (colorMode.value === 'wireframe' || imageExportLongEdge.value === 8192))
+const imageExportSummary = computed(() => {
+  const { width, height } = imageExportDimensions.value
+  const background = imageExportBackground.value === 'transparent' ? 'transparent' : 'studio backdrop'
+  const quality = imageExportQuality.value === 'final' ? 'Final' : 'High'
+  return `${quality} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} PNG`
 })
-const finalRenderProgress = computed(() => finalRender.state === 'preparing'
-  ? finalRender.preparation * finalRender.targetSamples
-  : finalRender.samples)
-const canDownloadFinal = computed(() => renderMode.value === 'final' && finalRender.samples > 0)
+const imageExportHelp = computed(() => {
+  if (colorMode.value === 'wireframe') return 'Wireframe exports use High quality.'
+  if (imageExportQuality.value === 'high') return 'Clean 2× edge smoothing. Best for most images; exports in seconds.'
+  if (imageExportLongEdge.value === 8192) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
+  const samples = finalSampleTarget(colorMode.value, appearance)
+  return `Refined light and shadows · ${samples} samples with gentle denoising · may take several minutes.`
+})
+const imageExportProgressLabel = computed(() => {
+  if (imageExportProgress.phase === 'preparing') return `Preparing geometry · ${Math.round(imageExportProgress.progress * 100)}%`
+  if (imageExportProgress.phase === 'finishing') return 'Finishing PNG…'
+  return `Refining light and shadows · ${Math.round(imageExportProgress.progress * 100)}%`
+})
 
 const rawField = computed(() => composeChannelStack(image.value, channelLayers))
 const heightField = computed(() => processScalarField(rawField.value, fieldSettings))
@@ -231,29 +247,39 @@ function blendLabel(blend: ChannelBlendMode): string {
 }
 
 function selectColorMode(mode: ColorMode) {
-  if (mode === 'wireframe' && renderMode.value === 'final') {
-    renderMode.value = 'realtime'
-    status.value = 'Wireframe uses the interactive renderer.'
+  if (mode === 'wireframe' && imageExportQuality.value === 'final') {
+    imageExportQuality.value = 'high'
+    imageExportNotice.value = 'Wireframe exports use High quality.'
   }
   colorMode.value = mode
 }
 
-function selectRenderMode(mode: RenderMode) {
-  if (mode === 'final' && colorMode.value === 'wireframe') {
-    status.value = 'Choose Photo, Height, or Clay before starting Final Render.'
+function selectImageExportQuality(quality: ImageExportQuality) {
+  if (quality === 'final' && colorMode.value === 'wireframe') {
+    imageExportNotice.value = 'Wireframe exports use High quality.'
     return
   }
-  renderMode.value = mode
-  if (mode === 'final') status.value = 'Preparing progressive Final Render…'
+  if (quality === 'final' && imageExportLongEdge.value === 8192) {
+    imageExportLongEdge.value = 4096
+    imageExportNotice.value = 'Final supports up to 4K; size changed to 4K.'
+  } else {
+    imageExportNotice.value = ''
+  }
+  imageExportQuality.value = quality
+  imageExportError.value = ''
 }
 
-function handleFinalProgress(snapshot: ProgressiveRenderSnapshot) {
-  Object.assign(finalRender, snapshot)
-}
+let lastAnnouncedPhase: FinalExportProgress['phase'] | '' = ''
+let lastAnnouncedBucket = -1
 
-function handleFinalInvalidated() {
-  renderMode.value = 'realtime'
-  status.value = 'Final Render stopped because the scene changed. Start it again when ready.'
+function handleImageExportProgress(progress: FinalExportProgress) {
+  Object.assign(imageExportProgress, progress)
+  const bucket = Math.floor(progress.progress * 10)
+  if (progress.phase !== lastAnnouncedPhase || bucket !== lastAnnouncedBucket) {
+    lastAnnouncedPhase = progress.phase
+    lastAnnouncedBucket = bucket
+    imageExportAnnouncement.value = imageExportProgressLabel.value
+  }
 }
 
 function addChannel() {
@@ -305,7 +331,7 @@ async function updateCanvases() {
 watch([image, heightField], updateCanvases, { immediate: true })
 
 async function openFile(file?: File) {
-  if (!file) return
+  if (!file || exportingImage.value) return
   try {
     image.value = await fileToPixelImage(file)
     status.value = `${file.name} · ${image.value.width} × ${image.value.height}`
@@ -321,6 +347,7 @@ function handleFile(event: Event) {
 
 function handleDrop(event: DragEvent) {
   dragging.value = false
+  if (exportingImage.value) return
   void openFile(event.dataTransfer?.files?.[0])
 }
 
@@ -364,40 +391,72 @@ function downloadStl() {
   status.value = 'STL exported · geometry only'
 }
 
-async function downloadViewportPng() {
-  if (!threePreview.value) return
-  exportingViewport.value = true
-  status.value = `Rendering ${viewportExportLongEdge.value / 1024}K PNG · ${viewportSupersample.value}× supersampling…`
-  try {
-    const result = await threePreview.value.captureTransparentPng(viewportExportLongEdge.value, viewportSupersample.value)
-    const view = previewModes.find((mode) => mode.value === colorMode.value)?.label.toLowerCase() ?? colorMode.value
-    downloadBlob(`rasterform-${view}-${result.width}x${result.height}-transparent.png`, result.blob)
-    status.value = `PNG · ${result.width} × ${result.height} · ${result.supersample}× SSAA · transparent · ${result.dpi} PPI`
-  } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Viewport PNG failed.'
-  } finally {
-    exportingViewport.value = false
-  }
+function cancelImageExport() {
+  threePreview.value?.cancelImageExport()
+  imageExportNotice.value = 'Cancelling final render…'
 }
 
-async function downloadFinalPng() {
-  if (!threePreview.value || !canDownloadFinal.value) return
-  exportingFinal.value = true
+function friendlyImageExportError(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'AbortError') return ''
+  const message = error instanceof Error ? error.message : ''
+  if (message.includes('8K Final')) return 'Final quality supports up to 4K. Choose 4K or use High quality for 8K.'
+  if (message.includes('canvas') || message.includes('size')) return 'This image is too large for the device. Choose 2K or use High quality.'
+  if (message.includes('context') || message.includes('progress')) return 'Final rendering stopped on this device. Your design is safe; try again or use High quality.'
+  if (message.includes('Transparency check failed')) return 'The transparency check failed, so Rasterform did not save a bad file. Try High quality.'
+  return 'Image export could not finish on this device. Your design is safe; try High quality or a smaller size.'
+}
+
+async function downloadImagePng() {
+  if (!threePreview.value) return
+  if (exportingImage.value) {
+    cancelImageExport()
+    return
+  }
+  if (imageExportUnsupported.value) return
+  exportingImage.value = true
+  imageExportError.value = ''
+  imageExportNotice.value = ''
+  imageExportAnnouncement.value = imageExportQuality.value === 'final' ? 'Preparing final image.' : 'Rendering image.'
+  lastAnnouncedPhase = ''
+  lastAnnouncedBucket = -1
+  Object.assign(imageExportProgress, {
+    phase: imageExportQuality.value === 'final' ? 'preparing' : 'rendering',
+    progress: 0,
+    tile: 0,
+    tiles: 0,
+    samples: 0,
+    targetSamples: finalSampleTarget(colorMode.value, appearance),
+  } satisfies FinalExportProgress)
   try {
-    const result = await threePreview.value.captureFinalPng()
-    downloadBlob(`rasterform-final-${result.samples}spp-${result.width}x${result.height}.png`, result.blob)
-    status.value = `Final PNG · ${result.width} × ${result.height} · ${result.samples} spp · ${result.dpi} PPI`
+    const request = {
+      dimensions: { ...imageExportDimensions.value },
+      quality: imageExportQuality.value,
+      background: imageExportBackground.value,
+      colorMode: colorMode.value,
+    }
+    const result = request.quality === 'final'
+      ? await threePreview.value.captureFinalPng(request.dimensions, request.background)
+      : await threePreview.value.captureHighPng(request.dimensions, request.background)
+    const view = previewModes.find((mode) => mode.value === request.colorMode)?.label.toLowerCase() ?? request.colorMode
+    const background = request.background === 'transparent' ? 'transparent' : 'studio'
+    const quality = request.quality === 'final' ? 'final' : 'high'
+    downloadBlob(`rasterform-${view}-${quality}-${result.width}x${result.height}-${background}.png`, result.blob)
+    const sampleDetail = 'samples' in result ? ` · ${result.samples} samples` : ' · 2× edge smoothing'
+    status.value = `PNG · ${result.width} × ${result.height}${sampleDetail} · ${background} · ${result.dpi} PPI`
+    imageExportNotice.value = `PNG download started · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Final Render PNG failed.'
+    const friendly = friendlyImageExportError(error)
+    if (friendly) imageExportError.value = friendly
+    else imageExportNotice.value = 'Final render cancelled.'
   } finally {
-    exportingFinal.value = false
+    exportingImage.value = false
   }
 }
 </script>
 
 <template>
   <main
-    :class="['studio', { 'is-dragging': dragging }]"
+    :class="['studio', { 'is-dragging': dragging, 'is-exporting-image': exportingImage }]"
     @dragenter.prevent="dragging = true"
     @dragover.prevent="dragging = true"
     @dragleave.self.prevent="dragging = false"
@@ -409,7 +468,7 @@ async function downloadFinalPng() {
     </header>
 
     <div class="workbench">
-      <aside class="control-rail" aria-label="Rasterform controls">
+      <aside class="control-rail" aria-label="Rasterform controls" :inert="exportingImage || undefined">
         <section class="control-section">
           <div class="section-number">01</div>
           <div class="section-body">
@@ -559,34 +618,25 @@ async function downloadFinalPng() {
             <strong>{{ activeGeometry.label }} / {{ stackSummary }}</strong>
           </div>
           <div class="preview-tools">
-            <div class="render-switcher" role="group" aria-label="Rendering mode">
-              <button type="button" :aria-pressed="renderMode === 'realtime'" @click="selectRenderMode('realtime')">Interactive</button>
-              <button type="button" :aria-pressed="renderMode === 'final'" :disabled="colorMode === 'wireframe'" @click="selectRenderMode('final')">Final render</button>
-            </div>
-            <div class="view-switcher" role="group" aria-label="Viewport material">
+            <div class="view-switcher" role="group" aria-label="Viewport material" :inert="exportingImage || undefined">
               <button v-for="mode in previewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">
                 {{ mode.label }}
               </button>
             </div>
-            <div class="viewport-export">
-              <label class="sr-only" for="viewport-export-size">PNG size</label>
-              <select id="viewport-export-size" v-model.number="viewportExportLongEdge" aria-label="Transparent PNG size">
-                <option :value="4096">4K · 4096px</option>
-                <option :value="8192">8K · 8192px</option>
-              </select>
-              <label class="sr-only" for="viewport-export-quality">PNG antialiasing quality</label>
-              <select id="viewport-export-quality" v-model.number="viewportSupersample" aria-label="Transparent PNG supersampling">
-                <option :value="1">1× · Fast</option>
-                <option :value="2">2× · SSAA</option>
-              </select>
-              <button type="button" :disabled="exportingViewport" @click="downloadViewportPng">
-                {{ exportingViewport ? 'Rendering…' : 'Transparent PNG' }}
-              </button>
-            </div>
+            <button
+              type="button"
+              class="export-image-trigger"
+              :aria-expanded="imageExportOpen"
+              aria-controls="image-export-panel"
+              :disabled="exportingImage"
+              @click="imageExportOpen = !imageExportOpen"
+            >
+              {{ imageExportOpen ? 'Close export' : 'Export image…' }}
+            </button>
           </div>
         </div>
 
-        <div v-if="colorMode === 'height'" class="material-controls" aria-label="Height gradient settings">
+        <div v-if="colorMode === 'height'" class="material-controls" aria-label="Height gradient settings" :inert="exportingImage || undefined">
           <div class="material-controls__label">Height gradient</div>
           <div class="gradient-preview" :style="gradientPreviewStyle" aria-hidden="true"></div>
           <div class="gradient-pickers">
@@ -612,7 +662,7 @@ async function downloadFinalPng() {
           </label>
         </div>
 
-        <div v-if="colorMode === 'clay'" class="material-controls clay-controls" aria-label="Clay material settings">
+        <div v-if="colorMode === 'clay'" class="material-controls clay-controls" aria-label="Clay material settings" :inert="exportingImage || undefined">
           <label class="clay-color">
             <span>Clay color</span>
             <input v-model="appearance.clay.color" type="color" aria-label="Clay color" />
@@ -628,28 +678,102 @@ async function downloadFinalPng() {
           </div>
         </div>
 
-        <div class="three-stage">
+        <div
+          :class="['three-stage', { 'is-export-framed': imageExportOpen }]"
+          :style="imageExportOpen ? { '--export-aspect': `${image.width} / ${image.height}` } : undefined"
+        >
           <ThreePreview
             ref="threePreview"
             :mesh="mesh"
             :color-mode="colorMode"
             :appearance="appearance"
-            :render-mode="renderMode"
-            :final-target-samples="finalTargetSamples"
-            @final-progress="handleFinalProgress"
-            @final-invalidated="handleFinalInvalidated"
+            :interaction-locked="exportingImage"
+            @export-progress="handleImageExportProgress"
           />
-          <div v-if="renderMode === 'final'" :class="['final-render-meter', { 'has-error': finalRender.state === 'error' }]">
-            <div>
-              <span>{{ finalRenderLabel }}</span>
-              <progress :value="finalRenderProgress" :max="finalRender.targetSamples">{{ finalRenderProgress }}</progress>
-            </div>
-            <button type="button" :disabled="!canDownloadFinal || exportingFinal" @click="downloadFinalPng">
-              {{ exportingFinal ? 'Saving…' : 'Save final PNG' }}
-            </button>
-          </div>
           <div v-if="dragging" class="drop-curtain">Drop image</div>
         </div>
+
+        <section v-if="imageExportOpen" id="image-export-panel" class="image-export-panel" aria-labelledby="image-export-title">
+          <header class="image-export-header">
+            <div>
+              <p class="eyebrow">Image export</p>
+              <h2 id="image-export-title">Export a finished PNG</h2>
+            </div>
+            <div class="image-export-header__meta">
+              <p class="image-export-summary" role="status" aria-label="Export summary">{{ imageExportSummary }}</p>
+              <button type="button" class="image-export-close" :disabled="exportingImage" @click="imageExportOpen = false">Close</button>
+            </div>
+          </header>
+
+          <div class="image-export-options">
+            <fieldset>
+              <legend>Quality</legend>
+              <div class="export-choice-group">
+                <button
+                  type="button"
+                  :aria-pressed="imageExportQuality === 'high'"
+                  :disabled="exportingImage"
+                  @click="selectImageExportQuality('high')"
+                ><strong>High</strong><small>Clean and quick</small></button>
+                <button
+                  type="button"
+                  :aria-pressed="imageExportQuality === 'final'"
+                  :disabled="exportingImage || colorMode === 'wireframe'"
+                  @click="selectImageExportQuality('final')"
+                ><strong>Final</strong><small>Refined lighting</small></button>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Size</legend>
+              <div class="export-choice-group size-choices">
+                <button type="button" :aria-pressed="imageExportLongEdge === 2048" :disabled="exportingImage" @click="imageExportLongEdge = 2048">2K<small>2048 px</small></button>
+                <button type="button" :aria-pressed="imageExportLongEdge === 4096" :disabled="exportingImage" @click="imageExportLongEdge = 4096">4K<small>4096 px</small></button>
+                <button type="button" :aria-pressed="imageExportLongEdge === 8192" :disabled="exportingImage || imageExportQuality === 'final'" @click="imageExportLongEdge = 8192">8K<small>8192 px</small></button>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Background</legend>
+              <div class="export-choice-group">
+                <button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button>
+                <button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Studio backdrop</button>
+              </div>
+            </fieldset>
+          </div>
+
+          <p class="image-export-help">{{ imageExportHelp }}</p>
+          <div v-if="exportingImage && imageExportQuality === 'final'" class="image-export-progress">
+            <span>{{ imageExportProgressLabel }}</span>
+            <progress
+              :value="imageExportProgress.progress"
+              max="1"
+              aria-label="Final image render progress"
+              :aria-valuetext="imageExportProgressLabel"
+            >{{ imageExportProgress.progress }}</progress>
+            <details v-if="imageExportProgress.phase === 'rendering'">
+              <summary>Render details</summary>
+              <p>Tile {{ imageExportProgress.tile }} / {{ imageExportProgress.tiles }} · {{ imageExportProgress.samples }} / {{ imageExportProgress.targetSamples }} samples</p>
+            </details>
+          </div>
+          <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
+          <p v-if="imageExportError" class="image-export-message is-error" role="alert">{{ imageExportError }}</p>
+          <p v-else-if="imageExportNotice" class="image-export-message" role="status" aria-live="polite">{{ imageExportNotice }}</p>
+
+          <div class="image-export-actions">
+            <button v-if="imageExportError && imageExportQuality === 'final'" type="button" class="export-fallback" @click="selectImageExportQuality('high')">Use High quality</button>
+            <button
+              type="button"
+              class="image-export-primary"
+              :disabled="imageExportUnsupported || (exportingImage && imageExportQuality === 'high')"
+              @click="downloadImagePng"
+            >
+              {{ exportingImage
+                ? imageExportQuality === 'final' ? 'Cancel render' : 'Rendering…'
+                : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}
+            </button>
+          </div>
+        </section>
 
         <div class="two-d-previews">
           <figure>
@@ -687,9 +811,9 @@ async function downloadFinalPng() {
           </p>
         </section>
 
-        <section class="export-strip" aria-label="Export assets">
+        <section class="export-strip" aria-label="3D and project files">
           <div>
-            <p class="eyebrow">Export</p>
+            <p class="eyebrow">3D &amp; project files</p>
             <p role="status" aria-live="polite">{{ status }}</p>
           </div>
           <div class="export-actions">

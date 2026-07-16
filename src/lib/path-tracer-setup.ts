@@ -12,8 +12,8 @@ export async function buildPathTracingScene(
   camera: Camera,
   onProgress: (progress: number) => void,
 ): Promise<void> {
-  tracer.setBVHWorker(worker)
   try {
+    tracer.setBVHWorker(worker)
     await tracer.setSceneAsync(scene, camera, { onProgress })
   } finally {
     worker.dispose()

@@ -7,47 +7,43 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
-import type { WebGLPathTracer } from 'three-gpu-pathtracer'
 import {
   addStudioLighting,
   configureStudioRenderer,
   createFinalRenderScene,
   createStudioFloor,
   createThreeMesh,
+  disposeFinalRenderScene,
   placeStudioFloor,
 } from '../lib/three'
-import { ProgressiveRenderController } from '../lib/progressive-render'
-import type { ProgressiveRenderSnapshot } from '../lib/progressive-render'
+import {
+  renderFinalImagePng,
+  type FinalExportProgress,
+  type FinalImagePngResult,
+} from '../lib/final-image-export'
 import {
   GUIDE_LAYER,
-  renderTransparentViewportPng,
-  setPngDensity,
+  renderViewportPng,
 } from '../lib/viewport-export'
-import { buildPathTracingScene } from '../lib/path-tracer-setup'
+import type { ViewportPngResult } from '../lib/viewport-export'
 import type {
   AppearanceSettings,
   ColorMode,
+  ImageExportBackground,
   MeshData,
-  RenderMode,
-  ViewportExportLongEdge,
-  ViewportSupersample,
 } from '../types'
-import type { ViewportPngResult } from '../lib/viewport-export'
 
 const props = withDefaults(defineProps<{
   mesh: MeshData
   colorMode: ColorMode
   appearance: AppearanceSettings
-  renderMode?: RenderMode
-  finalTargetSamples?: number
+  interactionLocked?: boolean
 }>(), {
-  renderMode: 'realtime',
-  finalTargetSamples: 64,
+  interactionLocked: false,
 })
 
 const emit = defineEmits<{
-  'final-progress': [snapshot: ProgressiveRenderSnapshot]
-  'final-invalidated': []
+  'export-progress': [progress: FinalExportProgress]
 }>()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
@@ -63,16 +59,10 @@ let gtaoPass: GTAOPass | null = null
 let outputPass: OutputPass | null = null
 let resizeObserver: ResizeObserver | null = null
 let environment: THREE.DataTexture | null = null
-let pathTracer: WebGLPathTracer | null = null
-let finalScene: THREE.Scene | null = null
+let environmentReady: Promise<void> | null = null
+let activeExport: AbortController | null = null
 let animationFrame = 0
-let finalBuildGeneration = 0
 let mounted = false
-
-const finalRender = new ProgressiveRenderController(
-  props.finalTargetSamples,
-  (snapshot) => emit('final-progress', snapshot),
-)
 
 function disposeMaterial(material: THREE.Material | THREE.Material[]) {
   if (Array.isArray(material)) material.forEach((item) => item.dispose())
@@ -87,73 +77,101 @@ function disposeLiveObject() {
   object = null
 }
 
-function disposeFinalScene(target: THREE.Scene | null = finalScene) {
-  if (!target) return
-  target.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return
-    child.geometry.dispose()
-    disposeMaterial(child.material)
-  })
-  if (finalScene === target) finalScene = null
-}
-
-function stopFinalRender() {
-  finalBuildGeneration += 1
-  finalRender.stop()
-  pathTracer = null
-  disposeFinalScene()
-}
-
 function updateObject() {
   if (!scene) return
-  const invalidatesFinal = object !== null && props.renderMode === 'final'
-  if (invalidatesFinal) stopFinalRender()
   disposeLiveObject()
   object = createThreeMesh(props.mesh, props.colorMode, props.appearance)
   scene.add(object)
   if (floor) placeStudioFloor(floor, object)
   if (grid && floor) grid.position.z = floor.position.z + 0.002
-  if (invalidatesFinal) emit('final-invalidated')
 }
 
-async function captureTransparentPng(
-  longEdge: ViewportExportLongEdge,
-  supersample: ViewportSupersample = 2,
+async function captureHighPng(
+  dimensions: { width: number; height: number },
+  background: ImageExportBackground,
 ): Promise<ViewportPngResult> {
-  if (!canvas.value || !renderer || !scene || !camera) throw new Error('Viewport is not ready.')
+  if (!canvas.value || !renderer || !camera) throw new Error('Viewport is not ready.')
   controls?.update()
   camera.updateMatrixWorld(true)
-  return renderTransparentViewportPng({
-    scene,
-    camera,
-    liveRenderer: renderer,
-    viewportWidth: canvas.value.clientWidth,
-    viewportHeight: canvas.value.clientHeight,
-    longEdge,
-    supersample,
-  })
+  const exportCamera = camera.clone()
+  const exportMesh = props.mesh
+  const exportColorMode = props.colorMode
+  const exportAppearance: AppearanceSettings = {
+    heightGradient: { ...props.appearance.heightGradient },
+    clay: { ...props.appearance.clay },
+  }
+  await environmentReady
+  if (!canvas.value || !renderer || !camera) throw new Error('Viewport is no longer available.')
+  const renderScene = createFinalRenderScene(
+    exportMesh,
+    exportColorMode,
+    exportAppearance,
+    environment,
+    background,
+  )
+  try {
+    return await renderViewportPng({
+      scene: renderScene.scene,
+      camera: exportCamera,
+      liveRenderer: renderer,
+      width: dimensions.width,
+      height: dimensions.height,
+      supersample: 2,
+    })
+  } finally {
+    disposeFinalRenderScene(renderScene)
+  }
 }
 
-async function captureFinalPng(): Promise<ViewportPngResult & { samples: number }> {
-  if (!canvas.value || !pathTracer || finalRender.snapshot.samples < 1) {
-    throw new Error('Start Final Render and wait for at least one sample first.')
+async function captureFinalPng(
+  dimensions: { width: number; height: number },
+  background: ImageExportBackground,
+): Promise<FinalImagePngResult> {
+  if (!canvas.value || !camera) throw new Error('Viewport is not ready.')
+  if (Math.max(dimensions.width, dimensions.height) > 4096) {
+    throw new Error('8K Final is too large for a reliable browser render. Choose 4K or High quality.')
   }
-  const raw = await new Promise<Blob | null>((resolve) => canvas.value!.toBlob(resolve, 'image/png'))
-  if (!raw) throw new Error('The browser could not encode the Final Render canvas.')
-  const bytes = setPngDensity(new Uint8Array(await raw.arrayBuffer()))
-  const payload = new ArrayBuffer(bytes.byteLength)
-  new Uint8Array(payload).set(bytes)
-  return {
-    blob: new Blob([payload], { type: 'image/png' }),
-    width: canvas.value.width,
-    height: canvas.value.height,
-    dpi: 300,
-    supersample: 1,
-    samples: finalRender.snapshot.samples,
+  cancelImageExport()
+  activeExport = new AbortController()
+  const controller = activeExport
+  controls?.update()
+  controls && (controls.enabled = false)
+  camera.updateMatrixWorld(true)
+  const exportCamera = camera.clone()
+  const exportMesh = props.mesh
+  const exportColorMode = props.colorMode
+  const exportAppearance: AppearanceSettings = {
+    heightGradient: { ...props.appearance.heightGradient },
+    clay: { ...props.appearance.clay },
+  }
+  try {
+    await environmentReady
+    if (controller.signal.aborted) throw new DOMException('Final image export cancelled.', 'AbortError')
+    if (!canvas.value || !camera) throw new Error('Viewport is no longer available.')
+    return await renderFinalImagePng({
+      mesh: exportMesh,
+      colorMode: exportColorMode,
+      appearance: exportAppearance,
+      environment,
+      camera: exportCamera,
+      width: dimensions.width,
+      height: dimensions.height,
+      background,
+      signal: controller.signal,
+      onProgress: (progress) => emit('export-progress', progress),
+    })
+  } finally {
+    if (activeExport === controller) activeExport = null
+    if (controls) controls.enabled = !props.interactionLocked
   }
 }
 
-defineExpose({ captureTransparentPng, captureFinalPng })
+function cancelImageExport() {
+  activeExport?.abort()
+  activeExport = null
+}
+
+defineExpose({ captureHighPng, captureFinalPng, cancelImageExport })
 
 function resize() {
   if (!canvas.value || !renderer || !camera) return
@@ -163,87 +181,12 @@ function resize() {
   composer?.setSize(width, height)
   camera.aspect = width / height
   camera.updateProjectionMatrix()
-  if (props.renderMode === 'final' && pathTracer) finalRender.invalidateCamera()
-}
-
-function handleCameraChange() {
-  if (props.renderMode === 'final' && pathTracer) finalRender.invalidateCamera()
 }
 
 function render() {
   animationFrame = requestAnimationFrame(render)
   controls?.update()
-  if (props.renderMode === 'final' && pathTracer) finalRender.tick()
-  else composer?.render()
-}
-
-async function prepareFinalRender() {
-  if (!renderer || !camera || !mounted) return
-  if (props.colorMode === 'wireframe') {
-    finalRender.fail(new Error('Final Render supports Photo, Height, and Clay materials.'))
-    return
-  }
-
-  stopFinalRender()
-  const generation = finalBuildGeneration
-  finalRender.beginPreparing()
-  let buildingTracer: WebGLPathTracer | null = null
-  let renderScene: THREE.Scene | null = null
-
-  try {
-    const [{ WebGLPathTracer }, { GenerateMeshBVHWorker }] = await Promise.all([
-      import('three-gpu-pathtracer'),
-      import('three-mesh-bvh/worker'),
-    ])
-    if (!mounted || generation !== finalBuildGeneration || !renderer || !camera) return
-
-    const bundle = createFinalRenderScene(
-      props.mesh,
-      props.colorMode,
-      props.appearance,
-      environment,
-    )
-    renderScene = bundle.scene
-    finalScene = renderScene
-
-    const tracer = new WebGLPathTracer(renderer)
-    buildingTracer = tracer
-    tracer.bounces = 6
-    tracer.transmissiveBounces = 4
-    tracer.filterGlossyFactor = 0.5
-    tracer.tiles.set(2, 2)
-    tracer.dynamicLowRes = true
-    tracer.lowResScale = 0.25
-    tracer.renderScale = 1
-    tracer.renderDelay = 75
-    tracer.minSamples = 1
-    tracer.fadeDuration = 250
-    tracer.rasterizeSceneCallback = () => composer?.render()
-
-    await buildPathTracingScene(
-      tracer,
-      new GenerateMeshBVHWorker(),
-      renderScene,
-      camera,
-      (progress) => finalRender.updatePreparation(progress),
-    )
-
-    if (!mounted || generation !== finalBuildGeneration) {
-      tracer.dispose()
-      disposeFinalScene(renderScene)
-      return
-    }
-    tracer.updateEnvironment()
-    finalRender.attach(tracer)
-    pathTracer = tracer
-    buildingTracer = null
-  } catch (error) {
-    buildingTracer?.dispose()
-    disposeFinalScene(renderScene)
-    if (generation !== finalBuildGeneration) return
-    pathTracer = null
-    finalRender.fail(error)
-  }
+  if (!activeExport) composer?.render()
 }
 
 async function loadEnvironment() {
@@ -258,14 +201,6 @@ async function loadEnvironment() {
     environment = texture
     scene.environment = texture
     scene.environmentIntensity = 0.78
-    if (finalScene) {
-      finalScene.environment = texture
-      finalScene.environmentIntensity = 0.86
-      if (pathTracer) {
-        pathTracer.updateEnvironment()
-        finalRender.invalidateCamera()
-      }
-    }
   } catch {
     // The direct studio lights remain a deliberate offline fallback.
   }
@@ -297,7 +232,7 @@ onMounted(() => {
   controls.minDistance = 1.3
   controls.maxDistance = 8
   controls.target.set(0, 0, 0.12)
-  controls.addEventListener('change', handleCameraChange)
+  controls.enabled = !props.interactionLocked
 
   addStudioLighting(scene)
   floor = createStudioFloor()
@@ -330,8 +265,7 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(resize)
   resizeObserver.observe(canvas.value)
   resize()
-  void loadEnvironment()
-  if (props.renderMode === 'final') void prepareFinalRender()
+  environmentReady = loadEnvironment()
   render()
 })
 
@@ -351,23 +285,18 @@ watch(
 )
 
 watch(
-  () => props.renderMode,
-  (mode) => {
-    if (!mounted) return
-    if (mode === 'final') void prepareFinalRender()
-    else stopFinalRender()
+  () => props.interactionLocked,
+  (locked) => {
+    if (controls) controls.enabled = !locked && !activeExport
   },
 )
 
 onBeforeUnmount(() => {
   mounted = false
-  finalBuildGeneration += 1
+  cancelImageExport()
   cancelAnimationFrame(animationFrame)
   resizeObserver?.disconnect()
-  controls?.removeEventListener('change', handleCameraChange)
   controls?.dispose()
-  stopFinalRender()
-  finalRender.dispose()
   disposeLiveObject()
   floor?.geometry.dispose()
   if (floor) disposeMaterial(floor.material)
@@ -383,6 +312,9 @@ onBeforeUnmount(() => {
   <canvas
     ref="canvas"
     class="three-preview"
-    aria-label="Orbitable 3D preview of the channel-driven relief. Drag to rotate and scroll to zoom."
+    :aria-busy="interactionLocked"
+    :aria-label="interactionLocked
+      ? '3D preview locked while the image renders.'
+      : 'Orbitable 3D preview of the channel-driven relief. Drag to rotate and scroll to zoom.'"
   />
 </template>
