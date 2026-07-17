@@ -57,3 +57,6 @@ Desktop.ini
 # Miscellaneous generated files
 *.tgz
 *.zip
+
+# Local npm lockfile
+package-lock.json
