@@ -1,12 +1,59 @@
-node_modules
-dist
-.DS_Store
-*.local
-coverage
-.firebase/
+# Dependencies
+node_modules/
 
-# Firebase
+# Vite / build output
+dist/
+.vite/
+*.tsbuildinfo
+
+# Tests and coverage
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Firebase deployment/local state
+.firebase/
 .firebaserc
 firebase.json
-.firebase/
 firebase-debug.log*
+firestore-debug.log*
+database-debug.log*
+ui-debug.log*
+
+# Environment variables and local configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary/cache files
+.cache/
+.temp/
+tmp/
+temp/
+
+# macOS / Windows
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Miscellaneous generated files
+*.tgz
+*.zip
