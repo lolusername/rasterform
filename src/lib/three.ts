@@ -7,9 +7,9 @@ import type {
   HeightGradientSettings,
   ImageExportBackground,
   MeshData,
+  ViewportBackground,
 } from '../types'
-
-export type StudioFloor = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>
+import { viewportBackgroundPreset } from './background'
 
 export interface StudioLighting {
   hemisphere: THREE.HemisphereLight
@@ -22,7 +22,6 @@ export interface StudioLighting {
 export interface FinalRenderScene {
   scene: THREE.Scene
   object: THREE.Mesh
-  floor: StudioFloor | null
   lights: StudioLighting
 }
 
@@ -138,45 +137,6 @@ export function createThreeMesh(
   return object
 }
 
-/** A neutral, rough receiver that grounds the relief without competing with its color. */
-export function createStudioFloor(): StudioFloor {
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(1, 1),
-    new THREE.MeshStandardMaterial({
-      color: 0x171a1f,
-      roughness: 0.92,
-      metalness: 0.02,
-      side: THREE.FrontSide,
-    }),
-  )
-  floor.name = 'Rasterform_StudioFloor'
-  floor.receiveShadow = true
-  floor.castShadow = false
-  return floor
-}
-
-/** Place and scale the studio floor from the relief's world-space bounds. */
-export function placeStudioFloor<T extends THREE.Mesh>(floor: T, meshObject: THREE.Object3D): T {
-  meshObject.updateWorldMatrix(true, true)
-  const bounds = new THREE.Box3().setFromObject(meshObject)
-  if (bounds.isEmpty()) {
-    floor.position.set(0, 0, -0.05)
-    floor.scale.set(6, 6, 1)
-    floor.updateMatrixWorld(true)
-    return floor
-  }
-
-  const size = bounds.getSize(new THREE.Vector3())
-  const center = bounds.getCenter(new THREE.Vector3())
-  const largestDimension = Math.max(size.x, size.y, size.z, 1)
-  const clearance = Math.max(0.025, size.z * 0.05)
-  const floorSize = largestDimension * 3.5
-  floor.position.set(center.x, center.y, bounds.min.z - clearance)
-  floor.scale.set(floorSize, floorSize, 1)
-  floor.updateMatrixWorld(true)
-  return floor
-}
-
 /** Add named, inspectable studio lights. The directional key provides soft shadows. */
 export function addStudioLighting(scene: THREE.Scene): StudioLighting {
   RectAreaLightUniformsLib.init()
@@ -224,22 +184,23 @@ export function createFinalRenderScene(
   appearance: AppearanceSettings = createDefaultAppearanceSettings(),
   environment: THREE.Texture | null = null,
   background: ImageExportBackground = 'studio',
+  studioBackground: ViewportBackground = 'dark-gray',
 ): FinalRenderScene {
   const scene = new THREE.Scene()
   scene.name = 'Rasterform_FinalRender'
-  scene.background = background === 'transparent' ? null : new THREE.Color(0x080a0e)
+  scene.background = background === 'transparent'
+    ? null
+    : new THREE.Color(viewportBackgroundPreset(studioBackground).hex)
   scene.environment = environment
   scene.environmentIntensity = environment ? 0.85 : 1
 
   const object = createThreeMesh(mesh, colorMode, appearance)
-  const floor = background === 'studio' ? placeStudioFloor(createStudioFloor(), object) : null
   scene.add(object)
-  if (floor) scene.add(floor)
   const lights = addStudioLighting(scene)
   // HemisphereLight is not represented by the path tracer; the shared HDR environment
   // provides ambient fill so High and Final exports start from the same light rig.
   lights.hemisphere.intensity = 0
-  return { scene, object, floor, lights }
+  return { scene, object, lights }
 }
 
 /** Dispose resources owned by an isolated image-render scene, never its shared HDR environment. */
@@ -248,6 +209,4 @@ export function disposeFinalRenderScene(renderScene: FinalRenderScene): void {
   const objectMaterial = renderScene.object.material
   if (Array.isArray(objectMaterial)) objectMaterial.forEach((material) => material.dispose())
   else objectMaterial.dispose()
-  renderScene.floor?.geometry.dispose()
-  renderScene.floor?.material.dispose()
 }

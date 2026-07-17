@@ -13,15 +13,17 @@ It is a focused **2.5D tool**: more tactile than an image editor, more immediate
 3. **Find the material** — explore original color, height gradients, clay finishes, or wireframe structure.
 4. **Light and export** — work quickly in the HDR studio preview, switch to a progressive Final Render, or continue in other tools.
 
+Right-click the 3D viewport to choose a white, dark-gray, or black background, or use the `W`, `G`, and `B` shortcuts. The background is always a flat color—no floor or grid geometry is added to the viewport or image exports.
+
 Rasterform can export transparent 4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
 
 ## Why channels matter
 
 Every image contains several possible landscapes. Brightness might reveal volume; saturation can isolate intensity; hue can select a color family; edges can become ridges. Rasterform lets you combine these readings non-destructively, so creating form feels closer to art direction than mesh construction.
 
-Everything runs locally in the browser—no account, upload, server, analytics, or remote inference.
+Processing stays in your browser—no account, upload, server, analytics, or remote inference.
 
-## Run locally
+## Run the app
 
 ```bash
 npm install

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js'
@@ -11,34 +11,33 @@ import {
   addStudioLighting,
   configureStudioRenderer,
   createFinalRenderScene,
-  createStudioFloor,
   createThreeMesh,
   disposeFinalRenderScene,
-  placeStudioFloor,
 } from '../lib/three'
+import { viewportBackgroundPreset } from '../lib/background'
 import {
   renderFinalImagePng,
   type FinalExportProgress,
   type FinalImagePngResult,
 } from '../lib/final-image-export'
-import {
-  GUIDE_LAYER,
-  renderViewportPng,
-} from '../lib/viewport-export'
+import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportPngResult } from '../lib/viewport-export'
 import type {
   AppearanceSettings,
   ColorMode,
   ImageExportBackground,
   MeshData,
+  ViewportBackground,
 } from '../types'
 
 const props = withDefaults(defineProps<{
   mesh: MeshData
   colorMode: ColorMode
   appearance: AppearanceSettings
+  background?: ViewportBackground
   interactionLocked?: boolean
 }>(), {
+  background: 'dark-gray',
   interactionLocked: false,
 })
 
@@ -47,13 +46,14 @@ const emit = defineEmits<{
 }>()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
+const canvasStyle = computed(() => ({
+  backgroundColor: viewportBackgroundPreset(props.background).color,
+}))
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let controls: OrbitControls | null = null
 let object: THREE.Mesh | null = null
-let floor: THREE.Mesh | null = null
-let grid: THREE.GridHelper | null = null
 let composer: EffectComposer | null = null
 let gtaoPass: GTAOPass | null = null
 let outputPass: OutputPass | null = null
@@ -82,8 +82,11 @@ function updateObject() {
   disposeLiveObject()
   object = createThreeMesh(props.mesh, props.colorMode, props.appearance)
   scene.add(object)
-  if (floor) placeStudioFloor(floor, object)
-  if (grid && floor) grid.position.z = floor.position.z + 0.002
+}
+
+function updateBackground() {
+  renderer?.setClearColor(0x000000, 0)
+  if (scene) scene.background = null
 }
 
 async function captureHighPng(
@@ -100,6 +103,7 @@ async function captureHighPng(
     heightGradient: { ...props.appearance.heightGradient },
     clay: { ...props.appearance.clay },
   }
+  const exportBackground = props.background
   await environmentReady
   if (!canvas.value || !renderer || !camera) throw new Error('Viewport is no longer available.')
   const renderScene = createFinalRenderScene(
@@ -108,6 +112,7 @@ async function captureHighPng(
     exportAppearance,
     environment,
     background,
+    exportBackground,
   )
   try {
     return await renderViewportPng({
@@ -144,6 +149,7 @@ async function captureFinalPng(
     heightGradient: { ...props.appearance.heightGradient },
     clay: { ...props.appearance.clay },
   }
+  const exportBackground = props.background
   try {
     await environmentReady
     if (controller.signal.aborted) throw new DOMException('Final image export cancelled.', 'AbortError')
@@ -157,6 +163,7 @@ async function captureFinalPng(
       width: dimensions.width,
       height: dimensions.height,
       background,
+      studioBackground: exportBackground,
       signal: controller.signal,
       onProgress: (progress) => emit('export-progress', progress),
     })
@@ -212,22 +219,23 @@ onMounted(() => {
   renderer = new THREE.WebGLRenderer({
     canvas: canvas.value,
     antialias: true,
-    alpha: false,
+    alpha: true,
     preserveDrawingBuffer: true,
     powerPreference: 'high-performance',
   })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   configureStudioRenderer(renderer)
-  renderer.setClearColor(0x111310, 1)
+  renderer.setClearColor(0x000000, 0)
 
   scene = new THREE.Scene()
+  updateBackground()
   camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100)
   camera.position.set(2.45, -2.2, 2.15)
   camera.lookAt(0, 0, 0)
-  camera.layers.enable(GUIDE_LAYER)
 
   controls = new OrbitControls(camera, canvas.value)
   controls.enableDamping = true
+  controls.enablePan = false
   controls.dampingFactor = 0.08
   controls.minDistance = 1.3
   controls.maxDistance = 8
@@ -235,13 +243,6 @@ onMounted(() => {
   controls.enabled = !props.interactionLocked
 
   addStudioLighting(scene)
-  floor = createStudioFloor()
-  floor.layers.set(GUIDE_LAYER)
-  scene.add(floor)
-  grid = new THREE.GridHelper(4, 16, 0x52574e, 0x2a2e29)
-  grid.rotation.x = Math.PI / 2
-  grid.layers.set(GUIDE_LAYER)
-  scene.add(grid)
   updateObject()
 
   composer = new EffectComposer(renderer)
@@ -284,6 +285,8 @@ watch(
   { deep: false },
 )
 
+watch(() => props.background, updateBackground)
+
 watch(
   () => props.interactionLocked,
   (locked) => {
@@ -298,8 +301,6 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   controls?.dispose()
   disposeLiveObject()
-  floor?.geometry.dispose()
-  if (floor) disposeMaterial(floor.material)
   gtaoPass?.dispose()
   outputPass?.dispose()
   composer?.dispose()
@@ -312,6 +313,7 @@ onBeforeUnmount(() => {
   <canvas
     ref="canvas"
     class="three-preview"
+    :style="canvasStyle"
     :aria-busy="interactionLocked"
     :aria-label="interactionLocked
       ? '3D preview locked while the image renders.'

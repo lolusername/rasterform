@@ -7,10 +7,8 @@ import {
   createDefaultAppearanceSettings,
   createFinalRenderScene,
   createMaterial,
-  createStudioFloor,
   createThreeMesh,
   heightGradientColors,
-  placeStudioFloor,
 } from './three'
 import type { MeshData } from '../types'
 
@@ -133,27 +131,7 @@ describe('studio rendering', () => {
     expect(scene.getObjectByName('Rasterform_Rim')).toBe(lights.rim)
   })
 
-  it('creates and positions a rough standard-material floor below the relief bounds', () => {
-    const object = createThreeMesh(meshFixture(), 'clay')
-    const floor = placeStudioFloor(createStudioFloor(), object)
-    const bounds = new THREE.Box3().setFromObject(object)
-
-    expect(floor.name).toBe('Rasterform_StudioFloor')
-    expect(floor.material).toBeInstanceOf(THREE.MeshStandardMaterial)
-    expect(floor.material.roughness).toBe(0.92)
-    expect(floor.receiveShadow).toBe(true)
-    expect(floor.castShadow).toBe(false)
-    expect(floor.position.z).toBeLessThan(bounds.min.z)
-    expect(floor.scale.x).toBe(7)
-    expect(floor.scale.y).toBe(7)
-
-    object.geometry.dispose()
-    ;(object.material as THREE.Material).dispose()
-    floor.geometry.dispose()
-    floor.material.dispose()
-  })
-
-  it('builds an isolated final scene with its own resources and HDR environment reference', () => {
+  it('builds an isolated opaque final scene without a studio floor', () => {
     const environment = new THREE.Texture()
     environment.name = 'Test_HDR'
     const first = createFinalRenderScene(
@@ -161,27 +139,27 @@ describe('studio rendering', () => {
       'height',
       createDefaultAppearanceSettings(),
       environment,
+      'studio',
+      'white',
     )
     const second = createFinalRenderScene(meshFixture(), 'height')
 
     expect(first.scene.name).toBe('Rasterform_FinalRender')
     expect(first.scene.environment).toBe(environment)
     expect(first.scene.background).toBeInstanceOf(THREE.Color)
-    expect((first.scene.background as THREE.Color).getHex()).toBe(0x080a0e)
+    expect((first.scene.background as THREE.Color).getHex()).toBe(0xffffff)
     expect(first.scene.children).toContain(first.object)
-    expect(first.scene.children).toContain(first.floor)
-    expect(first.floor!.position.z).toBeLessThan(0)
+    expect(first.scene.getObjectByName('Rasterform_StudioFloor')).toBeUndefined()
     expect(first.lights.fill).toBeInstanceOf(THREE.RectAreaLight)
     expect(first.lights.hemisphere.intensity).toBe(0)
     expect(first.object.geometry).not.toBe(second.object.geometry)
     expect(first.object.material).not.toBe(second.object.material)
     expect(second.scene.environment).toBeNull()
+    expect((second.scene.background as THREE.Color).getHex()).toBe(0x343434)
 
     for (const renderScene of [first, second]) {
       renderScene.object.geometry.dispose()
       ;(renderScene.object.material as THREE.Material).dispose()
-      renderScene.floor?.geometry.dispose()
-      renderScene.floor?.material.dispose()
     }
     environment.dispose()
   })
@@ -198,7 +176,6 @@ describe('studio rendering', () => {
 
     expect(renderScene.scene.background).toBeNull()
     expect(renderScene.scene.environment).toBe(environment)
-    expect(renderScene.floor).toBeNull()
     expect(renderScene.scene.children).toContain(renderScene.object)
     expect(renderScene.scene.getObjectByName('Rasterform_StudioFloor')).toBeUndefined()
 

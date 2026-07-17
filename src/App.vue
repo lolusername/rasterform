@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import ThreePreview from './components/ThreePreview.vue'
+import {
+  VIEWPORT_BACKGROUNDS,
+  isViewportBackground,
+  viewportBackgroundFromShortcut,
+  viewportBackgroundPreset,
+} from './lib/background'
 import { composeChannelStack } from './lib/channel-stack'
 import { processScalarField } from './lib/filters'
 import { createDemoImage, drawPixelImage, drawScalarField, fileToPixelImage } from './lib/image'
@@ -28,6 +34,7 @@ import type {
   ImageExportQuality,
   MeshSettings,
   Recipe,
+  ViewportBackground,
 } from './types'
 
 interface ThreePreviewHandle {
@@ -47,6 +54,9 @@ const threePreview = ref<ThreePreviewHandle | null>(null)
 const sourceCanvas = ref<HTMLCanvasElement | null>(null)
 const heightCanvas = ref<HTMLCanvasElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const threeStage = ref<HTMLElement | null>(null)
+const backgroundMenu = ref<HTMLDivElement | null>(null)
+const backgroundTrigger = ref<HTMLButtonElement | null>(null)
 const status = ref('Demo image · 360 × 270')
 const exporting = ref(false)
 const dragging = ref(false)
@@ -59,6 +69,21 @@ const imageExportBackground = ref<ImageExportBackground>('transparent')
 const imageExportError = ref('')
 const imageExportNotice = ref('')
 const imageExportAnnouncement = ref('')
+const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
+
+function initialViewportBackground(): ViewportBackground {
+  try {
+    const saved = window.localStorage.getItem(BACKGROUND_STORAGE_KEY)
+    if (isViewportBackground(saved)) return saved
+  } catch {
+    // A blocked storage API should never prevent the viewport from loading.
+  }
+  return 'dark-gray'
+}
+
+const viewportBackground = ref<ViewportBackground>(initialViewportBackground())
+const backgroundMenuPosition = ref<{ x: number; y: number } | null>(null)
+let backgroundMenuReturnFocus: HTMLElement | null = null
 const imageExportProgress = reactive<FinalExportProgress>({
   phase: 'preparing',
   progress: 0,
@@ -194,6 +219,13 @@ const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
 const gradientPreviewStyle = computed(() => ({
   background: `linear-gradient(90deg, ${appearance.heightGradient.low} 0%, ${appearance.heightGradient.mid} ${Math.round(appearance.heightGradient.midpoint * 100)}%, ${appearance.heightGradient.high} 100%)`,
 }))
+const activeBackground = computed(() => viewportBackgroundPreset(viewportBackground.value))
+const backgroundMenuStyle = computed(() => backgroundMenuPosition.value
+  ? {
+      left: `${backgroundMenuPosition.value.x}px`,
+      top: `${backgroundMenuPosition.value.y}px`,
+    }
+  : undefined)
 const imageExportDimensions = computed(() => calculateViewportDimensions(
   image.value.width,
   image.value.height,
@@ -204,7 +236,9 @@ const imageExportUnsupported = computed(() =>
   && (colorMode.value === 'wireframe' || imageExportLongEdge.value === 8192))
 const imageExportSummary = computed(() => {
   const { width, height } = imageExportDimensions.value
-  const background = imageExportBackground.value === 'transparent' ? 'transparent' : 'studio backdrop'
+  const background = imageExportBackground.value === 'transparent'
+    ? 'transparent'
+    : `${activeBackground.value.label.toLowerCase()} background`
   const quality = imageExportQuality.value === 'final' ? 'Final' : 'High'
   return `${quality} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} PNG`
 })
@@ -245,6 +279,158 @@ function sourceLabel(source: HeightSource): string {
 function blendLabel(blend: ChannelBlendMode): string {
   return blendModes.find((item) => item.value === blend)?.label ?? blend
 }
+
+function closeBackgroundMenu(restoreFocus = false) {
+  const returnFocus = backgroundMenuReturnFocus
+  backgroundMenuPosition.value = null
+  backgroundMenuReturnFocus = null
+  if (restoreFocus) void nextTick(() => returnFocus?.focus({ preventScroll: true }))
+}
+
+function chooseViewportBackground(background: ViewportBackground) {
+  if (exportingImage.value) return
+  viewportBackground.value = background
+  closeBackgroundMenu(true)
+  status.value = `Viewport background · ${viewportBackgroundPreset(background).label}`
+}
+
+function clampBackgroundMenuPosition(x: number, y: number) {
+  const stage = threeStage.value
+  if (!stage) return { x: 12, y: 12 }
+  const width = stage.clientWidth
+  const height = stage.clientHeight
+  return {
+    x: Math.min(Math.max(8, x), Math.max(8, width - 204)),
+    y: Math.min(Math.max(8, y), Math.max(8, height - 166)),
+  }
+}
+
+async function showBackgroundMenu(x: number, y: number, returnFocus: HTMLElement) {
+  if (exportingImage.value) return
+  backgroundMenuReturnFocus = returnFocus
+  backgroundMenuPosition.value = clampBackgroundMenuPosition(x, y)
+  await nextTick()
+  backgroundMenu.value
+    ?.querySelector<HTMLElement>('[aria-checked="true"]')
+    ?.focus()
+}
+
+function openBackgroundMenu(event: MouseEvent) {
+  const stage = threeStage.value
+  if (!stage || exportingImage.value) return
+  const bounds = stage.getBoundingClientRect()
+  void showBackgroundMenu(event.clientX - bounds.left, event.clientY - bounds.top, stage)
+}
+
+function toggleBackgroundMenuFromTrigger() {
+  if (exportingImage.value) return
+  if (backgroundMenuPosition.value) {
+    closeBackgroundMenu()
+    return
+  }
+  const stage = threeStage.value
+  if (!stage) return
+  void showBackgroundMenu(stage.clientWidth - 212, 12, backgroundTrigger.value ?? stage)
+}
+
+function focusThreeStage(event: PointerEvent) {
+  if (backgroundMenu.value?.contains(event.target as Node)) return
+  threeStage.value?.focus({ preventScroll: true })
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.matches('input, select, textarea, [contenteditable="true"], [contenteditable=""]')
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && backgroundMenuPosition.value) {
+    event.preventDefault()
+    closeBackgroundMenu(true)
+    return
+  }
+  if (
+    event.defaultPrevented
+    || event.metaKey
+    || event.ctrlKey
+    || event.altKey
+    || exportingImage.value
+    || isEditableShortcutTarget(event.target)
+  ) return
+  const focused = document.activeElement
+  const shortcutIsScoped = focused === threeStage.value
+    || focused === backgroundTrigger.value
+    || (focused instanceof Node && Boolean(backgroundMenu.value?.contains(focused)))
+  if (!shortcutIsScoped) return
+  const background = viewportBackgroundFromShortcut(event.key)
+  if (!background) return
+  event.preventDefault()
+  chooseViewportBackground(background)
+}
+
+function handleBackgroundMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    const background = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-background]')?.dataset.background
+    if (isViewportBackground(background)) {
+      event.preventDefault()
+      chooseViewportBackground(background)
+    }
+    return
+  }
+  const items = [...(backgroundMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? [])]
+  if (!items.length) return
+  const current = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement))
+  let next = current
+  if (event.key === 'ArrowDown') next = (current + 1) % items.length
+  else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = items.length - 1
+  else return
+  event.preventDefault()
+  items[next]?.focus()
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  if (!backgroundMenuPosition.value || !(event.target instanceof Node)) return
+  if (backgroundMenu.value?.contains(event.target) || backgroundTrigger.value?.contains(event.target)) return
+  closeBackgroundMenu()
+}
+
+function handleDocumentFocusIn(event: FocusEvent) {
+  if (!backgroundMenuPosition.value || !(event.target instanceof Node)) return
+  if (backgroundMenu.value?.contains(event.target) || backgroundTrigger.value?.contains(event.target)) return
+  closeBackgroundMenu()
+}
+
+function handleWindowResize() {
+  closeBackgroundMenu()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('resize', handleWindowResize)
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+  document.addEventListener('focusin', handleDocumentFocusIn)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('resize', handleWindowResize)
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+  document.removeEventListener('focusin', handleDocumentFocusIn)
+})
+
+watch(viewportBackground, (background) => {
+  try {
+    window.localStorage.setItem(BACKGROUND_STORAGE_KEY, background)
+  } catch {
+    // Background switching remains available when storage is blocked.
+  }
+})
+
+watch(exportingImage, (isExporting) => {
+  if (isExporting) closeBackgroundMenu()
+})
 
 function selectColorMode(mode: ColorMode) {
   if (mode === 'wireframe' && imageExportQuality.value === 'final') {
@@ -432,13 +618,14 @@ async function downloadImagePng() {
       dimensions: { ...imageExportDimensions.value },
       quality: imageExportQuality.value,
       background: imageExportBackground.value,
+      viewportBackground: viewportBackground.value,
       colorMode: colorMode.value,
     }
     const result = request.quality === 'final'
       ? await threePreview.value.captureFinalPng(request.dimensions, request.background)
       : await threePreview.value.captureHighPng(request.dimensions, request.background)
     const view = previewModes.find((mode) => mode.value === request.colorMode)?.label.toLowerCase() ?? request.colorMode
-    const background = request.background === 'transparent' ? 'transparent' : 'studio'
+    const background = request.background === 'transparent' ? 'transparent' : request.viewportBackground
     const quality = request.quality === 'final' ? 'final' : 'high'
     downloadBlob(`rasterform-${view}-${quality}-${result.width}x${result.height}-${background}.png`, result.blob)
     const sampleDetail = 'samples' in result ? ` · ${result.samples} samples` : ' · 2× edge smoothing'
@@ -464,15 +651,17 @@ async function downloadImagePng() {
   >
     <header class="tool-header">
       <h1>Rasterform</h1>
-      <span>Local</span>
+      <span>Relief studio</span>
     </header>
 
     <div class="workbench">
       <aside class="control-rail" aria-label="Rasterform controls" :inert="exportingImage || undefined">
-        <section class="control-section">
-          <div class="section-number">01</div>
+        <details class="control-section" name="control-rail">
+          <summary class="section-summary">
+            <span class="section-summary__title" role="heading" aria-level="2">Image</span>
+            <span class="section-summary__meta">{{ image.name }}</span>
+          </summary>
           <div class="section-body">
-            <h2>Image</h2>
             <p>{{ image.name }} · {{ image.width }} × {{ image.height }}</p>
             <input ref="fileInput" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" @change="handleFile" />
             <div class="button-row">
@@ -480,12 +669,14 @@ async function downloadImagePng() {
               <button type="button" class="text-button" @click="resetDemo">Use demo</button>
             </div>
           </div>
-        </section>
+        </details>
 
-        <section class="control-section">
-          <div class="section-number">02</div>
+        <details class="control-section" name="control-rail" open>
+          <summary class="section-summary">
+            <span class="section-summary__title" role="heading" aria-level="2">Channel stack</span>
+            <span class="section-summary__meta">{{ stackSummary }}</span>
+          </summary>
           <div class="section-body">
-            <h2>Channel stack</h2>
             <div class="preset-row" role="group" aria-label="Channel stack presets">
               <button
                 v-for="preset in stackPresets"
@@ -573,12 +764,14 @@ async function downloadImagePng() {
             </label>
             <label class="check-label"><input v-model="fieldSettings.invert" type="checkbox" /> Invert composite</label>
           </div>
-        </section>
+        </details>
 
-        <section class="control-section">
-          <div class="section-number">03</div>
+        <details class="control-section" name="control-rail">
+          <summary class="section-summary">
+            <span class="section-summary__title" role="heading" aria-level="2">Geometry</span>
+            <span class="section-summary__meta">{{ activeGeometry.label }}</span>
+          </summary>
           <div class="section-body">
-            <h2>Geometry</h2>
             <div class="mode-list" role="group" aria-label="Geometry mode">
               <button
                 v-for="mode in geometryModes"
@@ -608,7 +801,7 @@ async function downloadImagePng() {
               <small>{{ faceLabel }} triangles</small>
             </label>
           </div>
-        </section>
+        </details>
       </aside>
 
       <section class="preview-column" aria-label="Image and mesh previews">
@@ -623,6 +816,21 @@ async function downloadImagePng() {
                 {{ mode.label }}
               </button>
             </div>
+            <button
+              ref="backgroundTrigger"
+              type="button"
+              class="background-trigger"
+              aria-haspopup="menu"
+              aria-controls="viewport-background-menu"
+              :aria-expanded="Boolean(backgroundMenuPosition)"
+              :aria-label="`Viewport background: ${activeBackground.label}. Choose a background color.`"
+              :title="`Background: ${activeBackground.label} (W / G / B)`"
+              :disabled="exportingImage"
+              @click="toggleBackgroundMenuFromTrigger"
+            >
+              <span class="background-trigger__swatch" :style="{ backgroundColor: activeBackground.color }" aria-hidden="true"></span>
+              <span>BG</span>
+            </button>
             <button
               type="button"
               class="export-image-trigger"
@@ -679,17 +887,53 @@ async function downloadImagePng() {
         </div>
 
         <div
+          ref="threeStage"
           :class="['three-stage', { 'is-export-framed': imageExportOpen }]"
           :style="imageExportOpen ? { '--export-aspect': `${image.width} / ${image.height}` } : undefined"
+          role="region"
+          tabindex="0"
+          aria-label="3D viewport. Right-click for background colors. Keyboard shortcuts: W for white, G for dark gray, B for black."
+          aria-keyshortcuts="W G B"
+          @pointerdown="focusThreeStage"
+          @contextmenu.prevent.stop="openBackgroundMenu"
         >
           <ThreePreview
             ref="threePreview"
             :mesh="mesh"
             :color-mode="colorMode"
             :appearance="appearance"
+            :background="viewportBackground"
             :interaction-locked="exportingImage"
             @export-progress="handleImageExportProgress"
           />
+          <div
+            v-if="backgroundMenuPosition"
+            id="viewport-background-menu"
+            ref="backgroundMenu"
+            class="background-menu"
+            :style="backgroundMenuStyle"
+            role="menu"
+            aria-label="Viewport background"
+            @click.stop
+            @keydown="handleBackgroundMenuKeydown"
+            @contextmenu.prevent.stop
+          >
+            <p>Background</p>
+            <button
+              v-for="preset in VIEWPORT_BACKGROUNDS"
+              :key="preset.value"
+              type="button"
+              role="menuitemradio"
+              :data-background="preset.value"
+              :aria-checked="viewportBackground === preset.value"
+              :tabindex="viewportBackground === preset.value ? 0 : -1"
+              @click="chooseViewportBackground(preset.value)"
+            >
+              <span class="background-menu__swatch" :style="{ backgroundColor: preset.color }" aria-hidden="true"></span>
+              <span>{{ preset.label }}</span>
+              <kbd>{{ preset.shortcut }}</kbd>
+            </button>
+          </div>
           <div v-if="dragging" class="drop-curtain">Drop image</div>
         </div>
 
@@ -737,7 +981,9 @@ async function downloadImagePng() {
               <legend>Background</legend>
               <div class="export-choice-group">
                 <button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button>
-                <button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Studio backdrop</button>
+                <button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">
+                  Current background<small>{{ activeBackground.label }}</small>
+                </button>
               </div>
             </fieldset>
           </div>
@@ -775,41 +1021,52 @@ async function downloadImagePng() {
           </div>
         </section>
 
-        <div class="two-d-previews">
-          <figure>
-            <figcaption><span>source</span><strong>{{ image.name }}</strong></figcaption>
-            <canvas ref="sourceCanvas" aria-label="Source image preview" />
-          </figure>
-          <figure>
-            <figcaption><span>derived field</span><strong>{{ stackSummary }}</strong></figcaption>
-            <canvas ref="heightCanvas" aria-label="Computed grayscale height map preview" />
-          </figure>
-        </div>
+        <details class="preview-drawer">
+          <summary class="preview-drawer__summary">
+            <span>
+              <span class="eyebrow">Reference maps</span>
+              <strong role="heading" aria-level="2">Source &amp; height field</strong>
+            </span>
+            <span class="preview-drawer__meta">{{ image.width }} × {{ image.height }}</span>
+          </summary>
+          <div class="two-d-previews">
+            <figure>
+              <figcaption><span>source</span><strong>{{ image.name }}</strong></figcaption>
+              <canvas ref="sourceCanvas" aria-label="Source image preview" />
+            </figure>
+            <figure>
+              <figcaption><span>derived field</span><strong>{{ stackSummary }}</strong></figcaption>
+              <canvas ref="heightCanvas" aria-label="Computed grayscale height map preview" />
+            </figure>
+          </div>
+        </details>
 
-        <section class="mesh-ledger" aria-labelledby="mesh-health-title">
-          <div class="mesh-ledger__heading">
-            <div>
-              <p class="eyebrow">Mesh</p>
-              <h2 id="mesh-health-title">Mesh health</h2>
-            </div>
+        <details class="mesh-ledger">
+          <summary class="mesh-ledger__heading">
+            <span class="mesh-ledger__title">
+              <span class="eyebrow">Mesh</span>
+              <span id="mesh-health-title" class="mesh-ledger__name" role="heading" aria-level="2">Mesh health</span>
+            </span>
             <strong :class="['health-state', { good: topology.watertight }]">
               {{ topology.watertight ? 'watertight' : meshSettings.mode === 'solid' ? 'check mesh' : 'open surface' }}
             </strong>
+          </summary>
+          <div class="mesh-ledger__body">
+            <dl>
+              <div><dt>Vertices</dt><dd>{{ topology.vertices.toLocaleString() }}</dd></div>
+              <div><dt>Faces</dt><dd>{{ topology.faces.toLocaleString() }}</dd></div>
+              <div><dt>Boundary loops</dt><dd>{{ topology.boundaryLoops }}</dd></div>
+              <div><dt>Non-manifold edges</dt><dd>{{ topology.nonManifoldEdges }}</dd></div>
+              <div><dt>Components</dt><dd>{{ topology.connectedComponents }}</dd></div>
+              <div><dt>Euler χ</dt><dd>{{ topology.eulerCharacteristic }}</dd></div>
+            </dl>
+            <p>
+              {{ topology.watertight
+                ? 'STL ready'
+                : 'STL requires a closed mesh' }}
+            </p>
           </div>
-          <dl>
-            <div><dt>Vertices</dt><dd>{{ topology.vertices.toLocaleString() }}</dd></div>
-            <div><dt>Faces</dt><dd>{{ topology.faces.toLocaleString() }}</dd></div>
-            <div><dt>Boundary loops</dt><dd>{{ topology.boundaryLoops }}</dd></div>
-            <div><dt>Non-manifold edges</dt><dd>{{ topology.nonManifoldEdges }}</dd></div>
-            <div><dt>Components</dt><dd>{{ topology.connectedComponents }}</dd></div>
-            <div><dt>Euler χ</dt><dd>{{ topology.eulerCharacteristic }}</dd></div>
-          </dl>
-          <p>
-            {{ topology.watertight
-              ? 'STL ready'
-              : 'STL requires a closed mesh' }}
-          </p>
-        </section>
+        </details>
 
         <section class="export-strip" aria-label="3D and project files">
           <div>

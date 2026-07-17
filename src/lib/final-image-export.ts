@@ -6,8 +6,10 @@ import type {
   ColorMode,
   ImageExportBackground,
   MeshData,
+  ViewportBackground,
 } from '../types'
 import { buildPathTracingScene } from './path-tracer-setup'
+import { viewportBackgroundPreset } from './background'
 import {
   configureStudioRenderer,
   createFinalRenderScene,
@@ -64,6 +66,7 @@ export interface FinalImageExportOptions {
   width: number
   height: number
   background: ImageExportBackground
+  studioBackground: ViewportBackground
   signal?: AbortSignal
   onProgress?: (progress: FinalExportProgress) => void
 }
@@ -182,6 +185,10 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
     throw new Error('The final image canvas is too large for this device. Try 2K.')
   }
   output.clearRect(0, 0, width, height)
+  if (options.background !== 'transparent') {
+    output.fillStyle = viewportBackgroundPreset(options.studioBackground).color
+    output.fillRect(0, 0, width, height)
+  }
 
   const tileCanvas = document.createElement('canvas')
   let renderer: THREE.WebGLRenderer | null = null
@@ -193,7 +200,10 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
     options.colorMode,
     options.appearance,
     options.environment,
-    options.background,
+    // Trace against transparency, then composite the requested neutral backdrop
+    // in 2D so AgX shapes the model lighting without dimming the flat color.
+    'transparent',
+    options.studioBackground,
   )
   const exportCamera = options.camera.clone()
   exportCamera.aspect = width / height
@@ -212,7 +222,7 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
     })
     renderer.setPixelRatio(1)
     configureStudioRenderer(renderer)
-    renderer.setClearColor(0x000000, options.background === 'transparent' ? 0 : 1)
+    renderer.setClearColor(0x000000, 0)
     assertTileSupport(renderer, tiles)
 
     const [{ WebGLPathTracer, DenoiseMaterial }, { GenerateMeshBVHWorker }] = await Promise.all([
@@ -304,7 +314,7 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
       checkCancelled(options.signal)
       denoiseMaterial.map = tracer.target.texture
       renderer.setRenderTarget(null)
-      renderer.setClearColor(0x000000, options.background === 'transparent' ? 0 : 1)
+      renderer.setClearColor(0x000000, 0)
       renderer.clear(true, true, true)
       denoiseQuad.render(renderer)
       output.drawImage(
