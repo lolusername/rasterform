@@ -4,3 +4,9 @@ dist
 *.local
 coverage
 .firebase/
+
+# Firebase
+.firebaserc
+firebase.json
+.firebase/
+firebase-debug.log*
