@@ -34,6 +34,7 @@ function samplePngWithDensity(width = 1, height = 1, colorType = 6): Uint8Array 
     new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
     pngChunk('IHDR', header),
     pngChunk('pHYs', new Uint8Array(9)),
+    pngChunk('IDAT', new Uint8Array([1])),
     pngChunk('IEND', new Uint8Array()),
   ]
   const output = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0))
@@ -457,7 +458,7 @@ describe('transparent viewport export', () => {
       offset += length + 12
       if (type === 'IEND') break
     }
-    expect(types).toEqual(['IHDR', 'pHYs', 'IEND'])
+    expect(types).toEqual(['IHDR', 'pHYs', 'IDAT', 'IEND'])
     const view = new DataView(png.buffer, png.byteOffset + densityOffset + 8, 9)
     expect(view.getUint32(0, false)).toBe(11811)
     expect(view.getUint32(4, false)).toBe(11811)
@@ -473,6 +474,8 @@ describe('transparent viewport export', () => {
       bitDepth: 8,
       colorType: 6,
       hasAlpha: true,
+      hasImageData: true,
+      complete: true,
     })
     expect(() => assertPngContract(rgba, 4096, 2560, true)).not.toThrow()
     expect(() => assertPngContract(samplePngWithDensity(4096, 2560, 2), 4096, 2560, true))

@@ -389,7 +389,7 @@ const imageExportHelp = computed(() => {
   if (request.colorMode === 'wireframe') return 'Wireframe exports use High quality.'
   if (request.quality === 'high') return 'Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.'
   if (Math.max(request.dimensions.width, request.dimensions.height) > 4096) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
-  return `Refined light and shadows · ${request.samples} samples with gentle denoising · background rendering keeps the studio responsive.`
+  return `Path-traced light and shadows · ${request.samples} samples with gentle denoising · Final may pause the studio while it renders.`
 })
 const imageExportProgressLabel = computed(() => {
   if (imageExportProgress.phase === 'preparing') return `Preparing geometry · ${Math.round(imageExportProgress.progress * 100)}%`

@@ -217,34 +217,8 @@ async function captureFinalPng(
     if (controller.signal.aborted) throw new DOMException('Final image export cancelled.', 'AbortError')
     if (!canvas.value || !camera) throw new Error('Viewport is no longer available.')
 
-    if (canUseImageExportWorker()) {
-      let workerMadeProgress = false
-      try {
-        return await renderImageExportInWorker({
-          quality: 'final',
-          mesh: exportMesh,
-          colorMode: exportColorMode,
-          appearance: exportAppearance,
-          environment,
-          camera: exportCamera,
-          width: dimensions.width,
-          height: dimensions.height,
-          background,
-          studioBackground: exportBackground,
-          signal: controller.signal,
-          onProgress: (progress) => {
-            workerMadeProgress = true
-            emit('export-progress', progress)
-          },
-        })
-      } catch (error) {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
-        if (workerMadeProgress) throw error
-        // Keep the startup-only compatibility path at identical samples and
-        // denoise quality without repeating a partially rendered job.
-      }
-    }
-
+    // Final stays on the main thread so its BVH worker is never nested inside
+    // another worker. Some browsers leave nested module workers pending forever.
     mainThreadExport.value = true
     if (controls) controls.enabled = false
     return await renderFinalImagePng({

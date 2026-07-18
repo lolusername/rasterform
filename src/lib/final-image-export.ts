@@ -239,6 +239,18 @@ function defaultFinalRuntime(): FinalImageExportRuntime {
   }
 }
 
+/**
+ * Chrome can spend minutes polling compilation status and shader diagnostics
+ * for the path tracer's large production shader. The dedicated Final renderer
+ * does not need development diagnostics, and rendering the first sample will
+ * synchronously finish the exact same shader program without changing any
+ * path-tracing settings or output quality.
+ */
+export function configureFinalShaderCompilation(renderer: THREE.WebGLRenderer): void {
+  renderer.debug.checkShaderErrors = false
+  renderer.compileAsync = async (object: THREE.Object3D) => object
+}
+
 function assertTileSupport(renderer: THREE.WebGLRenderer, tiles: FinalRenderTile[]): void {
   const gl = renderer.getContext()
   const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array
@@ -328,6 +340,7 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
     renderer = runtime.createRenderer(tileCanvas)
     renderer.setPixelRatio(1)
     configureStudioRenderer(renderer)
+    configureFinalShaderCompilation(renderer)
     renderer.setClearColor(0x000000, 0)
     assertTileSupport(renderer, tiles)
 

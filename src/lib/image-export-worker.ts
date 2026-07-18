@@ -7,10 +7,8 @@ import type {
   ViewportBackground,
   ViewportSupersample,
 } from '../types'
-import type { FinalExportProgress, FinalImagePngResult } from './final-image-export'
+import type { FinalExportProgress } from './final-image-export'
 import type { ViewportPngResult } from './viewport-export'
-
-export type ImageExportWorkerQuality = 'high' | 'final'
 
 type TexturePixels = Float32Array | Uint16Array | Uint8Array
 
@@ -47,7 +45,7 @@ export interface ImageExportEnvironmentSnapshot {
 
 export interface ImageExportWorkerRequest {
   type: 'render'
-  quality: ImageExportWorkerQuality
+  quality: 'high'
   mesh: MeshData
   colorMode: ColorMode
   appearance: AppearanceSettings
@@ -63,7 +61,6 @@ export interface ImageExportWorkerRequest {
 export type ImageExportWorkerResponse =
   | { type: 'progress'; progress: FinalExportProgress }
   | { type: 'result'; quality: 'high'; result: ViewportPngResult }
-  | { type: 'result'; quality: 'final'; result: FinalImagePngResult }
   | { type: 'error'; name: string; message: string }
 
 interface BaseWorkerOptions {
@@ -83,10 +80,6 @@ interface BaseWorkerOptions {
 export interface HighWorkerOptions extends BaseWorkerOptions {
   quality: 'high'
   supersample: ViewportSupersample
-}
-
-export interface FinalWorkerOptions extends BaseWorkerOptions {
-  quality: 'final'
 }
 
 function abortError(): DOMException {
@@ -156,11 +149,9 @@ export function canUseImageExportWorker(): boolean {
   return typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined'
 }
 
-export function renderImageExportInWorker(options: HighWorkerOptions): Promise<ViewportPngResult>
-export function renderImageExportInWorker(options: FinalWorkerOptions): Promise<FinalImagePngResult>
 export function renderImageExportInWorker(
-  options: HighWorkerOptions | FinalWorkerOptions,
-): Promise<ViewportPngResult | FinalImagePngResult> {
+  options: HighWorkerOptions,
+): Promise<ViewportPngResult> {
   if (!canUseImageExportWorker()) return Promise.reject(new Error('Dedicated image rendering is unavailable.'))
   if (options.signal?.aborted) return Promise.reject(abortError())
 
@@ -181,7 +172,7 @@ export function renderImageExportInWorker(
     height: options.height,
     background: options.background,
     studioBackground: options.studioBackground,
-    supersample: options.quality === 'high' ? options.supersample : 1,
+    supersample: options.supersample,
   }
   const transfers: Transferable[] = [
     mesh.positions.buffer,

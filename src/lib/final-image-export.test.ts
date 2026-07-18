@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import { createDefaultAppearanceSettings } from './three'
 import {
   calculateFinalRenderTiles,
   applyFinalTileView,
   awaitExportTask,
+  configureFinalShaderCompilation,
   createFinalProgressReporter,
   FINAL_BATCH_BUDGET_MS,
   FINAL_DENOISE_SETTINGS,
@@ -16,6 +17,21 @@ import {
 } from './final-image-export'
 
 describe('final image export contract', () => {
+  it('bypasses only Chrome shader polling without changing the Final render program', async () => {
+    const originalCompile = vi.fn(async (object: THREE.Object3D) => object)
+    const renderer = {
+      debug: { checkShaderErrors: true },
+      compileAsync: originalCompile,
+    } as unknown as THREE.WebGLRenderer
+    const object = new THREE.Object3D()
+
+    configureFinalShaderCompilation(renderer)
+
+    expect(renderer.debug.checkShaderErrors).toBe(false)
+    await expect(renderer.compileAsync(object, new THREE.PerspectiveCamera())).resolves.toBe(object)
+    expect(originalCompile).not.toHaveBeenCalled()
+  })
+
   it('covers every output pixel once while keeping denoise gutters inside the image', () => {
     const width = 2305
     const height = 1537

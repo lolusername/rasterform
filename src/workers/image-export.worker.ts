@@ -2,9 +2,7 @@
 
 import * as THREE from 'three'
 import {
-  renderFinalImagePng,
   type FinalExportProgress,
-  type FinalImageExportRuntime,
 } from '../lib/final-image-export'
 import type {
   ImageExportCameraSnapshot,
@@ -91,14 +89,6 @@ const viewportRuntime: ViewportExportRuntime = {
   yieldToHost: cooperativeExportYield,
 }
 
-const finalRuntime: FinalImageExportRuntime = {
-  createCanvas: createOffscreenCanvas,
-  createRenderer: (canvas) => createOffscreenRenderer(canvas, false),
-  encodeCanvas: encodeExportCanvasPng,
-  yieldToHost: cooperativeExportYield,
-  now: () => performance.now(),
-}
-
 function postProgress(progress: FinalExportProgress) {
   const response: ImageExportWorkerResponse = { type: 'progress', progress }
   workerScope.postMessage(response)
@@ -160,28 +150,9 @@ async function renderRequest(request: ImageExportWorkerRequest) {
   const camera = restoreCamera(request.camera, request.width, request.height)
 
   try {
-    if (request.quality === 'high') {
-      const result = await renderHigh(request, camera, environment, controller.signal)
-      const response: ImageExportWorkerResponse = { type: 'result', quality: 'high', result }
-      workerScope.postMessage(response)
-    } else {
-      const result = await renderFinalImagePng({
-        mesh: request.mesh,
-        colorMode: request.colorMode,
-        appearance: request.appearance,
-        environment,
-        camera,
-        width: request.width,
-        height: request.height,
-        background: request.background,
-        studioBackground: request.studioBackground,
-        signal: controller.signal,
-        onProgress: postProgress,
-        runtime: finalRuntime,
-      })
-      const response: ImageExportWorkerResponse = { type: 'result', quality: 'final', result }
-      workerScope.postMessage(response)
-    }
+    const result = await renderHigh(request, camera, environment, controller.signal)
+    const response: ImageExportWorkerResponse = { type: 'result', quality: 'high', result }
+    workerScope.postMessage(response)
   } catch (error) {
     const response: ImageExportWorkerResponse = {
       type: 'error',

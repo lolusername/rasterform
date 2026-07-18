@@ -50,6 +50,8 @@ export interface PngHeader {
   bitDepth: number
   colorType: number
   hasAlpha: boolean
+  hasImageData: boolean
+  complete: boolean
 }
 
 export function calculateViewportDimensions(
@@ -149,13 +151,23 @@ export function inspectPngHeader(bytes: Uint8Array): PngHeader {
     throw new Error('The PNG is missing a valid image header.')
   }
   let hasTransparencyChunk = false
+  let hasImageData = false
+  let complete = false
   let offset = 8
   while (offset + 12 <= bytes.length) {
     const length = view.getUint32(offset, false)
+    const total = length + 12
+    if (total < 12 || offset + total > bytes.length) {
+      throw new Error('The PNG contains a truncated chunk.')
+    }
     const type = chunkType(bytes, offset)
     if (type === 'tRNS') hasTransparencyChunk = true
-    offset += length + 12
-    if (type === 'IEND') break
+    if (type === 'IDAT' && length > 0) hasImageData = true
+    offset += total
+    if (type === 'IEND') {
+      complete = length === 0
+      break
+    }
   }
   const colorType = bytes[25] ?? -1
   return {
@@ -164,6 +176,8 @@ export function inspectPngHeader(bytes: Uint8Array): PngHeader {
     bitDepth: bytes[24] ?? 0,
     colorType,
     hasAlpha: colorType === 4 || colorType === 6 || hasTransparencyChunk,
+    hasImageData,
+    complete,
   }
 }
 
@@ -179,6 +193,12 @@ export function assertPngContract(
   }
   if (transparent && !header.hasAlpha) {
     throw new Error('Transparency check failed: the encoded PNG has no alpha channel.')
+  }
+  if (!header.hasImageData) {
+    throw new Error('PNG content check failed: the encoded file has no image data.')
+  }
+  if (!header.complete) {
+    throw new Error('PNG content check failed: the encoded file is incomplete.')
   }
 }
 

@@ -15,7 +15,7 @@ It is a focused **2.5D tool**: more tactile than an image editor, more immediate
 
 Right-click the 3D viewport to choose a white, dark-gray, or black background, or use the `W`, `G`, and `B` shortcuts. The background is always a flat color—no floor or grid geometry is added to the viewport or image exports.
 
-Opening Export swaps the right-hand inspector without resizing the screen-bounded viewport or visible WebGL canvas. High and Final images render from a dedicated background worker when supported, with a cooperative fallback, so the editor and Cancel control remain responsive without changing resolution, supersampling, path-tracing samples, or denoising quality.
+Opening Export swaps the right-hand inspector without resizing the screen-bounded viewport or visible WebGL canvas. High images use a dedicated background renderer when supported. Final keeps the full path-traced sample and denoising contract on the main thread, where its BVH worker is not nested inside another worker; it may pause the studio while it renders, but preserves the requested resolution, material, lighting, and background options.
 
 Rasterform can export transparent 2K/4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
 
