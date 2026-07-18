@@ -9,13 +9,15 @@ It is a focused **2.5D tool**: more tactile than an image editor, more immediate
 ## A visual workflow
 
 1. **Read the image** — use brightness, hue, saturation, color channels, transparency, or edges as height.
-2. **Compose the surface** — layer signals, carve details, soften transitions, quantize steps, and control depth.
+2. **Compose the surface** — layer signals, carve details, soften transitions, quantize steps, or use Blob mode to dilate and round forms into organic mounds.
 3. **Find the material** — explore original color, height gradients, clay finishes, or wireframe structure.
 4. **Light and export** — work quickly in the HDR studio preview, switch to a progressive Final Render, or continue in other tools.
 
 Right-click the 3D viewport to choose a white, dark-gray, or black background, or use the `W`, `G`, and `B` shortcuts. The background is always a flat color—no floor or grid geometry is added to the viewport or image exports.
 
-Rasterform can export transparent 4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
+Opening image export fits the output framing inside the existing screen-bounded viewport; it never enlarges the visible WebGL canvas. High and Final images render from a dedicated background worker when supported, with a cooperative fallback, so the editor and Cancel control remain responsive without changing resolution, supersampling, path-tracing samples, or denoising quality.
+
+Rasterform can export transparent 2K/4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
 
 ## Why channels matter
 

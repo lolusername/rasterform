@@ -83,6 +83,11 @@ input[type="range"] { width: 100%; accent-color: var(--lime); }
 .channel-inspector legend { padding: 8px 8px 8px 0; color: var(--cyan); font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.065em; text-transform: uppercase; }
 .channel-inspector label { margin: 0; }
 .composite-heading { margin: 0; padding: 12px 0 10px; border-top: 1px solid var(--ink); font-family: var(--mono); font-size: 0.68rem; font-weight: 400; letter-spacing: 0.065em; text-transform: uppercase; }
+.composite-finish-switcher { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--rule); border-left: 1px solid var(--rule); }
+.composite-finish-switcher button { min-height: 44px; padding: 8px; color: var(--ink); background: transparent; border: 0; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-family: var(--mono); font-size: 0.68rem; text-transform: uppercase; cursor: pointer; }
+.composite-finish-switcher button:hover { background: var(--panel-soft); }
+.composite-finish-switcher button[aria-pressed="true"] { color: var(--ground); background: var(--lime); }
+.control-help { margin: 10px 0 14px !important; color: var(--muted); font-family: var(--mono); font-size: 0.65rem; line-height: 1.5; }
 .mode-list { margin: 12px 0 18px; border-top: 1px solid var(--rule); }
 .mode-list button { display: block; width: 100%; padding: 12px 8px; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--rule); cursor: pointer; }
 .mode-list button[aria-pressed="true"] { color: var(--ground); background: var(--lime); }
@@ -122,8 +127,10 @@ input[type="range"] { width: 100%; accent-color: var(--lime); }
 .finish-switcher button { min-height: 38px; padding: 7px 11px; color: var(--ink); background: transparent; border: 0; border-right: 1px solid var(--rule); font-family: var(--mono); font-size: 0.65rem; text-transform: uppercase; cursor: pointer; }
 .finish-switcher button:last-child { border-right: 0; }
 .finish-switcher button[aria-pressed="true"] { color: var(--ground); background: var(--cyan); }
-.three-stage { position: relative; height: clamp(420px, 62vw, 780px); max-height: 72vh; min-height: 420px; border-bottom: 1px solid var(--ink); }
-.three-stage.is-export-framed { height: auto; min-height: 0; max-height: none; aspect-ratio: var(--export-aspect); }
+.three-stage { position: relative; display: grid; place-items: center; height: clamp(420px, 62vw, 780px); max-height: 72dvh; min-height: min(420px, 72dvh); overflow: hidden; border-bottom: 1px solid var(--ink); }
+.three-stage.is-export-framed { background: #0b0d0a; }
+.three-viewport-frame { position: relative; width: 100%; height: 100%; min-width: 1px; min-height: 1px; }
+.three-stage.is-export-framed .three-viewport-frame { outline: 1px solid color-mix(in srgb, var(--ink) 42%, transparent); }
 .three-stage:focus-visible { outline: 3px solid var(--lime); outline-offset: -3px; }
 .three-preview { display: block; width: 100%; height: 100%; touch-action: none; }
 .background-menu { position: absolute; z-index: 7; width: 196px; padding: 7px; color: var(--ink); background: color-mix(in srgb, var(--panel) 96%, transparent); border: 1px solid var(--ink); box-shadow: 0 16px 40px rgb(0 0 0 / 0.38); backdrop-filter: blur(12px); }
@@ -168,8 +175,6 @@ input[type="range"] { width: 100%; accent-color: var(--lime); }
 .image-export-primary:hover:not(:disabled) { color: var(--lime); background: transparent; }
 .export-fallback { color: var(--ink); background: transparent; border: 1px solid var(--rule); }
 .export-fallback:hover { border-color: var(--lime); }
-.is-exporting-image .control-rail, .is-exporting-image .view-switcher, .is-exporting-image .material-controls { opacity: 0.55; }
-
 .preview-drawer { border-bottom: 1px solid var(--ink); }
 .preview-drawer__summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 18px; gap: 16px; align-items: center; min-height: 70px; padding: 12px 18px; list-style: none; cursor: pointer; }
 .preview-drawer__summary:hover, .mesh-ledger__heading:hover { background: var(--panel); }
@@ -259,7 +264,7 @@ figcaption strong { font-weight: 400; overflow-wrap: anywhere; }
   .mesh-ledger__title { grid-area: title; }
   .mesh-ledger__heading .health-state { grid-area: status; justify-self: start; }
   .mesh-ledger__heading::after { grid-area: toggle; }
-  .three-stage { min-height: 380px; }
+  .three-stage { min-height: min(380px, 72dvh); }
   .channel-layer__actions button { width: 42px; }
 }
 

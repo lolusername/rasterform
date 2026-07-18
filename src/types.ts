@@ -12,6 +12,7 @@ export type HeightSource =
 export type GeometryMode = 'plane' | 'centered' | 'solid'
 export type ColorMode = 'original' | 'height' | 'clay' | 'wireframe'
 export type ChannelBlendMode = 'normal' | 'add' | 'subtract' | 'multiply' | 'screen' | 'max' | 'min'
+export type CompositeFinish = 'detail' | 'blob'
 export type ClayFinish = 'matte' | 'glossy' | 'metallic'
 export type ViewportBackground = 'white' | 'dark-gray' | 'black'
 export type ImageExportQuality = 'high' | 'final'
@@ -37,6 +38,9 @@ export interface FieldSettings {
   blur: number
   contrast: number
   quantize: number
+  finish: CompositeFinish
+  blobDilation: number
+  blobSmoothing: number
 }
 
 export interface ChannelLayer {
@@ -99,7 +103,7 @@ export interface TopologyReport {
 }
 
 export interface Recipe {
-  version: 3
+  version: 4
   app: 'Rasterform'
   image: { name: string; width: number; height: number }
   channels: ChannelLayer[]

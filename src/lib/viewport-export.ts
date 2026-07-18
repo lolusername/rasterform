@@ -27,9 +27,21 @@ export interface ViewportPngResult extends ViewportDimensions {
   supersample: ViewportSupersample
 }
 
+export type ExportCanvas = HTMLCanvasElement | OffscreenCanvas
+
+export interface ViewportExportProgress {
+  phase: 'rendering' | 'finishing'
+  progress: number
+  tile: number
+  tiles: number
+}
+
 export interface ViewportExportRuntime {
-  createCanvas: () => HTMLCanvasElement
-  createRenderer: (canvas: HTMLCanvasElement) => THREE.WebGLRenderer
+  /** An OffscreenCanvas can be returned here when rendering inside a worker. */
+  createCanvas: () => ExportCanvas
+  createRenderer: (canvas: ExportCanvas) => THREE.WebGLRenderer
+  encodeCanvas?: (canvas: ExportCanvas) => Promise<Blob>
+  yieldToHost?: () => Promise<void>
 }
 
 export interface PngHeader {
@@ -220,10 +232,30 @@ export function setPngDensity(bytes: Uint8Array, dpi = PNG_DPI): Uint8Array {
   return output
 }
 
-async function canvasPng(canvas: HTMLCanvasElement): Promise<Blob> {
+export async function encodeExportCanvasPng(canvas: ExportCanvas): Promise<Blob> {
+  if ('convertToBlob' in canvas) {
+    return canvas.convertToBlob({ type: 'image/png' })
+  }
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
   if (!blob) throw new Error('The browser could not encode the viewport PNG.')
   return blob
+}
+
+/** Yield a macrotask so input, paint, progress, and worker cancellation can run. */
+export function cooperativeExportYield(): Promise<void> {
+  const scheduler = (globalThis as typeof globalThis & {
+    scheduler?: { yield?: () => Promise<void> }
+  }).scheduler
+  if (scheduler?.yield) return scheduler.yield()
+  return new Promise((resolve) => globalThis.setTimeout(resolve, 0))
+}
+
+function viewportAbortError(): DOMException {
+  return new DOMException('Image export cancelled.', 'AbortError')
+}
+
+function checkViewportCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw viewportAbortError()
 }
 
 export async function renderViewportPng(options: {
@@ -234,20 +266,25 @@ export async function renderViewportPng(options: {
   height: number
   supersample?: ViewportSupersample
   runtime?: ViewportExportRuntime
+  signal?: AbortSignal
+  onProgress?: (progress: ViewportExportProgress) => void
 }): Promise<ViewportPngResult> {
   const width = Math.max(1, Math.round(options.width))
   const height = Math.max(1, Math.round(options.height))
   const supersample = options.supersample ?? 2
   const runtime = options.runtime ?? {
     createCanvas: () => document.createElement('canvas'),
-    createRenderer: (canvas: HTMLCanvasElement) => new THREE.WebGLRenderer({
-      canvas,
+    createRenderer: (canvas: ExportCanvas) => new THREE.WebGLRenderer({
+      canvas: canvas as HTMLCanvasElement,
       alpha: true,
       antialias: true,
       preserveDrawingBuffer: true,
       powerPreference: 'high-performance',
     }),
   }
+  const encodeCanvas = runtime.encodeCanvas ?? encodeExportCanvasPng
+  const yieldToHost = runtime.yieldToHost ?? cooperativeExportYield
+  checkViewportCancelled(options.signal)
   const outputCanvas = runtime.createCanvas()
   outputCanvas.width = width
   outputCanvas.height = height
@@ -298,7 +335,10 @@ export async function renderViewportPng(options: {
     exportCamera.updateMatrixWorld(true)
     options.scene.updateMatrixWorld(true)
 
-    for (const tile of tiles) {
+    options.onProgress?.({ phase: 'rendering', progress: 0, tile: 0, tiles: tiles.length })
+    for (let tileIndex = 0; tileIndex < tiles.length; tileIndex += 1) {
+      const tile = tiles[tileIndex]!
+      checkViewportCancelled(options.signal)
       const paddedTile = padRenderTile(tile, width, height, gutter)
       const supersampledTile = {
         x: paddedTile.renderX * supersample,
@@ -333,10 +373,24 @@ export async function renderViewportPng(options: {
         paddedTile.renderHeight,
       )
       output.restore()
+      const completedTiles = tileIndex + 1
+      options.onProgress?.({
+        phase: 'rendering',
+        progress: completedTiles / tiles.length,
+        tile: completedTiles,
+        tiles: tiles.length,
+      })
+      await yieldToHost()
+      checkViewportCancelled(options.signal)
     }
 
-    const raw = await canvasPng(outputCanvas)
+    options.onProgress?.({ phase: 'finishing', progress: 1, tile: tiles.length, tiles: tiles.length })
+    await yieldToHost()
+    checkViewportCancelled(options.signal)
+    const raw = await encodeCanvas(outputCanvas)
+    checkViewportCancelled(options.signal)
     const png = setPngDensity(new Uint8Array(await raw.arrayBuffer()), PNG_DPI)
+    checkViewportCancelled(options.signal)
     assertPngContract(png, width, height, transparent)
     const payload = new ArrayBuffer(png.byteLength)
     new Uint8Array(payload).set(png)
@@ -348,6 +402,7 @@ export async function renderViewportPng(options: {
       supersample,
     }
   } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
     const detail = error instanceof Error ? error.message : 'Unknown rendering error.'
     throw new Error(`Viewport PNG failed: ${detail}`)
   } finally {

@@ -20,6 +20,7 @@ import {
 } from './lib/final-image-export'
 import { createDefaultAppearanceSettings } from './lib/three'
 import { calculateViewportDimensions, type ViewportPngResult } from './lib/viewport-export'
+import { fitViewportFrame } from './lib/viewport-frame'
 import type {
   AppearanceSettings,
   ChannelBlendMode,
@@ -49,6 +50,15 @@ interface ThreePreviewHandle {
   cancelImageExport: () => void
 }
 
+interface ImageExportRequestSnapshot {
+  dimensions: { width: number; height: number }
+  quality: ImageExportQuality
+  background: ImageExportBackground
+  viewportBackground: ViewportBackground
+  colorMode: ColorMode
+  samples: number
+}
+
 const image = shallowRef(createDemoImage())
 const threePreview = ref<ThreePreviewHandle | null>(null)
 const sourceCanvas = ref<HTMLCanvasElement | null>(null)
@@ -69,7 +79,10 @@ const imageExportBackground = ref<ImageExportBackground>('transparent')
 const imageExportError = ref('')
 const imageExportNotice = ref('')
 const imageExportAnnouncement = ref('')
+const activeImageExportRequest = shallowRef<ImageExportRequestSnapshot | null>(null)
 const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
+const stageBounds = reactive({ width: 1, height: 1 })
+let stageResizeObserver: ResizeObserver | null = null
 
 function initialViewportBackground(): ViewportBackground {
   try {
@@ -90,7 +103,7 @@ const imageExportProgress = reactive<FinalExportProgress>({
   tile: 0,
   tiles: 0,
   samples: 0,
-  targetSamples: 256,
+  targetSamples: 1,
 })
 const appearance = reactive<AppearanceSettings>(createDefaultAppearanceSettings())
 let channelSequence = 0
@@ -117,6 +130,9 @@ const fieldSettings = reactive<FieldSettings>({
   blur: 1,
   contrast: 8,
   quantize: 0,
+  finish: 'detail',
+  blobDilation: 6,
+  blobSmoothing: 8,
 })
 
 const channelLayers = reactive<ChannelLayer[]>([
@@ -172,7 +188,15 @@ const stackPresets: StackPreset[] = [
       { source: 'luminance', blend: 'add', amount: 0.86, invert: false, hueOrigin: 0, enabled: true },
       { source: 'edges', blend: 'add', amount: 0.28, invert: false, hueOrigin: 0, enabled: true },
     ],
-    field: { invert: false, blur: 1, contrast: 8, quantize: 0 },
+    field: {
+      invert: false,
+      blur: 1,
+      contrast: 8,
+      quantize: 0,
+      finish: 'detail',
+      blobDilation: 6,
+      blobSmoothing: 8,
+    },
   },
   {
     key: 'chroma-strata',
@@ -183,7 +207,15 @@ const stackPresets: StackPreset[] = [
       { source: 'hue', blend: 'screen', amount: 0.72, invert: false, hueOrigin: 0.96, enabled: true },
       { source: 'edges', blend: 'add', amount: 0.2, invert: false, hueOrigin: 0, enabled: true },
     ],
-    field: { invert: false, blur: 1, contrast: 10, quantize: 6 },
+    field: {
+      invert: false,
+      blur: 1,
+      contrast: 10,
+      quantize: 6,
+      finish: 'detail',
+      blobDilation: 6,
+      blobSmoothing: 8,
+    },
   },
   {
     key: 'ink-emboss',
@@ -193,7 +225,15 @@ const stackPresets: StackPreset[] = [
       { source: 'luminance', blend: 'add', amount: 0.58, invert: true, hueOrigin: 0, enabled: true },
       { source: 'edges', blend: 'add', amount: 0.68, invert: false, hueOrigin: 0, enabled: true },
     ],
-    field: { invert: false, blur: 0, contrast: 18, quantize: 0 },
+    field: {
+      invert: false,
+      blur: 0,
+      contrast: 18,
+      quantize: 0,
+      finish: 'detail',
+      blobDilation: 6,
+      blobSmoothing: 8,
+    },
   },
 ]
 
@@ -231,27 +271,55 @@ const imageExportDimensions = computed(() => calculateViewportDimensions(
   image.value.height,
   imageExportLongEdge.value,
 ))
-const imageExportUnsupported = computed(() =>
-  imageExportQuality.value === 'final'
-  && (colorMode.value === 'wireframe' || imageExportLongEdge.value === 8192))
+const displayImageExportRequest = computed<ImageExportRequestSnapshot>(() =>
+  activeImageExportRequest.value ?? {
+    dimensions: imageExportDimensions.value,
+    quality: imageExportQuality.value,
+    background: imageExportBackground.value,
+    viewportBackground: viewportBackground.value,
+    colorMode: colorMode.value,
+    samples: imageExportQuality.value === 'final'
+      ? finalSampleTarget(colorMode.value, appearance)
+      : 1,
+  })
+const exportPreviewFrameStyle = computed(() => {
+  if (!imageExportOpen.value) return undefined
+  const frame = fitViewportFrame(
+    image.value.width / image.value.height,
+    stageBounds.width,
+    stageBounds.height,
+  )
+  return {
+    width: `${frame.width}px`,
+    height: `${frame.height}px`,
+  }
+})
+const imageExportUnsupported = computed(() => {
+  const request = displayImageExportRequest.value
+  return request.quality === 'final'
+    && (request.colorMode === 'wireframe' || Math.max(request.dimensions.width, request.dimensions.height) > 4096)
+})
 const imageExportSummary = computed(() => {
-  const { width, height } = imageExportDimensions.value
-  const background = imageExportBackground.value === 'transparent'
+  const request = displayImageExportRequest.value
+  const { width, height } = request.dimensions
+  const background = request.background === 'transparent'
     ? 'transparent'
-    : `${activeBackground.value.label.toLowerCase()} background`
-  const quality = imageExportQuality.value === 'final' ? 'Final' : 'High'
+    : `${viewportBackgroundPreset(request.viewportBackground).label.toLowerCase()} background`
+  const quality = request.quality === 'final' ? 'Final' : 'High'
   return `${quality} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} PNG`
 })
 const imageExportHelp = computed(() => {
-  if (colorMode.value === 'wireframe') return 'Wireframe exports use High quality.'
-  if (imageExportQuality.value === 'high') return 'Clean 2× edge smoothing. Best for most images; exports in seconds.'
-  if (imageExportLongEdge.value === 8192) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
-  const samples = finalSampleTarget(colorMode.value, appearance)
-  return `Refined light and shadows · ${samples} samples with gentle denoising · may take several minutes.`
+  const request = displayImageExportRequest.value
+  if (request.colorMode === 'wireframe') return 'Wireframe exports use High quality.'
+  if (request.quality === 'high') return 'Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.'
+  if (Math.max(request.dimensions.width, request.dimensions.height) > 4096) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
+  return `Refined light and shadows · ${request.samples} samples with gentle denoising · background snapshot rendering keeps the studio responsive.`
 })
 const imageExportProgressLabel = computed(() => {
   if (imageExportProgress.phase === 'preparing') return `Preparing geometry · ${Math.round(imageExportProgress.progress * 100)}%`
   if (imageExportProgress.phase === 'finishing') return 'Finishing PNG…'
+  if (displayImageExportRequest.value.quality === 'high') return `Rendering supersampled tiles · ${Math.round(imageExportProgress.progress * 100)}%`
+  if (imageExportProgress.samples === 0) return 'Preparing Final renderer…'
   return `Refining light and shadows · ${Math.round(imageExportProgress.progress * 100)}%`
 })
 
@@ -288,7 +356,6 @@ function closeBackgroundMenu(restoreFocus = false) {
 }
 
 function chooseViewportBackground(background: ViewportBackground) {
-  if (exportingImage.value) return
   viewportBackground.value = background
   closeBackgroundMenu(true)
   status.value = `Viewport background · ${viewportBackgroundPreset(background).label}`
@@ -306,7 +373,6 @@ function clampBackgroundMenuPosition(x: number, y: number) {
 }
 
 async function showBackgroundMenu(x: number, y: number, returnFocus: HTMLElement) {
-  if (exportingImage.value) return
   backgroundMenuReturnFocus = returnFocus
   backgroundMenuPosition.value = clampBackgroundMenuPosition(x, y)
   await nextTick()
@@ -317,13 +383,12 @@ async function showBackgroundMenu(x: number, y: number, returnFocus: HTMLElement
 
 function openBackgroundMenu(event: MouseEvent) {
   const stage = threeStage.value
-  if (!stage || exportingImage.value) return
+  if (!stage) return
   const bounds = stage.getBoundingClientRect()
   void showBackgroundMenu(event.clientX - bounds.left, event.clientY - bounds.top, stage)
 }
 
 function toggleBackgroundMenuFromTrigger() {
-  if (exportingImage.value) return
   if (backgroundMenuPosition.value) {
     closeBackgroundMenu()
     return
@@ -354,7 +419,6 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     || event.metaKey
     || event.ctrlKey
     || event.altKey
-    || exportingImage.value
     || isEditableShortcutTarget(event.target)
   ) return
   const focused = document.activeElement
@@ -406,11 +470,20 @@ function handleWindowResize() {
   closeBackgroundMenu()
 }
 
+function updateStageBounds() {
+  if (!threeStage.value) return
+  stageBounds.width = Math.max(1, threeStage.value.clientWidth)
+  stageBounds.height = Math.max(1, threeStage.value.clientHeight)
+}
+
 onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', handleWindowResize)
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   document.addEventListener('focusin', handleDocumentFocusIn)
+  stageResizeObserver = new ResizeObserver(updateStageBounds)
+  if (threeStage.value) stageResizeObserver.observe(threeStage.value)
+  updateStageBounds()
 })
 
 onBeforeUnmount(() => {
@@ -418,6 +491,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleWindowResize)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
   document.removeEventListener('focusin', handleDocumentFocusIn)
+  stageResizeObserver?.disconnect()
+  stageResizeObserver = null
 })
 
 watch(viewportBackground, (background) => {
@@ -433,7 +508,7 @@ watch(exportingImage, (isExporting) => {
 })
 
 function selectColorMode(mode: ColorMode) {
-  if (mode === 'wireframe' && imageExportQuality.value === 'final') {
+  if (mode === 'wireframe' && imageExportQuality.value === 'final' && !exportingImage.value) {
     imageExportQuality.value = 'high'
     imageExportNotice.value = 'Wireframe exports use High quality.'
   }
@@ -517,7 +592,7 @@ async function updateCanvases() {
 watch([image, heightField], updateCanvases, { immediate: true })
 
 async function openFile(file?: File) {
-  if (!file || exportingImage.value) return
+  if (!file) return
   try {
     image.value = await fileToPixelImage(file)
     status.value = `${file.name} · ${image.value.width} × ${image.value.height}`
@@ -533,7 +608,6 @@ function handleFile(event: Event) {
 
 function handleDrop(event: DragEvent) {
   dragging.value = false
-  if (exportingImage.value) return
   void openFile(event.dataTransfer?.files?.[0])
 }
 
@@ -544,7 +618,7 @@ function resetDemo() {
 
 function recipe(): Recipe {
   return {
-    version: 3,
+    version: 4,
     app: 'Rasterform',
     image: { name: image.value.name, width: image.value.width, height: image.value.height },
     channels: channelLayers.map((layer) => ({ ...layer })),
@@ -579,7 +653,7 @@ function downloadStl() {
 
 function cancelImageExport() {
   threePreview.value?.cancelImageExport()
-  imageExportNotice.value = 'Cancelling final render…'
+  imageExportNotice.value = 'Cancelling image export…'
 }
 
 function friendlyImageExportError(error: unknown): string {
@@ -599,28 +673,32 @@ async function downloadImagePng() {
     return
   }
   if (imageExportUnsupported.value) return
+  const request: ImageExportRequestSnapshot = {
+    dimensions: { ...imageExportDimensions.value },
+    quality: imageExportQuality.value,
+    background: imageExportBackground.value,
+    viewportBackground: viewportBackground.value,
+    colorMode: colorMode.value,
+    samples: imageExportQuality.value === 'final'
+      ? finalSampleTarget(colorMode.value, appearance)
+      : 1,
+  }
+  activeImageExportRequest.value = request
   exportingImage.value = true
   imageExportError.value = ''
   imageExportNotice.value = ''
-  imageExportAnnouncement.value = imageExportQuality.value === 'final' ? 'Preparing final image.' : 'Rendering image.'
+  imageExportAnnouncement.value = request.quality === 'final' ? 'Preparing final image.' : 'Rendering image.'
   lastAnnouncedPhase = ''
   lastAnnouncedBucket = -1
   Object.assign(imageExportProgress, {
-    phase: imageExportQuality.value === 'final' ? 'preparing' : 'rendering',
+    phase: request.quality === 'final' ? 'preparing' : 'rendering',
     progress: 0,
     tile: 0,
     tiles: 0,
     samples: 0,
-    targetSamples: finalSampleTarget(colorMode.value, appearance),
+    targetSamples: request.samples,
   } satisfies FinalExportProgress)
   try {
-    const request = {
-      dimensions: { ...imageExportDimensions.value },
-      quality: imageExportQuality.value,
-      background: imageExportBackground.value,
-      viewportBackground: viewportBackground.value,
-      colorMode: colorMode.value,
-    }
     const result = request.quality === 'final'
       ? await threePreview.value.captureFinalPng(request.dimensions, request.background)
       : await threePreview.value.captureHighPng(request.dimensions, request.background)
@@ -634,9 +712,13 @@ async function downloadImagePng() {
   } catch (error) {
     const friendly = friendlyImageExportError(error)
     if (friendly) imageExportError.value = friendly
-    else imageExportNotice.value = 'Final render cancelled.'
+    else imageExportNotice.value = 'Image export cancelled.'
   } finally {
     exportingImage.value = false
+    activeImageExportRequest.value = null
+    if (colorMode.value === 'wireframe' && imageExportQuality.value === 'final') {
+      imageExportQuality.value = 'high'
+    }
   }
 }
 </script>
@@ -655,7 +737,7 @@ async function downloadImagePng() {
     </header>
 
     <div class="workbench">
-      <aside class="control-rail" aria-label="Rasterform controls" :inert="exportingImage || undefined">
+      <aside class="control-rail" aria-label="Rasterform controls">
         <details class="control-section" name="control-rail">
           <summary class="section-summary">
             <span class="section-summary__title" role="heading" aria-level="2">Image</span>
@@ -750,8 +832,31 @@ async function downloadImagePng() {
             </fieldset>
 
             <h3 class="composite-heading">Composite finish</h3>
+            <div class="composite-finish-switcher" role="group" aria-label="Composite surface finish" aria-describedby="blob-mode-help">
+              <button type="button" :aria-pressed="fieldSettings.finish === 'detail'" @click="fieldSettings.finish = 'detail'">
+                Detail
+              </button>
+              <button type="button" :aria-pressed="fieldSettings.finish === 'blob'" @click="fieldSettings.finish = 'blob'">
+                Blob mode
+              </button>
+            </div>
+            <p id="blob-mode-help" class="control-help">
+              Blob mode expands high forms, then rounds them into exaggerated organic surfaces without sharp peaks.
+            </p>
+            <template v-if="fieldSettings.finish === 'blob'">
+              <label>
+                <span>Blob dilation <output>{{ fieldSettings.blobDilation }}px</output></span>
+                <input v-model.number="fieldSettings.blobDilation" type="range" min="0" max="20" step="1" aria-describedby="blob-mode-help" />
+                <small>Spreads raised areas outward before rounding.</small>
+              </label>
+              <label>
+                <span>Blob smoothing <output>{{ fieldSettings.blobSmoothing }}px</output></span>
+                <input v-model.number="fieldSettings.blobSmoothing" type="range" min="0" max="24" step="1" aria-describedby="blob-mode-help" />
+                <small>Softens the dilated field into broad, organic mounds.</small>
+              </label>
+            </template>
             <label>
-              <span>Smoothing <output>{{ fieldSettings.blur }}px</output></span>
+              <span>Base smoothing <output>{{ fieldSettings.blur }}px</output></span>
               <input v-model.number="fieldSettings.blur" type="range" min="0" max="8" step="1" />
             </label>
             <label>
@@ -811,7 +916,7 @@ async function downloadImagePng() {
             <strong>{{ activeGeometry.label }} / {{ stackSummary }}</strong>
           </div>
           <div class="preview-tools">
-            <div class="view-switcher" role="group" aria-label="Viewport material" :inert="exportingImage || undefined">
+            <div class="view-switcher" role="group" aria-label="Viewport material">
               <button v-for="mode in previewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">
                 {{ mode.label }}
               </button>
@@ -825,7 +930,6 @@ async function downloadImagePng() {
               :aria-expanded="Boolean(backgroundMenuPosition)"
               :aria-label="`Viewport background: ${activeBackground.label}. Choose a background color.`"
               :title="`Background: ${activeBackground.label} (W / G / B)`"
-              :disabled="exportingImage"
               @click="toggleBackgroundMenuFromTrigger"
             >
               <span class="background-trigger__swatch" :style="{ backgroundColor: activeBackground.color }" aria-hidden="true"></span>
@@ -844,7 +948,7 @@ async function downloadImagePng() {
           </div>
         </div>
 
-        <div v-if="colorMode === 'height'" class="material-controls" aria-label="Height gradient settings" :inert="exportingImage || undefined">
+        <div v-if="colorMode === 'height'" class="material-controls" aria-label="Height gradient settings">
           <div class="material-controls__label">Height gradient</div>
           <div class="gradient-preview" :style="gradientPreviewStyle" aria-hidden="true"></div>
           <div class="gradient-pickers">
@@ -870,7 +974,7 @@ async function downloadImagePng() {
           </label>
         </div>
 
-        <div v-if="colorMode === 'clay'" class="material-controls clay-controls" aria-label="Clay material settings" :inert="exportingImage || undefined">
+        <div v-if="colorMode === 'clay'" class="material-controls clay-controls" aria-label="Clay material settings">
           <label class="clay-color">
             <span>Clay color</span>
             <input v-model="appearance.clay.color" type="color" aria-label="Clay color" />
@@ -889,7 +993,6 @@ async function downloadImagePng() {
         <div
           ref="threeStage"
           :class="['three-stage', { 'is-export-framed': imageExportOpen }]"
-          :style="imageExportOpen ? { '--export-aspect': `${image.width} / ${image.height}` } : undefined"
           role="region"
           tabindex="0"
           aria-label="3D viewport. Right-click for background colors. Keyboard shortcuts: W for white, G for dark gray, B for black."
@@ -897,15 +1000,16 @@ async function downloadImagePng() {
           @pointerdown="focusThreeStage"
           @contextmenu.prevent.stop="openBackgroundMenu"
         >
-          <ThreePreview
-            ref="threePreview"
-            :mesh="mesh"
-            :color-mode="colorMode"
-            :appearance="appearance"
-            :background="viewportBackground"
-            :interaction-locked="exportingImage"
-            @export-progress="handleImageExportProgress"
-          />
+          <div class="three-viewport-frame" :style="exportPreviewFrameStyle">
+            <ThreePreview
+              ref="threePreview"
+              :mesh="mesh"
+              :color-mode="colorMode"
+              :appearance="appearance"
+              :background="viewportBackground"
+              @export-progress="handleImageExportProgress"
+            />
+          </div>
           <div
             v-if="backgroundMenuPosition"
             id="viewport-background-menu"
@@ -937,7 +1041,13 @@ async function downloadImagePng() {
           <div v-if="dragging" class="drop-curtain">Drop image</div>
         </div>
 
-        <section v-if="imageExportOpen" id="image-export-panel" class="image-export-panel" aria-labelledby="image-export-title">
+        <section
+          v-if="imageExportOpen"
+          id="image-export-panel"
+          class="image-export-panel"
+          aria-labelledby="image-export-title"
+          :aria-busy="exportingImage"
+        >
           <header class="image-export-header">
             <div>
               <p class="eyebrow">Image export</p>
@@ -989,7 +1099,7 @@ async function downloadImagePng() {
           </div>
 
           <p class="image-export-help">{{ imageExportHelp }}</p>
-          <div v-if="exportingImage && imageExportQuality === 'final'" class="image-export-progress">
+          <div v-if="exportingImage" class="image-export-progress">
             <span>{{ imageExportProgressLabel }}</span>
             <progress
               :value="imageExportProgress.progress"
@@ -999,7 +1109,8 @@ async function downloadImagePng() {
             >{{ imageExportProgress.progress }}</progress>
             <details v-if="imageExportProgress.phase === 'rendering'">
               <summary>Render details</summary>
-              <p>Tile {{ imageExportProgress.tile }} / {{ imageExportProgress.tiles }} · {{ imageExportProgress.samples }} / {{ imageExportProgress.targetSamples }} samples</p>
+              <p v-if="displayImageExportRequest.quality === 'final'">Tile {{ imageExportProgress.tile }} / {{ imageExportProgress.tiles }} · {{ imageExportProgress.samples }} / {{ imageExportProgress.targetSamples }} samples</p>
+              <p v-else>Tile {{ imageExportProgress.tile }} / {{ imageExportProgress.tiles }} · 2× supersampling</p>
             </details>
           </div>
           <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
@@ -1011,11 +1122,11 @@ async function downloadImagePng() {
             <button
               type="button"
               class="image-export-primary"
-              :disabled="imageExportUnsupported || (exportingImage && imageExportQuality === 'high')"
+              :disabled="imageExportUnsupported"
               @click="downloadImagePng"
             >
               {{ exportingImage
-                ? imageExportQuality === 'final' ? 'Cancel render' : 'Rendering…'
+                ? 'Cancel export'
                 : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}
             </button>
           </div>

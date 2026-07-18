@@ -16,12 +16,17 @@ import {
 } from '../lib/three'
 import { viewportBackgroundPreset } from '../lib/background'
 import {
+  canUseImageExportWorker,
+  renderImageExportInWorker,
+} from '../lib/image-export-worker'
+import {
+  awaitExportTask,
   renderFinalImagePng,
   type FinalExportProgress,
   type FinalImagePngResult,
 } from '../lib/final-image-export'
 import { renderViewportPng } from '../lib/viewport-export'
-import type { ViewportPngResult } from '../lib/viewport-export'
+import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
 import type {
   AppearanceSettings,
   ColorMode,
@@ -46,6 +51,7 @@ const emit = defineEmits<{
 }>()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
+const exportActive = ref(false)
 const canvasStyle = computed(() => ({
   backgroundColor: viewportBackgroundPreset(props.background).color,
 }))
@@ -61,6 +67,7 @@ let resizeObserver: ResizeObserver | null = null
 let environment: THREE.DataTexture | null = null
 let environmentReady: Promise<void> | null = null
 let activeExport: AbortController | null = null
+const mainThreadExport = ref(false)
 let animationFrame = 0
 let mounted = false
 
@@ -94,6 +101,10 @@ async function captureHighPng(
   background: ImageExportBackground,
 ): Promise<ViewportPngResult> {
   if (!canvas.value || !renderer || !camera) throw new Error('Viewport is not ready.')
+  cancelImageExport()
+  const controller = new AbortController()
+  activeExport = controller
+  exportActive.value = true
   controls?.update()
   camera.updateMatrixWorld(true)
   const exportCamera = camera.clone()
@@ -104,27 +115,77 @@ async function captureHighPng(
     clay: { ...props.appearance.clay },
   }
   const exportBackground = props.background
-  await environmentReady
-  if (!canvas.value || !renderer || !camera) throw new Error('Viewport is no longer available.')
-  const renderScene = createFinalRenderScene(
-    exportMesh,
-    exportColorMode,
-    exportAppearance,
-    environment,
-    background,
-    exportBackground,
-  )
   try {
-    return await renderViewportPng({
-      scene: renderScene.scene,
-      camera: exportCamera,
-      liveRenderer: renderer,
-      width: dimensions.width,
-      height: dimensions.height,
-      supersample: 2,
+    await awaitExportTask(environmentReady ?? Promise.resolve(), controller.signal)
+    if (controller.signal.aborted) throw new DOMException('Image export cancelled.', 'AbortError')
+    if (!canvas.value || !renderer || !camera) throw new Error('Viewport is no longer available.')
+
+    if (canUseImageExportWorker()) {
+      let workerMadeProgress = false
+      try {
+        return await renderImageExportInWorker({
+          quality: 'high',
+          mesh: exportMesh,
+          colorMode: exportColorMode,
+          appearance: exportAppearance,
+          environment,
+          camera: exportCamera,
+          width: dimensions.width,
+          height: dimensions.height,
+          background,
+          studioBackground: exportBackground,
+          supersample: 2,
+          signal: controller.signal,
+          onProgress: (progress) => {
+            workerMadeProgress = true
+            emit('export-progress', progress)
+          },
+        })
+      } catch (error) {
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+        if (workerMadeProgress) throw error
+        // Older browsers and constrained GPUs fall back to the same tiled render
+        // on the main thread only when the background renderer never started.
+      }
+    }
+
+    mainThreadExport.value = true
+    if (controls) controls.enabled = false
+    const renderScene = createFinalRenderScene(
+      exportMesh,
+      exportColorMode,
+      exportAppearance,
+      environment,
+      background,
+      exportBackground,
+    )
+    const reportHighProgress = (progress: ViewportExportProgress) => emit('export-progress', {
+      phase: progress.phase,
+      progress: progress.progress,
+      tile: progress.tile,
+      tiles: progress.tiles,
+      samples: progress.progress >= 1 ? 1 : 0,
+      targetSamples: 1,
     })
+    try {
+      return await renderViewportPng({
+        scene: renderScene.scene,
+        camera: exportCamera,
+        liveRenderer: renderer,
+        width: dimensions.width,
+        height: dimensions.height,
+        supersample: 2,
+        signal: controller.signal,
+        onProgress: reportHighProgress,
+      })
+    } finally {
+      disposeFinalRenderScene(renderScene)
+    }
   } finally {
-    disposeFinalRenderScene(renderScene)
+    if (activeExport === controller) activeExport = null
+    mainThreadExport.value = false
+    exportActive.value = false
+    if (controls) controls.enabled = !props.interactionLocked
   }
 }
 
@@ -137,10 +198,10 @@ async function captureFinalPng(
     throw new Error('8K Final is too large for a reliable browser render. Choose 4K or High quality.')
   }
   cancelImageExport()
-  activeExport = new AbortController()
-  const controller = activeExport
+  const controller = new AbortController()
+  activeExport = controller
+  exportActive.value = true
   controls?.update()
-  controls && (controls.enabled = false)
   camera.updateMatrixWorld(true)
   const exportCamera = camera.clone()
   const exportMesh = props.mesh
@@ -151,9 +212,40 @@ async function captureFinalPng(
   }
   const exportBackground = props.background
   try {
-    await environmentReady
+    await awaitExportTask(environmentReady ?? Promise.resolve(), controller.signal)
     if (controller.signal.aborted) throw new DOMException('Final image export cancelled.', 'AbortError')
     if (!canvas.value || !camera) throw new Error('Viewport is no longer available.')
+
+    if (canUseImageExportWorker()) {
+      let workerMadeProgress = false
+      try {
+        return await renderImageExportInWorker({
+          quality: 'final',
+          mesh: exportMesh,
+          colorMode: exportColorMode,
+          appearance: exportAppearance,
+          environment,
+          camera: exportCamera,
+          width: dimensions.width,
+          height: dimensions.height,
+          background,
+          studioBackground: exportBackground,
+          signal: controller.signal,
+          onProgress: (progress) => {
+            workerMadeProgress = true
+            emit('export-progress', progress)
+          },
+        })
+      } catch (error) {
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+        if (workerMadeProgress) throw error
+        // Keep the startup-only compatibility path at identical samples and
+        // denoise quality without repeating a partially rendered job.
+      }
+    }
+
+    mainThreadExport.value = true
+    if (controls) controls.enabled = false
     return await renderFinalImagePng({
       mesh: exportMesh,
       colorMode: exportColorMode,
@@ -169,13 +261,14 @@ async function captureFinalPng(
     })
   } finally {
     if (activeExport === controller) activeExport = null
+    mainThreadExport.value = false
+    exportActive.value = false
     if (controls) controls.enabled = !props.interactionLocked
   }
 }
 
 function cancelImageExport() {
   activeExport?.abort()
-  activeExport = null
 }
 
 defineExpose({ captureHighPng, captureFinalPng, cancelImageExport })
@@ -193,7 +286,7 @@ function resize() {
 function render() {
   animationFrame = requestAnimationFrame(render)
   controls?.update()
-  if (!activeExport) composer?.render()
+  if (!mainThreadExport.value) composer?.render()
 }
 
 async function loadEnvironment() {
@@ -290,7 +383,7 @@ watch(() => props.background, updateBackground)
 watch(
   () => props.interactionLocked,
   (locked) => {
-    if (controls) controls.enabled = !locked && !activeExport
+    if (controls) controls.enabled = !locked && !mainThreadExport.value
   },
 )
 
@@ -314,9 +407,11 @@ onBeforeUnmount(() => {
     ref="canvas"
     class="three-preview"
     :style="canvasStyle"
-    :aria-busy="interactionLocked"
-    :aria-label="interactionLocked
+    :aria-busy="exportActive"
+    :aria-label="interactionLocked || mainThreadExport
       ? '3D preview locked while the image renders.'
-      : 'Orbitable 3D preview of the channel-driven relief. Drag to rotate and scroll to zoom.'"
+      : exportActive
+        ? 'An image snapshot is rendering in the background. The 3D preview remains orbitable.'
+        : 'Orbitable 3D preview of the channel-driven relief. Drag to rotate and scroll to zoom.'"
   />
 </template>

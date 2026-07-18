@@ -11,6 +11,10 @@ export default defineConfig({
     ],
   },
 
+  worker: {
+    format: 'es',
+  },
+
   test: {
     environment: 'node',
   },

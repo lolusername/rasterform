@@ -10,6 +10,7 @@ import {
   padRenderTile,
   renderViewportPng,
   setPngDensity,
+  type ViewportExportProgress,
 } from './viewport-export'
 import type { ViewportExportRuntime } from './viewport-export'
 
@@ -89,9 +90,12 @@ describe('transparent viewport export', () => {
   it('executes a transparent four-tile capture without mutating live scene state', async () => {
     const draws: unknown[][] = []
     const renderViews: Array<{ x: number; y: number; guideVisible: boolean; background: THREE.Scene['background'] }> = []
+    const progress: ViewportExportProgress[] = []
     let clearAlpha = -1
     let disposed = false
     let contextLost = false
+    let yields = 0
+    let encoded = false
     const outputContext = {
       clearRect: () => undefined,
       drawImage: (...args: unknown[]) => draws.push(args),
@@ -171,6 +175,14 @@ describe('transparent viewport export', () => {
     const runtime: ViewportExportRuntime = {
       createCanvas: () => canvases.shift()!,
       createRenderer: () => fakeRenderer,
+      yieldToHost: async () => { yields += 1 },
+      encodeCanvas: async (canvas) => {
+        encoded = true
+        const bytes = samplePngWithDensity(canvas.width, canvas.height)
+        const payload = new ArrayBuffer(bytes.byteLength)
+        new Uint8Array(payload).set(bytes)
+        return new Blob([payload], { type: 'image/png' })
+      },
     }
 
     const result = await renderViewportPng({
@@ -181,6 +193,7 @@ describe('transparent viewport export', () => {
       height: 4096,
       supersample: 1,
       runtime,
+      onProgress: (update) => progress.push(update),
     })
 
     expect(result.width).toBe(4096)
@@ -196,6 +209,16 @@ describe('transparent viewport export', () => {
     expect(camera.position.toArray()).toEqual([2, -2, 3])
     expect(disposed).toBe(true)
     expect(contextLost).toBe(true)
+    expect(encoded).toBe(true)
+    expect(yields).toBe(5)
+    expect(progress.map(({ phase, progress: value, tile }) => [phase, value, tile])).toEqual([
+      ['rendering', 0, 0],
+      ['rendering', 0.25, 1],
+      ['rendering', 0.5, 2],
+      ['rendering', 0.75, 3],
+      ['rendering', 1, 4],
+      ['finishing', 1, 4],
+    ])
   })
 
   it('renders a default 2× 4K export in GPU-safe tiles with complete logical coverage', async () => {
@@ -291,6 +314,7 @@ describe('transparent viewport export', () => {
     const runtime: ViewportExportRuntime = {
       createCanvas: () => canvases.shift()!,
       createRenderer: () => fakeRenderer,
+      yieldToHost: async () => undefined,
     }
 
     const result = await renderViewportPng({
@@ -335,6 +359,89 @@ describe('transparent viewport export', () => {
     }
     expect(draws).toHaveLength(25)
     expect(coverage.every((count) => count === 1)).toBe(true)
+  })
+
+  it('cancels High quality between tiles and still releases its renderer and canvases', async () => {
+    const controller = new AbortController()
+    let renders = 0
+    let disposed = false
+    let contextLost = false
+    let yields = 0
+    const outputContext = {
+      clearRect: () => undefined,
+      drawImage: () => undefined,
+      save: () => undefined,
+      beginPath: () => undefined,
+      rect: () => undefined,
+      clip: () => undefined,
+      restore: () => undefined,
+    } as unknown as CanvasRenderingContext2D
+    const fakeCanvas = (context: CanvasRenderingContext2D | null) => ({
+      width: 300,
+      height: 150,
+      getContext: (kind: string) => kind === '2d' ? context : null,
+    }) as unknown as HTMLCanvasElement
+    const outputCanvas = fakeCanvas(outputContext)
+    const tileCanvas = fakeCanvas(null)
+    const canvases = [outputCanvas, tileCanvas]
+    const gl = {
+      MAX_VIEWPORT_DIMS: 1,
+      MAX_TEXTURE_SIZE: 2,
+      MAX_RENDERBUFFER_SIZE: 3,
+      getParameter: (parameter: number) => parameter === 1 ? new Int32Array([1, 1]) : 1,
+    }
+    const fakeRenderer = {
+      domElement: tileCanvas,
+      outputColorSpace: THREE.SRGBColorSpace,
+      toneMapping: THREE.NoToneMapping,
+      toneMappingExposure: 1,
+      shadowMap: { enabled: false, type: THREE.PCFShadowMap },
+      setPixelRatio: () => undefined,
+      setClearColor: () => undefined,
+      getContext: () => gl,
+      setSize: (width: number, height: number) => {
+        tileCanvas.width = width
+        tileCanvas.height = height
+      },
+      render: () => { renders += 1 },
+      dispose: () => { disposed = true },
+      forceContextLoss: () => { contextLost = true },
+    } as unknown as THREE.WebGLRenderer
+    const liveRenderer = {
+      outputColorSpace: THREE.SRGBColorSpace,
+      toneMapping: THREE.NoToneMapping,
+      toneMappingExposure: 1,
+      shadowMap: { enabled: false, type: THREE.PCFShadowMap },
+    } as unknown as THREE.WebGLRenderer
+    const runtime: ViewportExportRuntime = {
+      createCanvas: () => canvases.shift()!,
+      createRenderer: () => fakeRenderer,
+      encodeCanvas: async () => { throw new Error('Encoding should not start after cancellation.') },
+      yieldToHost: async () => {
+        yields += 1
+        controller.abort()
+      },
+    }
+
+    await expect(renderViewportPng({
+      scene: new THREE.Scene(),
+      camera: new THREE.PerspectiveCamera(38, 1, 0.01, 100),
+      liveRenderer,
+      width: 2,
+      height: 1,
+      supersample: 1,
+      runtime,
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' })
+
+    expect(renders).toBe(1)
+    expect(yields).toBe(1)
+    expect(disposed).toBe(true)
+    expect(contextLost).toBe(true)
+    expect(outputCanvas.width).toBe(1)
+    expect(outputCanvas.height).toBe(1)
+    expect(tileCanvas.width).toBe(1)
+    expect(tileCanvas.height).toBe(1)
   })
 
   it('replaces browser density metadata with one 300-PPI pHYs chunk', () => {

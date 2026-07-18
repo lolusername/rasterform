@@ -4,8 +4,15 @@ import { createDefaultAppearanceSettings } from './three'
 import {
   calculateFinalRenderTiles,
   applyFinalTileView,
+  awaitExportTask,
+  createFinalProgressReporter,
+  FINAL_BATCH_BUDGET_MS,
+  FINAL_DENOISE_SETTINGS,
   FINAL_DENOISE_PADDING,
+  FINAL_PATH_TRACER_TILES,
+  FINAL_PROGRESS_INTERVAL_MS,
   finalSampleTarget,
+  type FinalExportProgress,
 } from './final-image-export'
 
 describe('final image export contract', () => {
@@ -47,6 +54,56 @@ describe('final image export contract', () => {
     expect(finalSampleTarget('clay', appearance)).toBe(2048)
   })
 
+  it('splits GPU work without reducing the sampling or denoise quality contract', () => {
+    expect(FINAL_BATCH_BUDGET_MS).toBe(6)
+    expect(FINAL_PATH_TRACER_TILES).toBe(3)
+    expect(FINAL_DENOISE_PADDING).toBe(8)
+    expect(FINAL_DENOISE_SETTINGS).toEqual({ sigma: 2.5, kSigma: 1.5, threshold: 0.055 })
+  })
+
+  it('throttles routine progress to 10 Hz while always reporting phase changes and completion', () => {
+    let timestamp = 0
+    const updates: FinalExportProgress[] = []
+    const report = createFinalProgressReporter(
+      (progress) => updates.push(progress),
+      () => timestamp,
+    )
+    const progress = (
+      phase: FinalExportProgress['phase'],
+      value: number,
+      samples = 0,
+    ): FinalExportProgress => ({
+      phase,
+      progress: value,
+      tile: phase === 'preparing' ? 0 : 1,
+      tiles: 1,
+      samples,
+      targetSamples: 1536,
+    })
+
+    report(progress('preparing', 0))
+    timestamp = FINAL_PROGRESS_INTERVAL_MS - 1
+    report(progress('preparing', 0.5))
+    timestamp = FINAL_PROGRESS_INTERVAL_MS
+    report(progress('preparing', 0.6))
+    timestamp += 1
+    report(progress('rendering', 0, 0))
+    timestamp += 1
+    report(progress('rendering', 0.25, 384))
+    timestamp += 1
+    report(progress('rendering', 1, 1536))
+    timestamp += 1
+    report(progress('finishing', 1, 1536))
+
+    expect(updates.map(({ phase, progress: value }) => [phase, value])).toEqual([
+      ['preparing', 0],
+      ['preparing', 0.6],
+      ['rendering', 0],
+      ['rendering', 1],
+      ['finishing', 1],
+    ])
+  })
+
   it('applies every padded tile coordinate to the camera exactly once', () => {
     const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100)
     const tile = calculateFinalRenderTiles(4096, 2560, 1024, 4)[5]!
@@ -61,5 +118,20 @@ describe('final image export contract', () => {
       width: tile.renderWidth,
       height: tile.renderHeight,
     })
+  })
+
+  it('rejects cancellation immediately without leaving a late preparation failure unobserved', async () => {
+    const controller = new AbortController()
+    let rejectPreparation: (error: Error) => void = () => undefined
+    const preparation = new Promise<void>((_resolve, reject) => {
+      rejectPreparation = reject
+    })
+    const awaited = awaitExportTask(preparation, controller.signal)
+
+    controller.abort()
+    await expect(awaited).rejects.toMatchObject({ name: 'AbortError' })
+
+    rejectPreparation(new Error('late BVH failure'))
+    await Promise.resolve()
   })
 })
