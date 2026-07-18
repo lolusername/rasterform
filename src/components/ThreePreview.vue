@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js'
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
@@ -36,7 +36,7 @@ import type {
 } from '../types'
 
 const props = withDefaults(defineProps<{
-  mesh: MeshData
+  mesh: MeshData | null
   colorMode: ColorMode
   appearance: AppearanceSettings
   background?: ViewportBackground
@@ -87,6 +87,7 @@ function disposeLiveObject() {
 function updateObject() {
   if (!scene) return
   disposeLiveObject()
+  if (!props.mesh) return
   object = createThreeMesh(props.mesh, props.colorMode, props.appearance)
   scene.add(object)
 }
@@ -100,7 +101,7 @@ async function captureHighPng(
   dimensions: { width: number; height: number },
   background: ImageExportBackground,
 ): Promise<ViewportPngResult> {
-  if (!canvas.value || !renderer || !camera) throw new Error('Viewport is not ready.')
+  if (!canvas.value || !renderer || !camera || !props.mesh) throw new Error('There is no model to export.')
   cancelImageExport()
   const controller = new AbortController()
   activeExport = controller
@@ -193,7 +194,7 @@ async function captureFinalPng(
   dimensions: { width: number; height: number },
   background: ImageExportBackground,
 ): Promise<FinalImagePngResult> {
-  if (!canvas.value || !camera) throw new Error('Viewport is not ready.')
+  if (!canvas.value || !camera || !props.mesh) throw new Error('There is no model to export.')
   if (Math.max(dimensions.width, dimensions.height) > 4096) {
     throw new Error('8K Final is too large for a reliable browser render. Choose 4K or High quality.')
   }
@@ -291,7 +292,7 @@ function render() {
 
 async function loadEnvironment() {
   try {
-    const texture = await new RGBELoader().loadAsync('/hdri/studio_small_08_1k.hdr')
+    const texture = await new HDRLoader().loadAsync('/hdri/studio_small_08_1k.hdr')
     texture.mapping = THREE.EquirectangularReflectionMapping
     if (!mounted || !scene) {
       texture.dispose()
@@ -412,6 +413,8 @@ onBeforeUnmount(() => {
       ? '3D preview locked while the image renders.'
       : exportActive
         ? 'An image snapshot is rendering in the background. The 3D preview remains orbitable.'
-        : 'Orbitable 3D preview of the channel-driven relief. Drag to rotate and scroll to zoom.'"
+        : mesh
+          ? 'Orbitable 3D model preview. Drag to rotate and scroll to zoom.'
+          : '3D viewport. Add content to generate a model.'"
   />
 </template>

@@ -2,22 +2,28 @@
 
 **Turn color, light, and texture into dimensional form.**
 
-Rasterform is a browser-based relief studio for artists and designers. Bring in a PNG, JPEG, or WebP, choose which parts of the image should rise or recede, then shape, light, and export the result as a finished image or 3D object.
+Rasterform is a browser-based 3D form studio for artists and designers. Bring in a PNG, JPEG, or WebP and choose which parts should rise or recede, or switch to the separate Text workspace and turn an installed font into beveled, extruded geometry. Then shape, light, and export the result as a finished image or 3D object.
 
 It is a focused **2.5D tool**: more tactile than an image editor, more immediate than building a displacement setup in Blender, and honest about what it creates. Rasterform interprets the image you can see; it does not invent hidden depth.
 
 ## A visual workflow
 
-1. **Read the image** — use brightness, hue, saturation, color channels, transparency, or edges as height.
-2. **Compose the surface** — layer signals, carve details, soften transitions, quantize steps, or use Blob mode to dilate and round forms into organic mounds.
+1. **Choose Image or Text** — derive height from brightness, hue, saturation, color channels, transparency, or edges; or type directly with an installed font.
+2. **Compose the form** — layer image signals, tune text extrusion and bevels, or use Blob mode to dilate and round either source into organic forms.
 3. **Find the material** — explore original color, height gradients, clay finishes, or wireframe structure.
 4. **Light and export** — work quickly in the HDR studio preview, switch to a progressive Final Render, or continue in other tools.
 
 Right-click the 3D viewport to choose a white, dark-gray, or black background, or use the `W`, `G`, and `B` shortcuts. The background is always a flat color—no floor or grid geometry is added to the viewport or image exports.
 
-Opening image export fits the output framing inside the existing screen-bounded viewport; it never enlarges the visible WebGL canvas. High and Final images render from a dedicated background worker when supported, with a cooperative fallback, so the editor and Cancel control remain responsive without changing resolution, supersampling, path-tracing samples, or denoising quality.
+Opening Export swaps the right-hand inspector without resizing the screen-bounded viewport or visible WebGL canvas. High and Final images render from a dedicated background worker when supported, with a cooperative fallback, so the editor and Cancel control remain responsive without changing resolution, supersampling, path-tracing samples, or denoising quality.
 
 Rasterform can export transparent 2K/4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
+
+## Text workspace
+
+Text generates automatically as you type. On supported desktop Chromium browsers, **Browse installed fonts** uses the permission-gated Local Font Access API to load the exact face you select. Other browsers passively verify a curated set of common installed faces and always retain a system-font default. Font bytes stay in memory for the current session and are never uploaded or written into recipes.
+
+The resulting masks are contoured into closed, indexed meshes with counters preserved, then extruded and beveled. Tracking, line height, alignment, outline detail, extrusion, bevel width/depth/smoothness, material color, matte/glossy/metallic finish, and Blob dilation/smoothing are all editable. Text uses the same HDR viewport and full-quality High/Final, GLB, STL, and recipe export paths as image reliefs.
 
 ## Why channels matter
 

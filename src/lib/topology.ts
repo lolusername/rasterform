@@ -46,7 +46,10 @@ export function inspectTopology(mesh: MeshData): TopologyReport {
 
   for (let offset = 0; offset < mesh.indices.length; offset += 3) {
     const triangle = [mesh.indices[offset]!, mesh.indices[offset + 1]!, mesh.indices[offset + 2]!]
-    if (new Set(triangle).size < 3 || triangleAreaSquared(mesh.positions, triangle[0], triangle[1], triangle[2]) < 1e-14) {
+    // Mesh positions are already Float32. Positive-area sliver triangles are
+    // valid manifold facets and must not be confused with actually collapsed
+    // faces when deciding whether STL export is safe.
+    if (new Set(triangle).size < 3 || triangleAreaSquared(mesh.positions, triangle[0], triangle[1], triangle[2]) === 0) {
       degenerateFaces += 1
     }
     for (const vertex of triangle) used.add(vertex)
@@ -92,7 +95,10 @@ export function inspectTopology(mesh: MeshData): TopologyReport {
     connectedComponents: componentRoots.size,
     nonManifoldEdges,
     eulerCharacteristic: vertices - edgeIncidence.size + faces,
-    watertight: boundary.length === 0 && nonManifoldEdges === 0 && degenerateFaces === 0 && componentRoots.size > 0,
+    watertight: boundary.length === 0
+      && nonManifoldEdges === 0
+      && degenerateFaces === 0
+      && componentRoots.size > 0,
     degenerateFaces,
   }
 }

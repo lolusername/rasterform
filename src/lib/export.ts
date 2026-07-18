@@ -2,7 +2,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
 import { createThreeMesh } from './three'
 import { scalarFieldPng } from './image'
-import type { AppearanceSettings, ColorMode, MeshData, Recipe, ScalarField } from '../types'
+import type { AppearanceSettings, ColorMode, MeshData, Recipe, ScalarField, TextRecipe } from '../types'
 
 export function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob)
@@ -62,7 +62,7 @@ export async function exportHeightPng(field: ScalarField) {
   downloadBlob('rasterform-height.png', await scalarFieldPng(field))
 }
 
-export function exportRecipe(recipe: Recipe) {
+export function exportRecipe(recipe: Recipe | TextRecipe) {
   downloadBlob(
     'rasterform-recipe.json',
     new Blob([JSON.stringify(recipe, null, 2)], { type: 'application/json' }),

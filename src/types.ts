@@ -19,6 +19,9 @@ export type ImageExportQuality = 'high' | 'final'
 export type ImageExportBackground = 'transparent' | 'studio'
 export type ImageExportLongEdge = 2048 | 4096 | 8192
 export type ViewportSupersample = 1 | 2
+export type WorkspaceMode = 'image' | 'text'
+export type TextAlignment = 'left' | 'center' | 'right'
+export type FontSource = 'default' | 'detected' | 'local'
 
 export interface PixelImage {
   width: number
@@ -78,6 +81,31 @@ export interface MeshSettings {
   baseThickness: number
 }
 
+export interface TextShapeSettings {
+  text: string
+  alignment: TextAlignment
+  tracking: number
+  lineHeight: number
+  depth: number
+  bevelSize: number
+  bevelThickness: number
+  bevelSegments: number
+  resolution: number
+  finish: CompositeFinish
+  blobDilation: number
+  blobSmoothing: number
+}
+
+export interface FontChoice {
+  id: string
+  label: string
+  family: string
+  style: string
+  source: FontSource
+  cssFamily: string
+  postscriptName?: string
+}
+
 export interface MeshData {
   positions: Float32Array
   indices: Uint32Array
@@ -109,6 +137,16 @@ export interface Recipe {
   channels: ChannelLayer[]
   field: FieldSettings
   mesh: MeshSettings
+  appearance: AppearanceSettings
+  createdAt: string
+}
+
+export interface TextRecipe {
+  version: 5
+  app: 'Rasterform'
+  workspace: 'text'
+  text: Omit<TextShapeSettings, 'text'> & { value: string }
+  font: Pick<FontChoice, 'label' | 'family' | 'style' | 'source' | 'postscriptName'>
   appearance: AppearanceSettings
   createdAt: string
 }

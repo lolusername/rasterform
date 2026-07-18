@@ -11,6 +11,17 @@ import { composeChannelStack } from './lib/channel-stack'
 import { processScalarField } from './lib/filters'
 import { createDemoImage, drawPixelImage, drawScalarField, fileToPixelImage } from './lib/image'
 import { buildMesh } from './lib/mesh'
+import { createTextMesh } from './lib/text-mesh'
+import {
+  SYSTEM_SANS_FONT,
+  cleanupRegisteredFont,
+  discoverPassiveFonts,
+  queryLocalFontFaces,
+  registerLocalFont,
+  supportsLocalFontAccess,
+  type LocalFontRecord,
+  type RegisteredFont,
+} from './lib/local-fonts'
 import { inspectTopology } from './lib/topology'
 import { downloadBlob, exportGlb, exportHeightPng, exportRecipe, exportStl } from './lib/export'
 import {
@@ -20,7 +31,6 @@ import {
 } from './lib/final-image-export'
 import { createDefaultAppearanceSettings } from './lib/three'
 import { calculateViewportDimensions, type ViewportPngResult } from './lib/viewport-export'
-import { fitViewportFrame } from './lib/viewport-frame'
 import type {
   AppearanceSettings,
   ChannelBlendMode,
@@ -33,9 +43,14 @@ import type {
   ImageExportBackground,
   ImageExportLongEdge,
   ImageExportQuality,
+  FontChoice,
   MeshSettings,
+  MeshData,
   Recipe,
+  TextRecipe,
+  TextShapeSettings,
   ViewportBackground,
+  WorkspaceMode,
 } from './types'
 
 interface ThreePreviewHandle {
@@ -63,6 +78,7 @@ const image = shallowRef(createDemoImage())
 const threePreview = ref<ThreePreviewHandle | null>(null)
 const sourceCanvas = ref<HTMLCanvasElement | null>(null)
 const heightCanvas = ref<HTMLCanvasElement | null>(null)
+const sourceThumbCanvas = ref<HTMLCanvasElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const threeStage = ref<HTMLElement | null>(null)
 const backgroundMenu = ref<HTMLDivElement | null>(null)
@@ -70,7 +86,16 @@ const backgroundTrigger = ref<HTMLButtonElement | null>(null)
 const status = ref('Demo image · 360 × 270')
 const exporting = ref(false)
 const dragging = ref(false)
-const colorMode = ref<ColorMode>('original')
+const workspace = ref<WorkspaceMode>('image')
+const imageColorMode = ref<ColorMode>('original')
+const textColorMode = ref<ColorMode>('clay')
+const colorMode = computed<ColorMode>({
+  get: () => workspace.value === 'image' ? imageColorMode.value : textColorMode.value,
+  set: (mode) => {
+    if (workspace.value === 'image') imageColorMode.value = mode
+    else textColorMode.value = mode
+  },
+})
 const imageExportOpen = ref(false)
 const exportingImage = ref(false)
 const imageExportQuality = ref<ImageExportQuality>('high')
@@ -81,8 +106,6 @@ const imageExportNotice = ref('')
 const imageExportAnnouncement = ref('')
 const activeImageExportRequest = shallowRef<ImageExportRequestSnapshot | null>(null)
 const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
-const stageBounds = reactive({ width: 1, height: 1 })
-let stageResizeObserver: ResizeObserver | null = null
 
 function initialViewportBackground(): ViewportBackground {
   try {
@@ -105,7 +128,12 @@ const imageExportProgress = reactive<FinalExportProgress>({
   samples: 0,
   targetSamples: 1,
 })
-const appearance = reactive<AppearanceSettings>(createDefaultAppearanceSettings())
+const imageAppearance = reactive<AppearanceSettings>(createDefaultAppearanceSettings())
+const textAppearance = reactive<AppearanceSettings>({
+  ...createDefaultAppearanceSettings(),
+  clay: { color: '#d9ff63', finish: 'matte' },
+})
+const appearance = computed<AppearanceSettings>(() => workspace.value === 'image' ? imageAppearance : textAppearance)
 let channelSequence = 0
 
 function createChannelLayer(
@@ -148,6 +176,58 @@ const meshSettings = reactive<MeshSettings>({
   midpoint: 0.5,
   baseThickness: 0.26,
 })
+
+const textSettings = reactive<TextShapeSettings>({
+  text: 'Rasterform',
+  alignment: 'center',
+  tracking: 0,
+  lineHeight: 1.06,
+  depth: 0.34,
+  bevelSize: 0.035,
+  bevelThickness: 0.035,
+  bevelSegments: 4,
+  resolution: 420,
+  finish: 'detail',
+  blobDilation: 5,
+  blobSmoothing: 6,
+})
+const fontChoices = shallowRef<FontChoice[]>([{ ...SYSTEM_SANS_FONT }])
+const selectedFontId = ref(SYSTEM_SANS_FONT.id)
+const fontStatus = ref('System font ready')
+const fontBusy = ref(false)
+const fontAccessSupported = supportsLocalFontAccess()
+const requestedFontRecords = shallowRef<LocalFontRecord[]>([])
+let activeFontRegistration: RegisteredFont | undefined
+let activeFontRegistrationId: string | undefined
+let passiveFontCleanup: (() => void) | undefined
+let passiveFontRequest = 0
+let fontOperation = 0
+let fontStatusRevision = 0
+let appDisposed = false
+const textMesh = shallowRef<MeshData | null>(null)
+const textBuildError = ref('')
+const textBuilding = ref(false)
+let textBuildTimer = 0
+
+const selectedFont = computed(() => fontChoices.value.find((font) => font.id === selectedFontId.value) ?? fontChoices.value[0]!)
+
+function mergeFontChoices(...groups: readonly FontChoice[][]): FontChoice[] {
+  const activeChoice = activeFontRegistrationId
+    ? fontChoices.value.find((font) => font.id === activeFontRegistrationId)
+    : undefined
+  const merged: FontChoice[] = []
+  const seen = new Set<string>()
+
+  for (const group of groups) {
+    for (const font of group) {
+      if (seen.has(font.id)) continue
+      seen.add(font.id)
+      merged.push(activeChoice?.id === font.id ? activeChoice : font)
+    }
+  }
+  if (activeChoice && !seen.has(activeChoice.id)) merged.push(activeChoice)
+  return merged
+}
 
 const heightSources: Array<{ value: HeightSource; label: string }> = [
   { value: 'luminance', label: 'Luminance' },
@@ -238,9 +318,9 @@ const stackPresets: StackPreset[] = [
 ]
 
 const geometryModes: Array<{ value: GeometryMode; label: string; note: string }> = [
-  { value: 'plane', label: 'Raised plane', note: 'Open surface · zero at base' },
-  { value: 'centered', label: 'Centered plane', note: 'Open surface · midpoint at zero' },
-  { value: 'solid', label: 'Solid tile', note: 'Closed back and sides' },
+  { value: 'plane', label: 'Raised relief', note: 'Open surface · zero at base' },
+  { value: 'centered', label: 'Centered relief', note: 'Open surface · midpoint at zero' },
+  { value: 'solid', label: 'Solid relief', note: 'Closed back and sides' },
 ]
 
 const previewModes: Array<{ value: ColorMode; label: string }> = [
@@ -249,6 +329,11 @@ const previewModes: Array<{ value: ColorMode; label: string }> = [
   { value: 'clay', label: 'Clay' },
   { value: 'wireframe', label: 'Wireframe' },
 ]
+const textPreviewModes: Array<{ value: ColorMode; label: string }> = [
+  { value: 'clay', label: 'Material' },
+  { value: 'wireframe', label: 'Wireframe' },
+]
+const activePreviewModes = computed(() => workspace.value === 'image' ? previewModes : textPreviewModes)
 
 const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
   { value: 'matte', label: 'Matte' },
@@ -257,7 +342,7 @@ const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
 ]
 
 const gradientPreviewStyle = computed(() => ({
-  background: `linear-gradient(90deg, ${appearance.heightGradient.low} 0%, ${appearance.heightGradient.mid} ${Math.round(appearance.heightGradient.midpoint * 100)}%, ${appearance.heightGradient.high} 100%)`,
+  background: `linear-gradient(90deg, ${appearance.value.heightGradient.low} 0%, ${appearance.value.heightGradient.mid} ${Math.round(appearance.value.heightGradient.midpoint * 100)}%, ${appearance.value.heightGradient.high} 100%)`,
 }))
 const activeBackground = computed(() => viewportBackgroundPreset(viewportBackground.value))
 const backgroundMenuStyle = computed(() => backgroundMenuPosition.value
@@ -266,9 +351,12 @@ const backgroundMenuStyle = computed(() => backgroundMenuPosition.value
       top: `${backgroundMenuPosition.value.y}px`,
     }
   : undefined)
+const activeFrameSize = computed(() => workspace.value === 'image'
+  ? { width: image.value.width, height: image.value.height }
+  : { width: 16, height: 9 })
 const imageExportDimensions = computed(() => calculateViewportDimensions(
-  image.value.width,
-  image.value.height,
+  activeFrameSize.value.width,
+  activeFrameSize.value.height,
   imageExportLongEdge.value,
 ))
 const displayImageExportRequest = computed<ImageExportRequestSnapshot>(() =>
@@ -279,21 +367,9 @@ const displayImageExportRequest = computed<ImageExportRequestSnapshot>(() =>
     viewportBackground: viewportBackground.value,
     colorMode: colorMode.value,
     samples: imageExportQuality.value === 'final'
-      ? finalSampleTarget(colorMode.value, appearance)
+      ? finalSampleTarget(colorMode.value, appearance.value)
       : 1,
   })
-const exportPreviewFrameStyle = computed(() => {
-  if (!imageExportOpen.value) return undefined
-  const frame = fitViewportFrame(
-    image.value.width / image.value.height,
-    stageBounds.width,
-    stageBounds.height,
-  )
-  return {
-    width: `${frame.width}px`,
-    height: `${frame.height}px`,
-  }
-})
 const imageExportUnsupported = computed(() => {
   const request = displayImageExportRequest.value
   return request.quality === 'final'
@@ -313,7 +389,7 @@ const imageExportHelp = computed(() => {
   if (request.colorMode === 'wireframe') return 'Wireframe exports use High quality.'
   if (request.quality === 'high') return 'Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.'
   if (Math.max(request.dimensions.width, request.dimensions.height) > 4096) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
-  return `Refined light and shadows · ${request.samples} samples with gentle denoising · background snapshot rendering keeps the studio responsive.`
+  return `Refined light and shadows · ${request.samples} samples with gentle denoising · background rendering keeps the studio responsive.`
 })
 const imageExportProgressLabel = computed(() => {
   if (imageExportProgress.phase === 'preparing') return `Preparing geometry · ${Math.round(imageExportProgress.progress * 100)}%`
@@ -325,10 +401,15 @@ const imageExportProgressLabel = computed(() => {
 
 const rawField = computed(() => composeChannelStack(image.value, channelLayers))
 const heightField = computed(() => processScalarField(rawField.value, fieldSettings))
-const mesh = computed(() => buildMesh(heightField.value, image.value, meshSettings))
-const topology = computed(() => inspectTopology(mesh.value))
-const activeGeometry = computed(() => geometryModes.find((mode) => mode.value === meshSettings.mode)!)
-const faceLabel = computed(() => topology.value.faces.toLocaleString())
+const imageMesh = computed(() => buildMesh(heightField.value, image.value, meshSettings))
+const mesh = computed<MeshData | null>(() => workspace.value === 'image' ? imageMesh.value : textMesh.value)
+const topology = computed(() => mesh.value ? inspectTopology(mesh.value) : null)
+const activeGeometry = computed(() => workspace.value === 'text'
+  ? { value: 'solid' as const, label: 'Extruded text', note: 'Closed beveled geometry' }
+  : geometryModes.find((mode) => mode.value === meshSettings.mode)!)
+const faceLabel = computed(() => topology.value?.faces.toLocaleString() ?? '—')
+const activeSourceName = computed(() => workspace.value === 'image' ? image.value.name : selectedFont.value.label)
+const hasModel = computed(() => Boolean(mesh.value))
 const enabledChannelLayers = computed(() => channelLayers.filter((layer) => layer.enabled))
 const baseLayerId = computed(() => enabledChannelLayers.value[0]?.id ?? null)
 const selectedChannel = computed(() => channelLayers.find((layer) => layer.id === selectedChannelId.value) ?? channelLayers[0])
@@ -339,6 +420,120 @@ const stackSummary = computed(() => {
   if (labels.length <= 2) return labels.join(' + ')
   return `${labels[0]} + ${labels[1]} + ${labels.length - 2} more`
 })
+
+async function connectFonts() {
+  const operation = ++fontOperation
+  const statusRevision = ++fontStatusRevision
+  fontBusy.value = true
+  fontStatus.value = 'Waiting for font permission…'
+  // The permission-gated call must remain in the click task, before the first await.
+  const request = queryLocalFontFaces()
+  try {
+    const records = await request
+    if (appDisposed || operation !== fontOperation) return
+    requestedFontRecords.value = records
+    const existing = fontChoices.value.filter((font) => font.source !== 'local')
+    fontChoices.value = mergeFontChoices(existing, records)
+    if (statusRevision === fontStatusRevision) {
+      fontStatus.value = records.length
+        ? `${records.length.toLocaleString()} installed faces available`
+        : 'No additional fonts were shared'
+    }
+  } catch (error) {
+    if (appDisposed || operation !== fontOperation) return
+    const name = error instanceof DOMException ? error.name : ''
+    if (statusRevision === fontStatusRevision) {
+      fontStatus.value = name === 'NotAllowedError'
+        ? 'Font access was not granted; detected fonts remain available'
+        : 'Could not browse fonts; detected fonts remain available'
+    }
+  } finally {
+    if (!appDisposed && operation === fontOperation) fontBusy.value = false
+  }
+}
+
+async function handleFontChange() {
+  const operation = ++fontOperation
+  const statusRevision = ++fontStatusRevision
+  const record = requestedFontRecords.value.find((font) => font.id === selectedFontId.value)
+  if (!record) {
+    cleanupRegisteredFont(activeFontRegistration)
+    activeFontRegistration = undefined
+    activeFontRegistrationId = undefined
+    fontBusy.value = false
+    fontStatus.value = `${selectedFont.value.label} ready`
+    rebuildTextMesh()
+    return
+  }
+  fontBusy.value = true
+  fontStatus.value = `Loading ${record.label}…`
+  try {
+    const registration = await registerLocalFont(record.fontData)
+    if (appDisposed || operation !== fontOperation || selectedFontId.value !== record.id) {
+      cleanupRegisteredFont(registration)
+      return
+    }
+    cleanupRegisteredFont(activeFontRegistration)
+    activeFontRegistration = registration
+    activeFontRegistrationId = record.id
+    fontChoices.value = fontChoices.value.map((font) => font.id === record.id
+      ? { ...registration.choice, id: record.id }
+      : font)
+    if (statusRevision === fontStatusRevision) fontStatus.value = `${record.label} ready`
+    rebuildTextMesh()
+  } catch {
+    if (appDisposed || operation !== fontOperation || selectedFontId.value !== record.id) return
+    cleanupRegisteredFont(activeFontRegistration)
+    activeFontRegistration = undefined
+    activeFontRegistrationId = undefined
+    selectedFontId.value = SYSTEM_SANS_FONT.id
+    if (statusRevision === fontStatusRevision) fontStatus.value = 'That face could not be read; using System Sans'
+    rebuildTextMesh()
+  } finally {
+    if (!appDisposed && operation === fontOperation) fontBusy.value = false
+  }
+}
+
+function rebuildTextMesh() {
+  window.clearTimeout(textBuildTimer)
+  textBuilding.value = true
+  textBuildError.value = ''
+  textBuildTimer = window.setTimeout(() => {
+    try {
+      const result = createTextMesh(textSettings.text, selectedFont.value.cssFamily, { ...textSettings })
+      textMesh.value = result?.mesh ?? null
+      if (workspace.value === 'text') {
+        status.value = result
+          ? `${selectedFont.value.label} · ${inspectTopology(result.mesh).faces.toLocaleString()} triangles`
+          : 'Type something to generate a model'
+      }
+    } catch (error) {
+      textMesh.value = null
+      textBuildError.value = error instanceof Error ? error.message : 'Text geometry could not be generated.'
+    } finally {
+      textBuilding.value = false
+    }
+  }, 90)
+}
+
+function switchWorkspace(next: WorkspaceMode) {
+  workspace.value = next
+  imageExportOpen.value = false
+  closeBackgroundMenu()
+  status.value = next === 'image'
+    ? `${image.value.name} · ${image.value.width} × ${image.value.height}`
+    : textMesh.value
+      ? `${selectedFont.value.label} · text model ready`
+      : 'Preparing text model…'
+}
+
+function handleWorkspaceTabKeydown(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const next: WorkspaceMode = event.key === 'ArrowLeft' || event.key === 'Home' ? 'image' : 'text'
+  switchWorkspace(next)
+  void nextTick(() => document.getElementById(`${next}-workspace-tab`)?.focus())
+}
 
 function sourceLabel(source: HeightSource): string {
   return heightSources.find((item) => item.value === source)?.label ?? source
@@ -470,29 +665,46 @@ function handleWindowResize() {
   closeBackgroundMenu()
 }
 
-function updateStageBounds() {
-  if (!threeStage.value) return
-  stageBounds.width = Math.max(1, threeStage.value.clientWidth)
-  stageBounds.height = Math.max(1, threeStage.value.clientHeight)
-}
-
 onMounted(() => {
+  appDisposed = false
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', handleWindowResize)
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   document.addEventListener('focusin', handleDocumentFocusIn)
-  stageResizeObserver = new ResizeObserver(updateStageBounds)
-  if (threeStage.value) stageResizeObserver.observe(threeStage.value)
-  updateStageBounds()
+  rebuildTextMesh()
+  const request = ++passiveFontRequest
+  const statusRevision = fontStatusRevision
+  void discoverPassiveFonts().then((discovery) => {
+    if (appDisposed || request !== passiveFontRequest) {
+      discovery.cleanup()
+      return
+    }
+    passiveFontCleanup?.()
+    passiveFontCleanup = discovery.cleanup
+    fontChoices.value = mergeFontChoices(discovery.choices, requestedFontRecords.value)
+    const detected = discovery.choices.length - 1
+    if (statusRevision === fontStatusRevision) {
+      fontStatus.value = detected > 0
+        ? `${detected} detected font${detected === 1 ? '' : 's'} ready`
+        : 'System font ready'
+    }
+  })
 })
 
 onBeforeUnmount(() => {
+  appDisposed = true
+  fontOperation += 1
+  passiveFontRequest += 1
   window.removeEventListener('keydown', handleGlobalKeydown)
   window.removeEventListener('resize', handleWindowResize)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
   document.removeEventListener('focusin', handleDocumentFocusIn)
-  stageResizeObserver?.disconnect()
-  stageResizeObserver = null
+  window.clearTimeout(textBuildTimer)
+  cleanupRegisteredFont(activeFontRegistration)
+  activeFontRegistration = undefined
+  activeFontRegistrationId = undefined
+  passiveFontCleanup?.()
+  passiveFontCleanup = undefined
 })
 
 watch(viewportBackground, (background) => {
@@ -506,6 +718,8 @@ watch(viewportBackground, (background) => {
 watch(exportingImage, (isExporting) => {
   if (isExporting) closeBackgroundMenu()
 })
+
+watch([() => selectedFont.value.cssFamily, textSettings], rebuildTextMesh, { deep: true })
 
 function selectColorMode(mode: ColorMode) {
   if (mode === 'wireframe' && imageExportQuality.value === 'final' && !exportingImage.value) {
@@ -586,6 +800,7 @@ function applyPreset(preset: StackPreset) {
 async function updateCanvases() {
   await nextTick()
   if (sourceCanvas.value) drawPixelImage(sourceCanvas.value, image.value)
+  if (sourceThumbCanvas.value) drawPixelImage(sourceThumbCanvas.value, image.value)
   if (heightCanvas.value) drawScalarField(heightCanvas.value, heightField.value)
 }
 
@@ -608,6 +823,7 @@ function handleFile(event: Event) {
 
 function handleDrop(event: DragEvent) {
   dragging.value = false
+  if (event.dataTransfer?.files?.[0]) switchWorkspace('image')
   void openFile(event.dataTransfer?.files?.[0])
 }
 
@@ -625,18 +841,41 @@ function recipe(): Recipe {
     field: { ...fieldSettings },
     mesh: { ...meshSettings },
     appearance: {
-      heightGradient: { ...appearance.heightGradient },
-      clay: { ...appearance.clay },
+      heightGradient: { ...imageAppearance.heightGradient },
+      clay: { ...imageAppearance.clay },
+    },
+    createdAt: new Date().toISOString(),
+  }
+}
+
+function textRecipe(): TextRecipe {
+  const { text, ...shape } = textSettings
+  return {
+    version: 5,
+    app: 'Rasterform',
+    workspace: 'text',
+    text: { ...shape, value: text },
+    font: {
+      label: selectedFont.value.label,
+      family: selectedFont.value.family,
+      style: selectedFont.value.style,
+      source: selectedFont.value.source,
+      postscriptName: selectedFont.value.postscriptName,
+    },
+    appearance: {
+      heightGradient: { ...textAppearance.heightGradient },
+      clay: { ...textAppearance.clay },
     },
     createdAt: new Date().toISOString(),
   }
 }
 
 async function downloadGlb() {
+  if (!mesh.value) return
   exporting.value = true
   status.value = 'Exporting GLB…'
   try {
-    await exportGlb(mesh.value, colorMode.value, appearance)
+    await exportGlb(mesh.value, colorMode.value, appearance.value)
     status.value = 'GLB exported for Blender / Cycles'
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'GLB export failed.'
@@ -646,7 +885,7 @@ async function downloadGlb() {
 }
 
 function downloadStl() {
-  if (!topology.value.watertight) return
+  if (!mesh.value || !topology.value?.watertight) return
   exportStl(mesh.value)
   status.value = 'STL exported · geometry only'
 }
@@ -667,7 +906,7 @@ function friendlyImageExportError(error: unknown): string {
 }
 
 async function downloadImagePng() {
-  if (!threePreview.value) return
+  if (!threePreview.value || !mesh.value) return
   if (exportingImage.value) {
     cancelImageExport()
     return
@@ -680,7 +919,7 @@ async function downloadImagePng() {
     viewportBackground: viewportBackground.value,
     colorMode: colorMode.value,
     samples: imageExportQuality.value === 'final'
-      ? finalSampleTarget(colorMode.value, appearance)
+      ? finalSampleTarget(colorMode.value, appearance.value)
       : 1,
   }
   activeImageExportRequest.value = request
@@ -725,274 +964,167 @@ async function downloadImagePng() {
 
 <template>
   <main
-    :class="['studio', { 'is-dragging': dragging, 'is-exporting-image': exportingImage }]"
-    @dragenter.prevent="dragging = true"
-    @dragover.prevent="dragging = true"
+    :class="['editor-app', { 'export-open': imageExportOpen }]"
+    @dragenter.prevent="dragging = workspace === 'image'"
+    @dragover.prevent="dragging = workspace === 'image'"
     @dragleave.self.prevent="dragging = false"
     @drop.prevent="handleDrop"
   >
-    <header class="tool-header">
-      <h1>Rasterform</h1>
-      <span>Relief studio</span>
+    <header class="app-bar">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <strong>Rasterform</strong>
+      </div>
+      <div class="workspace-tabs" role="tablist" aria-label="Workspace" @keydown="handleWorkspaceTabKeydown">
+        <button
+          id="image-workspace-tab"
+          type="button"
+          role="tab"
+          :aria-selected="workspace === 'image'"
+          :tabindex="workspace === 'image' ? 0 : -1"
+          aria-controls="workspace-panel"
+          @click="switchWorkspace('image')"
+        >Image</button>
+        <button
+          id="text-workspace-tab"
+          type="button"
+          role="tab"
+          :aria-selected="workspace === 'text'"
+          :tabindex="workspace === 'text' ? 0 : -1"
+          aria-controls="workspace-panel"
+          @click="switchWorkspace('text')"
+        >Text</button>
+      </div>
+      <p class="document-name" :title="activeSourceName">{{ activeSourceName }}</p>
+      <button
+        type="button"
+        class="top-export"
+        :aria-expanded="imageExportOpen"
+        aria-controls="export-inspector"
+        @click="imageExportOpen = !imageExportOpen"
+      >{{ imageExportOpen ? 'Back to edit' : 'Export' }}</button>
     </header>
 
-    <div class="workbench">
-      <aside class="control-rail" aria-label="Rasterform controls">
-        <details class="control-section" name="control-rail">
-          <summary class="section-summary">
-            <span class="section-summary__title" role="heading" aria-level="2">Image</span>
-            <span class="section-summary__meta">{{ image.name }}</span>
-          </summary>
-          <div class="section-body">
-            <p>{{ image.name }} · {{ image.width }} × {{ image.height }}</p>
-            <input ref="fileInput" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" @change="handleFile" />
-            <div class="button-row">
-              <button type="button" class="text-button" @click="fileInput?.click()">Open image</button>
-              <button type="button" class="text-button" @click="resetDemo">Use demo</button>
-            </div>
+    <div id="workspace-panel" class="editor-grid" role="tabpanel" :aria-labelledby="`${workspace}-workspace-tab`">
+      <aside class="editor-panel build-panel" aria-label="Build controls">
+        <div class="panel-title">
+          <div>
+            <span class="panel-kicker">Build</span>
+            <h2>{{ workspace === 'image' ? 'Image relief' : '3D type' }}</h2>
           </div>
-        </details>
+          <span class="live-dot">Live</span>
+        </div>
 
-        <details class="control-section" name="control-rail" open>
-          <summary class="section-summary">
-            <span class="section-summary__title" role="heading" aria-level="2">Channel stack</span>
-            <span class="section-summary__meta">{{ stackSummary }}</span>
-          </summary>
-          <div class="section-body">
-            <div class="preset-row" role="group" aria-label="Channel stack presets">
-              <button
-                v-for="preset in stackPresets"
-                :key="preset.key"
-                type="button"
-                :aria-label="`${preset.label}: ${preset.note}`"
-                @click="applyPreset(preset)"
-              >
-                {{ preset.label }}
-              </button>
+        <template v-if="workspace === 'image'">
+          <details class="inspector-section" open>
+            <summary><span>Source</span><small>{{ image.width }} × {{ image.height }}</small></summary>
+            <div class="inspector-body">
+              <div class="source-card">
+                <canvas ref="sourceThumbCanvas" aria-label="Source image preview" />
+                <div><strong>{{ image.name }}</strong><small>{{ image.width }} × {{ image.height }} px</small></div>
+              </div>
+              <input ref="fileInput" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" @change="handleFile" />
+              <div class="compact-buttons">
+                <button type="button" class="primary-control" @click="fileInput?.click()">Choose image</button>
+                <button type="button" @click="resetDemo">Demo</button>
+              </div>
             </div>
+          </details>
 
-            <ol class="channel-stack" aria-label="Ordered image channel layers">
-              <li
-                v-for="(layer, index) in channelLayers"
-                :key="layer.id"
-                :class="['channel-layer', { 'is-muted': !layer.enabled, 'is-selected': layer.id === selectedChannelId }]"
-              >
-                <div class="channel-layer__row">
-                  <label class="channel-toggle">
-                    <input v-model="layer.enabled" type="checkbox" />
-                    <span class="sr-only">Include {{ sourceLabel(layer.source) }} in the composite</span>
-                  </label>
-                  <button
-                    type="button"
-                    class="channel-layer__select"
-                    :aria-pressed="layer.id === selectedChannelId"
-                    @click="selectedChannelId = layer.id"
-                  >
-                    <span>CH {{ String(index + 1).padStart(2, '0') }}</span>
-                    <strong>{{ sourceLabel(layer.source) }}</strong>
-                    <small>{{ layer.id === baseLayerId ? 'Base' : blendLabel(layer.blend) }} · {{ Math.round(layer.amount * 100) }}%</small>
+          <details class="inspector-section" open>
+            <summary><span>Channels</span><small>{{ stackSummary }}</small></summary>
+            <div class="inspector-body">
+              <div class="preset-pills" role="group" aria-label="Channel presets">
+                <button v-for="preset in stackPresets" :key="preset.key" type="button" :title="preset.note" @click="applyPreset(preset)">{{ preset.label }}</button>
+              </div>
+              <ul class="layer-list" aria-label="Image channels">
+                <li
+                  v-for="(layer, index) in channelLayers"
+                  :key="layer.id"
+                  :class="{ selected: layer.id === selectedChannelId, muted: !layer.enabled }"
+                >
+                  <label class="visibility-toggle"><input v-model="layer.enabled" type="checkbox" /><span aria-hidden="true">●</span><span class="sr-only">Show {{ sourceLabel(layer.source) }}</span></label>
+                  <button type="button" class="layer-name" :aria-pressed="layer.id === selectedChannelId" @click="selectedChannelId = layer.id">
+                    <strong>{{ sourceLabel(layer.source) }}</strong><small>{{ layer.id === baseLayerId ? 'Base' : blendLabel(layer.blend) }} · {{ Math.round(layer.amount * 100) }}%</small>
                   </button>
-                  <div class="channel-layer__actions">
+                  <div class="layer-actions">
                     <button type="button" :disabled="index === 0" :aria-label="`Move ${sourceLabel(layer.source)} up`" @click="moveChannel(index, -1)">↑</button>
                     <button type="button" :disabled="index === channelLayers.length - 1" :aria-label="`Move ${sourceLabel(layer.source)} down`" @click="moveChannel(index, 1)">↓</button>
                     <button type="button" :disabled="channelLayers.length === 1" :aria-label="`Remove ${sourceLabel(layer.source)}`" @click="removeChannel(index)">×</button>
                   </div>
-                </div>
-              </li>
-            </ol>
+                </li>
+              </ul>
+              <button type="button" class="wide-control" :disabled="channelLayers.length >= 5" @click="addChannel">{{ channelLayers.length >= 5 ? 'Channel limit reached' : 'Add channel' }}</button>
 
-            <button type="button" class="add-channel" :disabled="channelLayers.length >= 5" @click="addChannel">
-              {{ channelLayers.length >= 5 ? 'Five-channel limit' : '+ Add channel' }}
-            </button>
-
-            <fieldset v-if="selectedChannel" class="channel-inspector">
-              <legend>Selected / CH {{ String(selectedChannelIndex + 1).padStart(2, '0') }}</legend>
-                <label>
-                  <span>Image property</span>
-                  <select v-model="selectedChannel.source">
-                    <option v-for="source in heightSources" :key="source.value" :value="source.value">{{ source.label }}</option>
-                  </select>
-                </label>
-                <label v-if="selectedChannel.id !== baseLayerId">
-                  <span>Combine</span>
-                  <select v-model="selectedChannel.blend" :disabled="!selectedChannel.enabled">
-                    <option v-for="mode in blendModes" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
-                  </select>
-                </label>
-                <label>
-                  <span>Influence <output>{{ Math.round(selectedChannel.amount * 100) }}%</output></span>
-                  <input v-model.number="selectedChannel.amount" type="range" min="0" max="1" step="0.01" />
-                </label>
-                <label v-if="selectedChannel.source === 'hue'">
-                  <span>Target hue <output>{{ Math.round(selectedChannel.hueOrigin * 360) }}°</output></span>
-                  <input v-model.number="selectedChannel.hueOrigin" type="range" min="0" max="1" step="0.005" />
-                  <small>Circular hue distance; gray maps to zero.</small>
-                </label>
-                <label class="check-label channel-invert"><input v-model="selectedChannel.invert" type="checkbox" /> Invert this channel</label>
-            </fieldset>
-
-            <h3 class="composite-heading">Composite finish</h3>
-            <div class="composite-finish-switcher" role="group" aria-label="Composite surface finish" aria-describedby="blob-mode-help">
-              <button type="button" :aria-pressed="fieldSettings.finish === 'detail'" @click="fieldSettings.finish = 'detail'">
-                Detail
-              </button>
-              <button type="button" :aria-pressed="fieldSettings.finish === 'blob'" @click="fieldSettings.finish = 'blob'">
-                Blob mode
-              </button>
+              <div v-if="selectedChannel" class="sub-inspector">
+                <div class="sub-inspector-title">Selected channel</div>
+                <label class="control-row"><span>Image property</span><select v-model="selectedChannel.source"><option v-for="source in heightSources" :key="source.value" :value="source.value">{{ source.label }}</option></select></label>
+                <label v-if="selectedChannel.id !== baseLayerId" class="control-row"><span>Combine</span><select v-model="selectedChannel.blend" :disabled="!selectedChannel.enabled"><option v-for="mode in blendModes" :key="mode.value" :value="mode.value">{{ mode.label }}</option></select></label>
+                <label class="slider-control"><span>Influence <output>{{ Math.round(selectedChannel.amount * 100) }}%</output></span><input v-model.number="selectedChannel.amount" type="range" min="0" max="1" step="0.01" /></label>
+                <label v-if="selectedChannel.source === 'hue'" class="slider-control"><span>Target hue <output>{{ Math.round(selectedChannel.hueOrigin * 360) }}°</output></span><input v-model.number="selectedChannel.hueOrigin" type="range" min="0" max="1" step="0.005" /></label>
+                <label class="check-control"><input v-model="selectedChannel.invert" type="checkbox" />Invert channel</label>
+              </div>
             </div>
-            <p id="blob-mode-help" class="control-help">
-              Blob mode expands high forms, then rounds them into exaggerated organic surfaces without sharp peaks.
-            </p>
-            <template v-if="fieldSettings.finish === 'blob'">
-              <label>
-                <span>Blob dilation <output>{{ fieldSettings.blobDilation }}px</output></span>
-                <input v-model.number="fieldSettings.blobDilation" type="range" min="0" max="20" step="1" aria-describedby="blob-mode-help" />
-                <small>Spreads raised areas outward before rounding.</small>
-              </label>
-              <label>
-                <span>Blob smoothing <output>{{ fieldSettings.blobSmoothing }}px</output></span>
-                <input v-model.number="fieldSettings.blobSmoothing" type="range" min="0" max="24" step="1" aria-describedby="blob-mode-help" />
-                <small>Softens the dilated field into broad, organic mounds.</small>
-              </label>
-            </template>
-            <label>
-              <span>Base smoothing <output>{{ fieldSettings.blur }}px</output></span>
-              <input v-model.number="fieldSettings.blur" type="range" min="0" max="8" step="1" />
-            </label>
-            <label>
-              <span>Contrast <output>{{ fieldSettings.contrast > 0 ? '+' : '' }}{{ fieldSettings.contrast }}</output></span>
-              <input v-model.number="fieldSettings.contrast" type="range" min="-50" max="50" step="1" />
-            </label>
-            <label>
-              <span>Quantize <output>{{ fieldSettings.quantize < 2 ? 'off' : `${fieldSettings.quantize} levels` }}</output></span>
-              <input v-model.number="fieldSettings.quantize" type="range" min="0" max="12" step="1" />
-            </label>
-            <label class="check-label"><input v-model="fieldSettings.invert" type="checkbox" /> Invert composite</label>
-          </div>
-        </details>
+          </details>
+        </template>
 
-        <details class="control-section" name="control-rail">
-          <summary class="section-summary">
-            <span class="section-summary__title" role="heading" aria-level="2">Geometry</span>
-            <span class="section-summary__meta">{{ activeGeometry.label }}</span>
-          </summary>
-          <div class="section-body">
-            <div class="mode-list" role="group" aria-label="Geometry mode">
-              <button
-                v-for="mode in geometryModes"
-                :key="mode.value"
-                type="button"
-                :aria-pressed="meshSettings.mode === mode.value"
-                @click="meshSettings.mode = mode.value"
-              >
-                <strong>{{ mode.label }}</strong><small>{{ mode.note }}</small>
-              </button>
+        <template v-else>
+          <details class="inspector-section" open>
+            <summary><span>Content</span><small>{{ textSettings.text.length }} chars</small></summary>
+            <div class="inspector-body">
+              <label class="text-input-label" for="text-content">Text</label>
+              <textarea id="text-content" v-model="textSettings.text" rows="4" maxlength="120" spellcheck="false" placeholder="Type something…"></textarea>
+              <div class="alignment-control" role="group" aria-label="Text alignment">
+                <button type="button" :aria-pressed="textSettings.alignment === 'left'" @click="textSettings.alignment = 'left'">Left</button>
+                <button type="button" :aria-pressed="textSettings.alignment === 'center'" @click="textSettings.alignment = 'center'">Center</button>
+                <button type="button" :aria-pressed="textSettings.alignment === 'right'" @click="textSettings.alignment = 'right'">Right</button>
+              </div>
+              <label class="slider-control"><span>Tracking <output>{{ Math.round(textSettings.tracking * 100) }}%</output></span><input v-model.number="textSettings.tracking" type="range" min="-0.08" max="0.3" step="0.005" /></label>
+              <label class="slider-control"><span>Line height <output>{{ textSettings.lineHeight.toFixed(2) }}</output></span><input v-model.number="textSettings.lineHeight" type="range" min="0.8" max="1.8" step="0.02" /></label>
             </div>
-            <label>
-              <span>Depth <output>{{ meshSettings.depth.toFixed(2) }}</output></span>
-              <input v-model.number="meshSettings.depth" type="range" min="0.02" max="1.4" step="0.02" />
-            </label>
-            <label>
-              <span>Midpoint <output>{{ meshSettings.midpoint.toFixed(2) }}</output></span>
-              <input v-model.number="meshSettings.midpoint" type="range" min="0" max="1" step="0.01" />
-            </label>
-            <label v-if="meshSettings.mode === 'solid'">
-              <span>Base thickness <output>{{ meshSettings.baseThickness.toFixed(2) }}</output></span>
-              <input v-model.number="meshSettings.baseThickness" type="range" min="0.06" max="0.8" step="0.02" />
-            </label>
-            <label>
-              <span>Mesh resolution <output>{{ meshSettings.resolution }}</output></span>
-              <input v-model.number="meshSettings.resolution" type="range" min="16" max="180" step="4" />
-              <small>{{ faceLabel }} triangles</small>
-            </label>
-          </div>
-        </details>
+          </details>
+
+          <details class="inspector-section" open>
+            <summary><span>Font</span><small>{{ selectedFont.style }}</small></summary>
+            <div class="inspector-body">
+              <label class="stacked-control"><span>Font face</span><select v-model="selectedFontId" :disabled="fontBusy" @change="handleFontChange"><option v-for="font in fontChoices" :key="font.id" :value="font.id">{{ font.label }} · {{ font.style }}</option></select></label>
+              <button v-if="fontAccessSupported" type="button" class="wide-control primary-control" :disabled="fontBusy" @click="connectFonts">{{ fontBusy ? 'Loading fonts…' : 'Browse installed fonts' }}</button>
+              <p class="inline-note" role="status">{{ fontStatus }}</p>
+              <p class="inline-note">Fonts stay in this browser session and are never uploaded.</p>
+            </div>
+          </details>
+
+          <details class="inspector-section" open>
+            <summary><span>Sampling</span><small>{{ textSettings.resolution }} px</small></summary>
+            <div class="inspector-body">
+              <label class="slider-control"><span>Outline detail <output>{{ textSettings.resolution }}px</output></span><input v-model.number="textSettings.resolution" type="range" min="180" max="720" step="20" /></label>
+              <p class="inline-note">Higher detail makes curves and counters cleaner.</p>
+            </div>
+          </details>
+        </template>
       </aside>
 
-      <section class="preview-column" aria-label="Image and mesh previews">
-        <div class="preview-toolbar">
-          <div>
-            <span class="eyebrow">Viewport</span>
-            <strong>{{ activeGeometry.label }} / {{ stackSummary }}</strong>
+      <section class="viewport-pane" aria-label="3D editor viewport">
+        <div class="viewport-toolbar">
+          <div class="view-switcher" role="group" aria-label="Viewport material">
+            <button v-for="mode in activePreviewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">{{ mode.label }}</button>
           </div>
-          <div class="preview-tools">
-            <div class="view-switcher" role="group" aria-label="Viewport material">
-              <button v-for="mode in previewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">
-                {{ mode.label }}
-              </button>
-            </div>
-            <button
-              ref="backgroundTrigger"
-              type="button"
-              class="background-trigger"
-              aria-haspopup="menu"
-              aria-controls="viewport-background-menu"
-              :aria-expanded="Boolean(backgroundMenuPosition)"
-              :aria-label="`Viewport background: ${activeBackground.label}. Choose a background color.`"
-              :title="`Background: ${activeBackground.label} (W / G / B)`"
-              @click="toggleBackgroundMenuFromTrigger"
-            >
-              <span class="background-trigger__swatch" :style="{ backgroundColor: activeBackground.color }" aria-hidden="true"></span>
-              <span>BG</span>
-            </button>
-            <button
-              type="button"
-              class="export-image-trigger"
-              :aria-expanded="imageExportOpen"
-              aria-controls="image-export-panel"
-              :disabled="exportingImage"
-              @click="imageExportOpen = !imageExportOpen"
-            >
-              {{ imageExportOpen ? 'Close export' : 'Export image…' }}
-            </button>
-          </div>
-        </div>
-
-        <div v-if="colorMode === 'height'" class="material-controls" aria-label="Height gradient settings">
-          <div class="material-controls__label">Height gradient</div>
-          <div class="gradient-preview" :style="gradientPreviewStyle" aria-hidden="true"></div>
-          <div class="gradient-pickers">
-            <label>
-              <span>Low</span>
-              <input v-model="appearance.heightGradient.low" type="color" aria-label="Low height color" />
-              <output>{{ appearance.heightGradient.low }}</output>
-            </label>
-            <label>
-              <span>Mid</span>
-              <input v-model="appearance.heightGradient.mid" type="color" aria-label="Middle height color" />
-              <output>{{ appearance.heightGradient.mid }}</output>
-            </label>
-            <label>
-              <span>High</span>
-              <input v-model="appearance.heightGradient.high" type="color" aria-label="High height color" />
-              <output>{{ appearance.heightGradient.high }}</output>
-            </label>
-          </div>
-          <label class="gradient-midpoint">
-            <span>Midpoint <output>{{ Math.round(appearance.heightGradient.midpoint * 100) }}%</output></span>
-            <input v-model.number="appearance.heightGradient.midpoint" type="range" min="0.05" max="0.95" step="0.01" />
-          </label>
-        </div>
-
-        <div v-if="colorMode === 'clay'" class="material-controls clay-controls" aria-label="Clay material settings">
-          <label class="clay-color">
-            <span>Clay color</span>
-            <input v-model="appearance.clay.color" type="color" aria-label="Clay color" />
-            <output>{{ appearance.clay.color }}</output>
-          </label>
-          <div>
-            <span class="material-controls__label">Finish</span>
-            <div class="finish-switcher" role="group" aria-label="Clay finish">
-              <button v-for="finish in clayFinishes" :key="finish.value" type="button" :aria-pressed="appearance.clay.finish === finish.value" @click="appearance.clay.finish = finish.value">
-                {{ finish.label }}
-              </button>
-            </div>
-          </div>
+          <div class="viewport-toolbar-meta"><span>{{ activeGeometry.label }}</span><span>{{ faceLabel }} tris</span></div>
+          <button
+            ref="backgroundTrigger"
+            type="button"
+            class="background-trigger"
+            aria-haspopup="menu"
+            aria-controls="viewport-background-menu"
+            :aria-expanded="Boolean(backgroundMenuPosition)"
+            :title="`Background: ${activeBackground.label} (W / G / B)`"
+            @click="toggleBackgroundMenuFromTrigger"
+          ><span class="background-trigger__swatch" :style="{ backgroundColor: activeBackground.color }" aria-hidden="true"></span><span class="background-label">Background</span></button>
         </div>
 
         <div
           ref="threeStage"
-          :class="['three-stage', { 'is-export-framed': imageExportOpen }]"
+          class="three-stage"
           role="region"
           tabindex="0"
           aria-label="3D viewport. Right-click for background colors. Keyboard shortcuts: W for white, G for dark gray, B for black."
@@ -1000,15 +1132,18 @@ async function downloadImagePng() {
           @pointerdown="focusThreeStage"
           @contextmenu.prevent.stop="openBackgroundMenu"
         >
-          <div class="three-viewport-frame" :style="exportPreviewFrameStyle">
-            <ThreePreview
-              ref="threePreview"
-              :mesh="mesh"
-              :color-mode="colorMode"
-              :appearance="appearance"
-              :background="viewportBackground"
-              @export-progress="handleImageExportProgress"
-            />
+          <ThreePreview
+            ref="threePreview"
+            :mesh="mesh"
+            :color-mode="colorMode"
+            :appearance="appearance"
+            :background="viewportBackground"
+            @export-progress="handleImageExportProgress"
+          />
+          <div v-if="workspace === 'text' && (textBuilding || !mesh)" class="viewport-message" role="status">
+            <span v-if="textBuilding" class="spinner" aria-hidden="true"></span>
+            <strong>{{ textBuilding ? 'Building type…' : 'Type something to begin' }}</strong>
+            <small v-if="textBuildError">{{ textBuildError }}</small>
           </div>
           <div
             v-if="backgroundMenuPosition"
@@ -1032,166 +1167,138 @@ async function downloadImagePng() {
               :aria-checked="viewportBackground === preset.value"
               :tabindex="viewportBackground === preset.value ? 0 : -1"
               @click="chooseViewportBackground(preset.value)"
-            >
-              <span class="background-menu__swatch" :style="{ backgroundColor: preset.color }" aria-hidden="true"></span>
-              <span>{{ preset.label }}</span>
-              <kbd>{{ preset.shortcut }}</kbd>
-            </button>
+            ><span class="background-menu__swatch" :style="{ backgroundColor: preset.color }" aria-hidden="true"></span><span>{{ preset.label }}</span><kbd>{{ preset.shortcut }}</kbd></button>
           </div>
           <div v-if="dragging" class="drop-curtain">Drop image</div>
         </div>
-
-        <section
-          v-if="imageExportOpen"
-          id="image-export-panel"
-          class="image-export-panel"
-          aria-labelledby="image-export-title"
-          :aria-busy="exportingImage"
-        >
-          <header class="image-export-header">
-            <div>
-              <p class="eyebrow">Image export</p>
-              <h2 id="image-export-title">Export a finished PNG</h2>
-            </div>
-            <div class="image-export-header__meta">
-              <p class="image-export-summary" role="status" aria-label="Export summary">{{ imageExportSummary }}</p>
-              <button type="button" class="image-export-close" :disabled="exportingImage" @click="imageExportOpen = false">Close</button>
-            </div>
-          </header>
-
-          <div class="image-export-options">
-            <fieldset>
-              <legend>Quality</legend>
-              <div class="export-choice-group">
-                <button
-                  type="button"
-                  :aria-pressed="imageExportQuality === 'high'"
-                  :disabled="exportingImage"
-                  @click="selectImageExportQuality('high')"
-                ><strong>High</strong><small>Clean and quick</small></button>
-                <button
-                  type="button"
-                  :aria-pressed="imageExportQuality === 'final'"
-                  :disabled="exportingImage || colorMode === 'wireframe'"
-                  @click="selectImageExportQuality('final')"
-                ><strong>Final</strong><small>Refined lighting</small></button>
-              </div>
-            </fieldset>
-
-            <fieldset>
-              <legend>Size</legend>
-              <div class="export-choice-group size-choices">
-                <button type="button" :aria-pressed="imageExportLongEdge === 2048" :disabled="exportingImage" @click="imageExportLongEdge = 2048">2K<small>2048 px</small></button>
-                <button type="button" :aria-pressed="imageExportLongEdge === 4096" :disabled="exportingImage" @click="imageExportLongEdge = 4096">4K<small>4096 px</small></button>
-                <button type="button" :aria-pressed="imageExportLongEdge === 8192" :disabled="exportingImage || imageExportQuality === 'final'" @click="imageExportLongEdge = 8192">8K<small>8192 px</small></button>
-              </div>
-            </fieldset>
-
-            <fieldset>
-              <legend>Background</legend>
-              <div class="export-choice-group">
-                <button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button>
-                <button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">
-                  Current background<small>{{ activeBackground.label }}</small>
-                </button>
-              </div>
-            </fieldset>
-          </div>
-
-          <p class="image-export-help">{{ imageExportHelp }}</p>
-          <div v-if="exportingImage" class="image-export-progress">
-            <span>{{ imageExportProgressLabel }}</span>
-            <progress
-              :value="imageExportProgress.progress"
-              max="1"
-              aria-label="Final image render progress"
-              :aria-valuetext="imageExportProgressLabel"
-            >{{ imageExportProgress.progress }}</progress>
-            <details v-if="imageExportProgress.phase === 'rendering'">
-              <summary>Render details</summary>
-              <p v-if="displayImageExportRequest.quality === 'final'">Tile {{ imageExportProgress.tile }} / {{ imageExportProgress.tiles }} · {{ imageExportProgress.samples }} / {{ imageExportProgress.targetSamples }} samples</p>
-              <p v-else>Tile {{ imageExportProgress.tile }} / {{ imageExportProgress.tiles }} · 2× supersampling</p>
-            </details>
-          </div>
-          <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
-          <p v-if="imageExportError" class="image-export-message is-error" role="alert">{{ imageExportError }}</p>
-          <p v-else-if="imageExportNotice" class="image-export-message" role="status" aria-live="polite">{{ imageExportNotice }}</p>
-
-          <div class="image-export-actions">
-            <button v-if="imageExportError && imageExportQuality === 'final'" type="button" class="export-fallback" @click="selectImageExportQuality('high')">Use High quality</button>
-            <button
-              type="button"
-              class="image-export-primary"
-              :disabled="imageExportUnsupported"
-              @click="downloadImagePng"
-            >
-              {{ exportingImage
-                ? 'Cancel export'
-                : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}
-            </button>
-          </div>
-        </section>
-
-        <details class="preview-drawer">
-          <summary class="preview-drawer__summary">
-            <span>
-              <span class="eyebrow">Reference maps</span>
-              <strong role="heading" aria-level="2">Source &amp; height field</strong>
-            </span>
-            <span class="preview-drawer__meta">{{ image.width }} × {{ image.height }}</span>
-          </summary>
-          <div class="two-d-previews">
-            <figure>
-              <figcaption><span>source</span><strong>{{ image.name }}</strong></figcaption>
-              <canvas ref="sourceCanvas" aria-label="Source image preview" />
-            </figure>
-            <figure>
-              <figcaption><span>derived field</span><strong>{{ stackSummary }}</strong></figcaption>
-              <canvas ref="heightCanvas" aria-label="Computed grayscale height map preview" />
-            </figure>
-          </div>
-        </details>
-
-        <details class="mesh-ledger">
-          <summary class="mesh-ledger__heading">
-            <span class="mesh-ledger__title">
-              <span class="eyebrow">Mesh</span>
-              <span id="mesh-health-title" class="mesh-ledger__name" role="heading" aria-level="2">Mesh health</span>
-            </span>
-            <strong :class="['health-state', { good: topology.watertight }]">
-              {{ topology.watertight ? 'watertight' : meshSettings.mode === 'solid' ? 'check mesh' : 'open surface' }}
-            </strong>
-          </summary>
-          <div class="mesh-ledger__body">
-            <dl>
-              <div><dt>Vertices</dt><dd>{{ topology.vertices.toLocaleString() }}</dd></div>
-              <div><dt>Faces</dt><dd>{{ topology.faces.toLocaleString() }}</dd></div>
-              <div><dt>Boundary loops</dt><dd>{{ topology.boundaryLoops }}</dd></div>
-              <div><dt>Non-manifold edges</dt><dd>{{ topology.nonManifoldEdges }}</dd></div>
-              <div><dt>Components</dt><dd>{{ topology.connectedComponents }}</dd></div>
-              <div><dt>Euler χ</dt><dd>{{ topology.eulerCharacteristic }}</dd></div>
-            </dl>
-            <p>
-              {{ topology.watertight
-                ? 'STL ready'
-                : 'STL requires a closed mesh' }}
-            </p>
-          </div>
-        </details>
-
-        <section class="export-strip" aria-label="3D and project files">
-          <div>
-            <p class="eyebrow">3D &amp; project files</p>
-            <p role="status" aria-live="polite">{{ status }}</p>
-          </div>
-          <div class="export-actions">
-            <button type="button" class="export-button primary" :disabled="exporting" @click="downloadGlb">{{ exporting ? 'Exporting…' : 'GLB for Blender / Cycles' }}</button>
-            <button type="button" class="export-button" :disabled="!topology.watertight" @click="downloadStl">Export STL</button>
-            <button type="button" class="export-button" @click="exportHeightPng(heightField)">Height PNG</button>
-            <button type="button" class="export-button" @click="exportRecipe(recipe())">Recipe JSON</button>
-          </div>
-        </section>
       </section>
+
+      <aside class="editor-panel style-panel" aria-label="Style and export controls">
+        <template v-if="!imageExportOpen">
+          <div class="panel-title">
+            <div><span class="panel-kicker">Inspector</span><h2>Properties</h2></div>
+          </div>
+
+          <details v-if="workspace === 'image'" class="inspector-section" open>
+            <summary><span>Geometry</span><small>{{ activeGeometry.label }}</small></summary>
+            <div class="inspector-body">
+              <div class="segmented stacked" role="group" aria-label="Geometry mode">
+                <button v-for="mode in geometryModes" :key="mode.value" type="button" :aria-pressed="meshSettings.mode === mode.value" @click="meshSettings.mode = mode.value"><span>{{ mode.label }}</span><small>{{ mode.note }}</small></button>
+              </div>
+              <label class="slider-control"><span>Depth <output>{{ meshSettings.depth.toFixed(2) }}</output></span><input v-model.number="meshSettings.depth" type="range" min="0.02" max="1.4" step="0.02" /></label>
+              <label class="slider-control"><span>Midpoint <output>{{ meshSettings.midpoint.toFixed(2) }}</output></span><input v-model.number="meshSettings.midpoint" type="range" min="0" max="1" step="0.01" /></label>
+              <label v-if="meshSettings.mode === 'solid'" class="slider-control"><span>Base thickness <output>{{ meshSettings.baseThickness.toFixed(2) }}</output></span><input v-model.number="meshSettings.baseThickness" type="range" min="0.06" max="0.8" step="0.02" /></label>
+              <label class="slider-control"><span>Mesh detail <output>{{ meshSettings.resolution }}</output></span><input v-model.number="meshSettings.resolution" type="range" min="16" max="180" step="4" /></label>
+            </div>
+          </details>
+
+          <details v-else class="inspector-section" open>
+            <summary><span>Geometry</span><small>Beveled solid</small></summary>
+            <div class="inspector-body">
+              <label class="slider-control"><span>Extrusion <output>{{ textSettings.depth.toFixed(2) }}</output></span><input v-model.number="textSettings.depth" type="range" min="0.06" max="0.9" step="0.01" /></label>
+              <label class="slider-control"><span>Bevel width <output>{{ textSettings.bevelSize.toFixed(3) }}</output></span><input v-model.number="textSettings.bevelSize" type="range" min="0" max="0.12" step="0.005" /></label>
+              <label class="slider-control"><span>Bevel depth <output>{{ textSettings.bevelThickness.toFixed(3) }}</output></span><input v-model.number="textSettings.bevelThickness" type="range" min="0" max="0.12" step="0.005" /></label>
+              <label class="slider-control"><span>Bevel smoothness <output>{{ textSettings.bevelSegments }}</output></span><input v-model.number="textSettings.bevelSegments" type="range" min="1" max="8" step="1" /></label>
+            </div>
+          </details>
+
+          <details class="inspector-section" open>
+            <summary><span>Surface</span><small>{{ (workspace === 'image' ? fieldSettings.finish : textSettings.finish) === 'blob' ? 'Blob' : 'Detail' }}</small></summary>
+            <div class="inspector-body">
+              <div class="segmented" role="group" aria-label="Surface finish">
+                <button type="button" :aria-pressed="(workspace === 'image' ? fieldSettings.finish : textSettings.finish) === 'detail'" @click="workspace === 'image' ? fieldSettings.finish = 'detail' : textSettings.finish = 'detail'">Detail</button>
+                <button type="button" :aria-pressed="(workspace === 'image' ? fieldSettings.finish : textSettings.finish) === 'blob'" @click="workspace === 'image' ? fieldSettings.finish = 'blob' : textSettings.finish = 'blob'">Blob</button>
+              </div>
+              <p class="inline-note">Blob expands forms and rounds sharp peaks into exaggerated organic surfaces.</p>
+              <template v-if="workspace === 'image'">
+                <template v-if="fieldSettings.finish === 'blob'">
+                  <label class="slider-control"><span>Dilation <output>{{ fieldSettings.blobDilation }}px</output></span><input v-model.number="fieldSettings.blobDilation" type="range" min="0" max="20" step="1" /></label>
+                  <label class="slider-control"><span>Smoothing <output>{{ fieldSettings.blobSmoothing }}px</output></span><input v-model.number="fieldSettings.blobSmoothing" type="range" min="0" max="24" step="1" /></label>
+                </template>
+                <label class="slider-control"><span>Base smoothing <output>{{ fieldSettings.blur }}px</output></span><input v-model.number="fieldSettings.blur" type="range" min="0" max="8" step="1" /></label>
+                <label class="slider-control"><span>Contrast <output>{{ fieldSettings.contrast > 0 ? '+' : '' }}{{ fieldSettings.contrast }}</output></span><input v-model.number="fieldSettings.contrast" type="range" min="-50" max="50" step="1" /></label>
+                <label class="slider-control"><span>Quantize <output>{{ fieldSettings.quantize < 2 ? 'Off' : fieldSettings.quantize }}</output></span><input v-model.number="fieldSettings.quantize" type="range" min="0" max="12" step="1" /></label>
+                <label class="check-control"><input v-model="fieldSettings.invert" type="checkbox" />Invert composite</label>
+              </template>
+              <template v-else-if="textSettings.finish === 'blob'">
+                <label class="slider-control"><span>Dilation <output>{{ textSettings.blobDilation }}px</output></span><input v-model.number="textSettings.blobDilation" type="range" min="0" max="20" step="1" /></label>
+                <label class="slider-control"><span>Smoothing <output>{{ textSettings.blobSmoothing }}px</output></span><input v-model.number="textSettings.blobSmoothing" type="range" min="0" max="24" step="1" /></label>
+              </template>
+            </div>
+          </details>
+
+          <details class="inspector-section" open>
+            <summary><span>Material</span><small>{{ colorMode === 'clay' ? appearance.clay.finish : colorMode }}</small></summary>
+            <div class="inspector-body">
+              <template v-if="colorMode === 'clay'">
+                <label class="color-control"><span>Color</span><div><input v-model="appearance.clay.color" type="color" aria-label="Material color" /><output>{{ appearance.clay.color }}</output></div></label>
+                <div class="segmented" role="group" aria-label="Material finish"><button v-for="finish in clayFinishes" :key="finish.value" type="button" :aria-pressed="appearance.clay.finish === finish.value" @click="appearance.clay.finish = finish.value">{{ finish.label }}</button></div>
+              </template>
+              <template v-else-if="colorMode === 'height'">
+                <div class="gradient-preview" :style="gradientPreviewStyle" aria-hidden="true"></div>
+                <div class="color-grid">
+                  <label><span>Low</span><input v-model="appearance.heightGradient.low" type="color" /></label>
+                  <label><span>Mid</span><input v-model="appearance.heightGradient.mid" type="color" /></label>
+                  <label><span>High</span><input v-model="appearance.heightGradient.high" type="color" /></label>
+                </div>
+                <label class="slider-control"><span>Midpoint <output>{{ Math.round(appearance.heightGradient.midpoint * 100) }}%</output></span><input v-model.number="appearance.heightGradient.midpoint" type="range" min="0.05" max="0.95" step="0.01" /></label>
+              </template>
+              <p v-else class="inline-note">Switch to {{ workspace === 'text' ? 'Material' : 'Clay' }} to edit color and finish.</p>
+            </div>
+          </details>
+
+          <details v-if="workspace === 'image'" class="inspector-section">
+            <summary><span>Reference maps</span><small>{{ image.width }} × {{ image.height }}</small></summary>
+            <div class="inspector-body map-stack"><figure><figcaption>Source</figcaption><canvas ref="sourceCanvas" aria-label="Source image preview" /></figure><figure><figcaption>Height field</figcaption><canvas ref="heightCanvas" aria-label="Computed height field preview" /></figure></div>
+          </details>
+
+          <details class="inspector-section">
+            <summary><span>Mesh health</span><small :class="{ success: topology?.watertight }">{{ topology?.watertight ? 'Ready' : hasModel ? 'Open' : 'Empty' }}</small></summary>
+            <div v-if="topology" class="inspector-body health-grid">
+              <div><span>Vertices</span><strong>{{ topology.vertices.toLocaleString() }}</strong></div>
+              <div><span>Faces</span><strong>{{ topology.faces.toLocaleString() }}</strong></div>
+              <div><span>Loops</span><strong>{{ topology.boundaryLoops }}</strong></div>
+              <div><span>Components</span><strong>{{ topology.connectedComponents }}</strong></div>
+              <div><span>Boundary edges</span><strong>{{ topology.boundaryEdges }}</strong></div>
+              <div><span>Non-manifold</span><strong>{{ topology.nonManifoldEdges }}</strong></div>
+              <div><span>Degenerate</span><strong>{{ topology.degenerateFaces }}</strong></div>
+              <p>{{ topology.watertight ? 'Closed geometry, ready for STL.' : 'STL needs closed geometry. GLB and PNG remain available.' }}</p>
+            </div>
+          </details>
+        </template>
+
+        <section v-else id="export-inspector" class="export-inspector" :aria-busy="exportingImage">
+          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>Export model</h2></div><button type="button" class="icon-control" :disabled="exportingImage" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
+          <div class="export-summary">{{ imageExportSummary }}</div>
+
+          <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportQuality === 'high'" :disabled="exportingImage" @click="selectImageExportQuality('high')"><strong>High</strong><small>Clean and quick</small></button><button type="button" :aria-pressed="imageExportQuality === 'final'" :disabled="exportingImage || colorMode === 'wireframe'" @click="selectImageExportQuality('final')"><strong>Final</strong><small>Refined light</small></button></div></fieldset>
+          <fieldset class="export-group"><legend>Long edge</legend><div class="segmented"><button type="button" :aria-pressed="imageExportLongEdge === 2048" :disabled="exportingImage" @click="imageExportLongEdge = 2048">2K</button><button type="button" :aria-pressed="imageExportLongEdge === 4096" :disabled="exportingImage" @click="imageExportLongEdge = 4096">4K</button><button type="button" :aria-pressed="imageExportLongEdge === 8192" :disabled="exportingImage || imageExportQuality === 'final'" @click="imageExportLongEdge = 8192">8K</button></div></fieldset>
+          <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ activeBackground.label }}</small></button></div></fieldset>
+          <p class="inline-note">{{ imageExportHelp }}</p>
+
+          <div v-if="exportingImage" class="render-progress"><span>{{ imageExportProgressLabel }}</span><progress :value="imageExportProgress.progress" max="1" :aria-valuetext="imageExportProgressLabel"></progress><button type="button" @click="cancelImageExport">Cancel</button></div>
+          <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
+          <p v-if="imageExportError" class="export-message error" role="alert">{{ imageExportError }}</p>
+          <p v-else-if="imageExportNotice" class="export-message" role="status">{{ imageExportNotice }}</p>
+          <button type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel" @click="downloadImagePng">{{ exportingImage ? 'Cancel render' : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}</button>
+
+          <div class="file-export-section">
+            <h3>3D &amp; project files</h3>
+            <button type="button" :disabled="exporting || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing GLB…' : 'GLB for Blender / Cycles' }}</button>
+            <button type="button" :disabled="!topology?.watertight" @click="downloadStl">STL geometry</button>
+            <button v-if="workspace === 'image'" type="button" @click="exportHeightPng(heightField)">Height PNG</button>
+            <button type="button" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
+          </div>
+        </section>
+      </aside>
     </div>
+
+    <footer class="status-bar">
+      <span>{{ status }}</span>
+      <span v-if="textBuilding && workspace === 'text'">Updating geometry…</span>
+      <span v-else>{{ topology?.watertight ? 'Closed mesh' : hasModel ? 'Open mesh' : 'No model' }} · {{ faceLabel }} triangles</span>
+      <span class="shortcut-hint">Right-click · W / G / B background</span>
+    </footer>
   </main>
+
 </template>
