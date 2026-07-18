@@ -4,6 +4,7 @@ import { createDefaultAppearanceSettings } from './three'
 import {
   calculateFinalRenderTiles,
   applyFinalTileView,
+  FINAL_DENOISE_PADDING,
   finalSampleTarget,
 } from './final-image-export'
 
@@ -11,7 +12,7 @@ describe('final image export contract', () => {
   it('covers every output pixel once while keeping denoise gutters inside the image', () => {
     const width = 2305
     const height = 1537
-    const padding = 4
+    const padding = FINAL_DENOISE_PADDING
     const tiles = calculateFinalRenderTiles(width, height, 1024, padding)
     const coverage = new Uint8Array(width * height)
 
@@ -34,16 +35,16 @@ describe('final image export contract', () => {
     expect(left.renderX + left.renderWidth - right.renderX).toBe(padding * 2)
   })
 
-  it('uses a clean baseline and doubles samples for reflective clay', () => {
+  it('uses high-quality sampling with extra samples for reflective clay', () => {
     const appearance = createDefaultAppearanceSettings()
-    expect(finalSampleTarget('original', appearance)).toBe(256)
-    expect(finalSampleTarget('height', appearance)).toBe(256)
-    expect(finalSampleTarget('clay', appearance)).toBe(256)
+    expect(finalSampleTarget('original', appearance)).toBe(1536)
+    expect(finalSampleTarget('height', appearance)).toBe(1536)
+    expect(finalSampleTarget('clay', appearance)).toBe(1536)
 
     appearance.clay.finish = 'glossy'
-    expect(finalSampleTarget('clay', appearance)).toBe(512)
+    expect(finalSampleTarget('clay', appearance)).toBe(2048)
     appearance.clay.finish = 'metallic'
-    expect(finalSampleTarget('clay', appearance)).toBe(512)
+    expect(finalSampleTarget('clay', appearance)).toBe(2048)
   })
 
   it('applies every padded tile coordinate to the camera exactly once', () => {

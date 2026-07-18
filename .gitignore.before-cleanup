@@ -1,0 +1,12 @@
+node_modules
+dist
+.DS_Store
+*.local
+coverage
+.firebase/
+
+# Firebase
+.firebaserc
+firebase.json
+.firebase/
+firebase-debug.log*

@@ -22,7 +22,7 @@ import {
 } from './viewport-export'
 
 export const FINAL_TILE_EDGE = 1024
-export const FINAL_DENOISE_PADDING = 4
+export const FINAL_DENOISE_PADDING = 8
 
 export interface FinalRenderTile {
   x: number
@@ -72,7 +72,7 @@ export interface FinalImageExportOptions {
 }
 
 export function finalSampleTarget(colorMode: ColorMode, appearance: AppearanceSettings): number {
-  return colorMode === 'clay' && appearance.clay.finish !== 'matte' ? 512 : 256
+  return colorMode === 'clay' && appearance.clay.finish !== 'matte' ? 2048 : 1536
 }
 
 /** Divide a final image into bounded render targets with overlap for seam-free denoising. */
@@ -270,7 +270,7 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
     )
     checkCancelled(options.signal)
 
-    denoiseMaterial = new DenoiseMaterial({ sigma: 1.5, kSigma: 1, threshold: 0.04 })
+    denoiseMaterial = new DenoiseMaterial({ sigma: 2.5, kSigma: 1.5, threshold: 0.055 })
     denoiseQuad = new FullScreenQuad(denoiseMaterial)
 
     for (let tileIndex = 0; tileIndex < tiles.length; tileIndex += 1) {
