@@ -10,6 +10,7 @@ import type {
 } from '../types'
 import { buildPathTracingScene } from './path-tracer-setup'
 import { viewportBackgroundPreset } from './background'
+import { FINAL_TILE_EDGE, finalSampleTarget } from './final-quality'
 import {
   configureStudioRenderer,
   createFinalRenderScene,
@@ -24,7 +25,7 @@ import {
   type ExportCanvas,
 } from './viewport-export'
 
-export const FINAL_TILE_EDGE = 1024
+export { FINAL_TILE_EDGE, finalSampleTarget } from './final-quality'
 export const FINAL_DENOISE_PADDING = 8
 export const FINAL_BATCH_BUDGET_MS = 6
 export const FINAL_PATH_TRACER_TILES = 3
@@ -90,10 +91,6 @@ export interface FinalImageExportOptions {
   signal?: AbortSignal
   onProgress?: (progress: FinalExportProgress) => void
   runtime?: Partial<FinalImageExportRuntime>
-}
-
-export function finalSampleTarget(colorMode: ColorMode, appearance: AppearanceSettings): number {
-  return colorMode === 'clay' && appearance.clay.finish !== 'matte' ? 2048 : 1536
 }
 
 /** Divide a final image into bounded render targets with overlap for seam-free denoising. */

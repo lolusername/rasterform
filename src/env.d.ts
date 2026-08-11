@@ -14,6 +14,7 @@ interface FontData {
 
 interface Window {
   queryLocalFonts?: (options?: QueryLocalFontsOptions) => Promise<FontData[]>
+  rasterformDesktop?: import('./desktop/contracts').RasterformDesktopBridge
 }
 
 interface FontFaceSet {

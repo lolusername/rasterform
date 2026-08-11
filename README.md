@@ -17,6 +17,8 @@ Right-click the 3D viewport to choose a white, dark-gray, or black background, o
 
 Opening Export swaps the right-hand inspector without resizing the screen-bounded viewport or visible WebGL canvas. High images use a dedicated background renderer when supported. Final keeps the full path-traced sample and denoising contract on the main thread, where its BVH worker is not nested inside another worker; it may pause the studio while it renders, but preserves the requested resolution, material, lighting, and background options.
 
+The optional macOS desktop edition keeps that web behavior intact while moving Final into a separate hidden Electron renderer process. It uses the same quality owner and exact 1,536/2,048-sample contract, but the visible studio remains responsive and shows progress while the native shell prevents sleep and saves the completed PNG atomically.
+
 Rasterform can export transparent 2K/4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
 
 ## Text workspace
@@ -44,6 +46,33 @@ To verify the project:
 npm test
 npm run build
 ```
+
+## macOS desktop edition
+
+The desktop toolchain is isolated under `electron/`; the normal `npm run dev` and `npm run build` commands remain the browser app. Desktop development requires Node 22.12 or newer.
+
+```bash
+npm ci
+npm --prefix electron ci
+npm run desktop:test
+npm run desktop:build
+npm run desktop:smoke
+npm run desktop:dev
+```
+
+Ad-hoc-signed local development packages can be built for Apple silicon, Intel, or both architectures. They are not Developer ID-signed or notarized:
+
+```bash
+npm run desktop:package
+npm run desktop:package:arm64
+npm run desktop:package:x64
+npm run desktop:package:universal
+npm run desktop:smoke:packaged
+```
+
+The unqualified package and packaged-smoke commands build and run only the physical host Mac's native architecture (`arm64` on Apple silicon), even if Node itself was started through Rosetta. Intel and universal artifacts are explicit compatibility builds; Rasterform refuses to launch the x64 smoke test on an Apple-silicon Mac. Package verification still checks restrictive ATS metadata, the Rasterform icon, embedded ASAR integrity, locked Electron fuse values, every nested Mach-O architecture/deployment target, and the internal consistency of the ad-hoc code-signature seal. That integrity check does not authenticate a Developer ID identity or verify notarization; distributable releases still require the separate Apple-credentialed release workflow.
+
+See [docs/DESKTOP.md](docs/DESKTOP.md) for the architecture, quality guarantees, macOS support policy, verification gates, and signing/notarization release checklist.
 
 ## Rendering credits
 

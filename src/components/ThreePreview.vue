@@ -25,6 +25,10 @@ import {
   type FinalExportProgress,
   type FinalImagePngResult,
 } from '../lib/final-image-export'
+import {
+  renderFinalImageInDesktop,
+  type DesktopFinalCaptureResult,
+} from '../desktop/client'
 import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
 import type {
@@ -193,7 +197,8 @@ async function captureHighPng(
 async function captureFinalPng(
   dimensions: { width: number; height: number },
   background: ImageExportBackground,
-): Promise<FinalImagePngResult> {
+  suggestedName = 'rasterform-final.png',
+): Promise<FinalImagePngResult | DesktopFinalCaptureResult> {
   if (!canvas.value || !camera || !props.mesh) throw new Error('There is no model to export.')
   if (Math.max(dimensions.width, dimensions.height) > 4096) {
     throw new Error('8K Final is too large for a reliable browser render. Choose 4K or High quality.')
@@ -213,6 +218,26 @@ async function captureFinalPng(
   }
   const exportBackground = props.background
   try {
+    // The desktop shell snapshots this exact scene into a separate Chromium
+    // renderer process. When the optional bridge is absent, null preserves the
+    // established browser path below without changing its quality or behavior.
+    const desktopResult = exportColorMode === 'wireframe'
+      ? null
+      : await renderFinalImageInDesktop({
+          mesh: exportMesh,
+          colorMode: exportColorMode,
+          appearance: exportAppearance,
+          camera: exportCamera,
+          width: dimensions.width,
+          height: dimensions.height,
+          background,
+          studioBackground: exportBackground,
+          suggestedName,
+          signal: controller.signal,
+          onProgress: (progress) => emit('export-progress', progress),
+        })
+    if (desktopResult) return desktopResult
+
     await awaitExportTask(environmentReady ?? Promise.resolve(), controller.signal)
     if (controller.signal.aborted) throw new DOMException('Final image export cancelled.', 'AbortError')
     if (!canvas.value || !camera) throw new Error('Viewport is no longer available.')

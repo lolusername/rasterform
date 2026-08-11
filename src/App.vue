@@ -29,6 +29,7 @@ import {
   type FinalExportProgress,
   type FinalImagePngResult,
 } from './lib/final-image-export'
+import { DesktopFinalRenderError, type DesktopFinalCaptureResult } from './desktop/client'
 import { createDefaultAppearanceSettings } from './lib/three'
 import { calculateViewportDimensions, type ViewportPngResult } from './lib/viewport-export'
 import type {
@@ -61,7 +62,8 @@ interface ThreePreviewHandle {
   captureFinalPng: (
     dimensions: { width: number; height: number },
     background: ImageExportBackground,
-  ) => Promise<FinalImagePngResult>
+    suggestedName?: string,
+  ) => Promise<FinalImagePngResult | DesktopFinalCaptureResult>
   cancelImageExport: () => void
 }
 
@@ -106,6 +108,7 @@ const imageExportNotice = ref('')
 const imageExportAnnouncement = ref('')
 const activeImageExportRequest = shallowRef<ImageExportRequestSnapshot | null>(null)
 const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
+const desktopFinalAvailable = window.rasterformDesktop?.protocolVersion === 1
 
 function initialViewportBackground(): ViewportBackground {
   try {
@@ -389,7 +392,9 @@ const imageExportHelp = computed(() => {
   if (request.colorMode === 'wireframe') return 'Wireframe exports use High quality.'
   if (request.quality === 'high') return 'Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.'
   if (Math.max(request.dimensions.width, request.dimensions.height) > 4096) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
-  return `Path-traced light and shadows · ${request.samples} samples with gentle denoising · Final may pause the studio while it renders.`
+  return desktopFinalAvailable
+    ? `Path-traced light and shadows · ${request.samples} samples with gentle denoising · renders separately so the studio stays responsive.`
+    : `Path-traced light and shadows · ${request.samples} samples with gentle denoising · Final may pause the studio while it renders.`
 })
 const imageExportProgressLabel = computed(() => {
   if (imageExportProgress.phase === 'preparing') return `Preparing geometry · ${Math.round(imageExportProgress.progress * 100)}%`
@@ -397,6 +402,12 @@ const imageExportProgressLabel = computed(() => {
   if (displayImageExportRequest.value.quality === 'high') return `Rendering supersampled tiles · ${Math.round(imageExportProgress.progress * 100)}%`
   if (imageExportProgress.samples === 0) return 'Preparing Final renderer…'
   return `Refining light and shadows · ${Math.round(imageExportProgress.progress * 100)}%`
+})
+const imageExportProgressBarValue = computed(() => {
+  if (!desktopFinalAvailable || displayImageExportRequest.value.quality !== 'final') return imageExportProgress.progress
+  if (imageExportProgress.phase === 'preparing') return imageExportProgress.progress * 0.1
+  if (imageExportProgress.phase === 'finishing') return 0.96 + imageExportProgress.progress * 0.04
+  return 0.1 + imageExportProgress.progress * 0.86
 })
 
 const rawField = computed(() => composeChannelStack(image.value, channelLayers))
@@ -897,6 +908,18 @@ function cancelImageExport() {
 
 function friendlyImageExportError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'AbortError') return ''
+  if (error instanceof DesktopFinalRenderError) {
+    if (error.code === 'save-failed') {
+      return 'macOS could not save the Final PNG. Your design is safe; choose a writable location and try Final again.'
+    }
+    if (error.code === 'process-gone') {
+      return 'The separate Final renderer stopped unexpectedly. Your design is safe; try Final again.'
+    }
+    if (error.code === 'request-expired') {
+      return 'The Final save reservation expired before rendering started. Open Final and try again.'
+    }
+    return 'The separate Final renderer could not finish. Your design is safe; try Final again.'
+  }
   const message = error instanceof Error ? error.message : ''
   if (message.includes('8K Final')) return 'Final quality supports up to 4K. Choose 4K or use High quality for 8K.'
   if (message.includes('canvas') || message.includes('size')) return 'This image is too large for the device. Choose 2K or use High quality.'
@@ -938,16 +961,19 @@ async function downloadImagePng() {
     targetSamples: request.samples,
   } satisfies FinalExportProgress)
   try {
-    const result = request.quality === 'final'
-      ? await threePreview.value.captureFinalPng(request.dimensions, request.background)
-      : await threePreview.value.captureHighPng(request.dimensions, request.background)
     const view = previewModes.find((mode) => mode.value === request.colorMode)?.label.toLowerCase() ?? request.colorMode
     const background = request.background === 'transparent' ? 'transparent' : request.viewportBackground
     const quality = request.quality === 'final' ? 'final' : 'high'
-    downloadBlob(`rasterform-${view}-${quality}-${result.width}x${result.height}-${background}.png`, result.blob)
+    const fileName = `rasterform-${view}-${quality}-${request.dimensions.width}x${request.dimensions.height}-${background}.png`
+    const result = request.quality === 'final'
+      ? await threePreview.value.captureFinalPng(request.dimensions, request.background, fileName)
+      : await threePreview.value.captureHighPng(request.dimensions, request.background)
+    if (!('desktopSaved' in result)) downloadBlob(fileName, result.blob)
     const sampleDetail = 'samples' in result ? ` · ${result.samples} samples` : ' · 2× edge smoothing'
     status.value = `PNG · ${result.width} × ${result.height}${sampleDetail} · ${background} · ${result.dpi} PPI`
-    imageExportNotice.value = `PNG download started · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
+    imageExportNotice.value = 'desktopSaved' in result
+      ? `PNG saved as ${result.fileName} · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
+      : `PNG download started · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
   } catch (error) {
     const friendly = friendlyImageExportError(error)
     if (friendly) imageExportError.value = friendly
@@ -1276,7 +1302,7 @@ async function downloadImagePng() {
           <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ activeBackground.label }}</small></button></div></fieldset>
           <p class="inline-note">{{ imageExportHelp }}</p>
 
-          <div v-if="exportingImage" class="render-progress"><span>{{ imageExportProgressLabel }}</span><progress :value="imageExportProgress.progress" max="1" :aria-valuetext="imageExportProgressLabel"></progress><button type="button" @click="cancelImageExport">Cancel</button></div>
+          <div v-if="exportingImage" class="render-progress"><span>{{ imageExportProgressLabel }}</span><progress :value="imageExportProgressBarValue" max="1" :aria-valuetext="imageExportProgressLabel"></progress><button type="button" @click="cancelImageExport">Cancel</button></div>
           <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
           <p v-if="imageExportError" class="export-message error" role="alert">{{ imageExportError }}</p>
           <p v-else-if="imageExportNotice" class="export-message" role="status">{{ imageExportNotice }}</p>

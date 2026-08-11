@@ -60,3 +60,11 @@ Desktop.ini
 
 # Local npm lockfile
 package-lock.json
+!/package-lock.json
+
+# Desktop build and packaging output
+electron/.build/
+electron/.stage/
+electron/.vite-render/
+electron/out/
+!electron/package-lock.json
