@@ -2,14 +2,20 @@ import * as THREE from 'three'
 import { describe, expect, it, vi } from 'vitest'
 import type { AppearanceSettings, MeshData } from '../types'
 import {
+  DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
   DESKTOP_PROTOCOL_VERSION,
   type DesktopFinalRenderSnapshot,
+  type DesktopLongExportOutcome,
+  type DesktopLongExportStartRequest,
   type DesktopRenderEvent,
-  type RasterformDesktopBridge,
+  type RasterformDesktopLongExportBridge,
 } from './contracts'
 import {
   DesktopFinalRenderError,
+  DesktopLongExportError,
+  beginDesktopLongExport,
   createDesktopFinalRenderSnapshot,
+  endDesktopLongExport,
   renderFinalImageInDesktop,
 } from './client'
 
@@ -56,10 +62,12 @@ function baseOptions() {
 }
 
 interface BridgeHarness {
-  bridge: RasterformDesktopBridge
+  bridge: RasterformDesktopLongExportBridge
   emit: (event: DesktopRenderEvent) => void
   submitted: DesktopFinalRenderSnapshot[]
   cancelled: string[]
+  longStarts: DesktopLongExportStartRequest[]
+  longEnds: Array<{ jobId: string; outcome: DesktopLongExportOutcome }>
   unsubscribe: ReturnType<typeof vi.fn>
 }
 
@@ -69,15 +77,20 @@ function bridgeHarness(
   const listeners = new Set<(event: DesktopRenderEvent) => void>()
   const submitted: DesktopFinalRenderSnapshot[] = []
   const cancelled: string[] = []
+  const longStarts: DesktopLongExportStartRequest[] = []
+  const longEnds: Array<{ jobId: string; outcome: DesktopLongExportOutcome }> = []
   const unsubscribe = vi.fn()
   const emit = (event: DesktopRenderEvent) => listeners.forEach((listener) => listener(event))
   return {
     submitted,
     cancelled,
+    longStarts,
+    longEnds,
     unsubscribe,
     emit,
     bridge: {
       protocolVersion: DESKTOP_PROTOCOL_VERSION,
+      longExportProtocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
       prepareFinalSave: async () => ({ cancelled: false, jobId: 'job_1' }),
       submitFinalRender: async (jobId, snapshot) => {
         submitted.push(snapshot)
@@ -94,6 +107,14 @@ function bridgeHarness(
           listeners.delete(listener)
           unsubscribe()
         }
+      },
+      beginLongExport: async (request) => {
+        longStarts.push(request)
+        return { accepted: true, jobId: 'living_job_1' }
+      },
+      endLongExport: async (jobId, outcome) => {
+        longEnds.push({ jobId, outcome })
+        return { ended: true }
       },
     },
   }
@@ -365,5 +386,64 @@ describe('desktop Final client', () => {
       bridge: harness.bridge,
       signal: controller.signal,
     })).resolves.toMatchObject({ desktopSaved: true, samples: 1536 })
+  })
+})
+
+describe('desktop long-export lifecycle client', () => {
+  it('returns null without a desktop bridge so the shared web export stays unchanged', async () => {
+    await expect(beginDesktopLongExport({ frames: 96, bridge: null })).resolves.toBeNull()
+    await expect(endDesktopLongExport(null, 'completed')).resolves.toBe(false)
+  })
+
+  it('starts and ends metadata-only native protection with a versioned request', async () => {
+    const harness = bridgeHarness()
+    const session = await beginDesktopLongExport({ frames: 96, bridge: harness.bridge })
+
+    expect(session).toEqual({ jobId: 'living_job_1' })
+    expect(harness.longStarts).toEqual([{
+      protocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
+      kind: 'living-loop',
+      frames: 96,
+    }])
+    await expect(endDesktopLongExport(session, 'completed')).resolves.toBe(true)
+    expect(harness.longEnds).toEqual([{ jobId: 'living_job_1', outcome: 'completed' }])
+  })
+
+  it('rejects invalid frame counts before native IPC', async () => {
+    const harness = bridgeHarness()
+    await expect(beginDesktopLongExport({
+      frames: 361,
+      bridge: harness.bridge,
+    })).rejects.toEqual(expect.objectContaining<Partial<DesktopLongExportError>>({
+      name: 'DesktopLongExportError',
+      code: 'invalid-request',
+    }))
+    expect(harness.longStarts).toEqual([])
+  })
+
+  it('surfaces strict busy/failure acknowledgements and rejects malformed replies', async () => {
+    const busy = bridgeHarness()
+    busy.bridge.beginLongExport = async () => ({
+      accepted: false,
+      error: { code: 'busy', message: 'Another export is active.' },
+    })
+    await expect(beginDesktopLongExport({ frames: 48, bridge: busy.bridge })).rejects.toEqual(
+      expect.objectContaining<Partial<DesktopLongExportError>>({ code: 'busy' }),
+    )
+
+    const malformed = bridgeHarness()
+    malformed.bridge.beginLongExport = async () => ({ accepted: true, jobId: '../bad' })
+    await expect(beginDesktopLongExport({ frames: 48, bridge: malformed.bridge })).rejects.toEqual(
+      expect.objectContaining<Partial<DesktopLongExportError>>({ code: 'invalid-request' }),
+    )
+  })
+
+  it('validates native completion acknowledgements', async () => {
+    const harness = bridgeHarness()
+    const session = await beginDesktopLongExport({ frames: 24, bridge: harness.bridge })
+    harness.bridge.endLongExport = async () => ({ ended: true, debug: true }) as never
+    await expect(endDesktopLongExport(session, 'failed')).rejects.toEqual(
+      expect.objectContaining<Partial<DesktopLongExportError>>({ code: 'invalid-request' }),
+    )
   })
 })

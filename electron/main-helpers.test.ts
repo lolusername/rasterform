@@ -12,6 +12,7 @@ import {
   finalRenderCancellationAction,
   finalRenderCompletionAction,
   isPngBytes,
+  isLivingLoopDownload,
   isDesktopSmokeHeartbeatResponsive,
   resolveProtocolFile,
   safeFileSystemErrorMessage,
@@ -115,6 +116,16 @@ function validOnePixelRgbaPng(): Uint8Array {
 }
 
 describe('desktop main helpers', () => {
+  it('matches only the trusted Living Loop blob download contract', () => {
+    const valid = 'rasterform-living-flow-4096x3072-30fps-transparent.zip'
+    expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', valid)).toBe(true)
+    expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', 'rasterform-living-melt-2048x1536-12fps-dark-gray.zip')).toBe(true)
+    expect(isLivingLoopDownload('https://example.com/archive.zip', valid)).toBe(false)
+    expect(isLivingLoopDownload('blob:rasterform://render/94a9a69d', valid)).toBe(false)
+    expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', '../rasterform-living-flow-4096x3072-30fps-transparent.zip')).toBe(false)
+    expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', 'rasterform.zip')).toBe(false)
+  })
+
   it('counts only visible-renderer heartbeats inside the hidden block window', () => {
     expect(DESKTOP_SMOKE_HEARTBEAT_MAX_ATTEMPTS).toBe(3)
     expect(DESKTOP_SMOKE_HEARTBEAT_REQUIRED_BEATS).toBe(2)

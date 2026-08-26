@@ -17,7 +17,10 @@ import {
 import { viewportBackgroundPreset } from '../lib/background'
 import {
   canUseImageExportWorker,
+  createImageExportWorkerSession,
+  decideImageExportWorkerFailure,
   renderImageExportInWorker,
+  type ImageExportWorkerSession,
 } from '../lib/image-export-worker'
 import {
   awaitExportTask,
@@ -31,10 +34,17 @@ import {
 } from '../desktop/client'
 import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
+import {
+  DEFAULT_LIVING_FORM_SETTINGS,
+  createLivingFormEngine,
+  normalizeLivingFormPhase,
+  type LivingFormEngine,
+} from '../lib/living-form'
 import type {
   AppearanceSettings,
   ColorMode,
   ImageExportBackground,
+  LivingFormSettings,
   MeshData,
   ViewportBackground,
 } from '../types'
@@ -45,9 +55,13 @@ const props = withDefaults(defineProps<{
   appearance: AppearanceSettings
   background?: ViewportBackground
   interactionLocked?: boolean
+  livingForm?: LivingFormSettings
+  livingPhase?: number
 }>(), {
   background: 'dark-gray',
   interactionLocked: false,
+  livingForm: () => ({ ...DEFAULT_LIVING_FORM_SETTINGS }),
+  livingPhase: 0,
 })
 
 const emit = defineEmits<{
@@ -64,6 +78,9 @@ let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let controls: OrbitControls | null = null
 let object: THREE.Mesh | null = null
+let livingFormEngine: LivingFormEngine | null = null
+let appliedLivingFrame = ''
+let livingFrameDirty = true
 let composer: EffectComposer | null = null
 let gtaoPass: GTAOPass | null = null
 let outputPass: OutputPass | null = null
@@ -74,6 +91,19 @@ let activeExport: AbortController | null = null
 const mainThreadExport = ref(false)
 let animationFrame = 0
 let mounted = false
+
+interface LivingFormLoopSnapshot {
+  engine: LivingFormEngine
+  settings: LivingFormSettings
+  colorMode: ColorMode
+  appearance: AppearanceSettings
+  camera: THREE.PerspectiveCamera
+  studioBackground: ViewportBackground
+  workerSession: ImageExportWorkerSession | null
+  workerDisabled: boolean
+}
+
+let livingFormLoopSnapshot: LivingFormLoopSnapshot | null = null
 
 function disposeMaterial(material: THREE.Material | THREE.Material[]) {
   if (Array.isArray(material)) material.forEach((item) => item.dispose())
@@ -86,6 +116,85 @@ function disposeLiveObject() {
   object.geometry.dispose()
   disposeMaterial(object.material)
   object = null
+  livingFormEngine = null
+  appliedLivingFrame = ''
+  livingFrameDirty = true
+}
+
+function livingFrameKey(): string {
+  const settings = props.livingForm
+  const phase = settings.enabled ? normalizeLivingFormPhase(props.livingPhase) : 0
+  return [
+    settings.enabled ? 1 : 0,
+    phase,
+    settings.behavior,
+    settings.amount,
+    settings.frequency,
+    settings.seed,
+  ].join(':')
+}
+
+/** Update only the reusable position buffer; never rebuild the mesh per frame. */
+function applyLivingFormFrame(force = false) {
+  if (!object || !livingFormEngine) return
+  if (!force && !livingFrameDirty) return
+  const key = livingFrameKey()
+  if (!force && key === appliedLivingFrame) {
+    livingFrameDirty = false
+    return
+  }
+  const position = object.geometry.getAttribute('position')
+  if (!(position instanceof THREE.BufferAttribute) || !(position.array instanceof Float32Array)) return
+  const settings = props.livingForm.enabled
+    ? props.livingForm
+    : { ...props.livingForm, amount: 0 }
+  livingFormEngine.writePositions(position.array, props.livingPhase, settings)
+  position.needsUpdate = true
+  object.geometry.computeVertexNormals()
+  appliedLivingFrame = key
+  livingFrameDirty = false
+}
+
+function snapshotLivingFormMesh(phase = props.livingPhase): MeshData {
+  if (!props.mesh) throw new Error('There is no model to export.')
+  if (!props.livingForm.enabled) return props.mesh
+  const engine = livingFormEngine ?? createLivingFormEngine(props.mesh)
+  return engine.sampleMesh(phase, props.livingForm)
+}
+
+function beginLivingFormLoopExport(settings: LivingFormSettings): void {
+  if (!props.mesh || !camera) throw new Error('There is no model to export.')
+  endLivingFormLoopExport()
+  controls?.update()
+  camera.updateMatrixWorld(true)
+  let workerSession: ImageExportWorkerSession | null = null
+  let workerDisabled = !canUseImageExportWorker()
+  if (!workerDisabled) {
+    try {
+      workerSession = createImageExportWorkerSession()
+    } catch {
+      // The established main-thread High renderer remains the reliable fallback.
+      workerDisabled = true
+    }
+  }
+  livingFormLoopSnapshot = {
+    engine: createLivingFormEngine(props.mesh),
+    settings: { ...settings, enabled: true },
+    colorMode: props.colorMode,
+    appearance: {
+      heightGradient: { ...props.appearance.heightGradient },
+      clay: { ...props.appearance.clay },
+    },
+    camera: camera.clone(),
+    studioBackground: props.background,
+    workerSession,
+    workerDisabled,
+  }
+}
+
+function endLivingFormLoopExport(): void {
+  livingFormLoopSnapshot?.workerSession?.dispose()
+  livingFormLoopSnapshot = null
 }
 
 function updateObject() {
@@ -93,7 +202,17 @@ function updateObject() {
   disposeLiveObject()
   if (!props.mesh) return
   object = createThreeMesh(props.mesh, props.colorMode, props.appearance)
+  // Living Form can expand beyond the immutable base bounds. With one studio
+  // object, disabling frustum culling is cheaper and safer than rebuilding both
+  // bounding volumes on every displayed phase.
+  object.frustumCulled = false
+  const position = object.geometry.getAttribute('position')
+  const normal = object.geometry.getAttribute('normal')
+  if (position instanceof THREE.BufferAttribute) position.setUsage(THREE.DynamicDrawUsage)
+  if (normal instanceof THREE.BufferAttribute) normal.setUsage(THREE.DynamicDrawUsage)
+  livingFormEngine = createLivingFormEngine(props.mesh)
   scene.add(object)
+  applyLivingFormFrame(true)
 }
 
 function updateBackground() {
@@ -104,31 +223,44 @@ function updateBackground() {
 async function captureHighPng(
   dimensions: { width: number; height: number },
   background: ImageExportBackground,
+  livingPhase = props.livingPhase,
 ): Promise<ViewportPngResult> {
-  if (!canvas.value || !renderer || !camera || !props.mesh) throw new Error('There is no model to export.')
+  const loopSnapshot = livingFormLoopSnapshot
+  if (!canvas.value || !renderer || !camera || (!props.mesh && !loopSnapshot)) {
+    throw new Error('There is no model to export.')
+  }
   cancelImageExport()
   const controller = new AbortController()
   activeExport = controller
   exportActive.value = true
-  controls?.update()
-  camera.updateMatrixWorld(true)
-  const exportCamera = camera.clone()
-  const exportMesh = props.mesh
-  const exportColorMode = props.colorMode
-  const exportAppearance: AppearanceSettings = {
-    heightGradient: { ...props.appearance.heightGradient },
-    clay: { ...props.appearance.clay },
+  if (!loopSnapshot) {
+    controls?.update()
+    camera.updateMatrixWorld(true)
   }
-  const exportBackground = props.background
+  const exportCamera = loopSnapshot?.camera.clone() ?? camera.clone()
+  const exportMesh = loopSnapshot
+    ? loopSnapshot.engine.sampleMesh(livingPhase, loopSnapshot.settings)
+    : snapshotLivingFormMesh(livingPhase)
+  const exportColorMode = loopSnapshot?.colorMode ?? props.colorMode
+  const exportAppearance: AppearanceSettings = loopSnapshot
+    ? {
+        heightGradient: { ...loopSnapshot.appearance.heightGradient },
+        clay: { ...loopSnapshot.appearance.clay },
+      }
+    : {
+        heightGradient: { ...props.appearance.heightGradient },
+        clay: { ...props.appearance.clay },
+      }
+  const exportBackground = loopSnapshot?.studioBackground ?? props.background
   try {
     await awaitExportTask(environmentReady ?? Promise.resolve(), controller.signal)
     if (controller.signal.aborted) throw new DOMException('Image export cancelled.', 'AbortError')
     if (!canvas.value || !renderer || !camera) throw new Error('Viewport is no longer available.')
 
-    if (canUseImageExportWorker()) {
+    if (canUseImageExportWorker() && (!loopSnapshot || !loopSnapshot.workerDisabled)) {
       let workerMadeProgress = false
       try {
-        return await renderImageExportInWorker({
+        const options = {
           quality: 'high',
           mesh: exportMesh,
           colorMode: exportColorMode,
@@ -141,16 +273,33 @@ async function captureHighPng(
           studioBackground: exportBackground,
           supersample: 2,
           signal: controller.signal,
-          onProgress: (progress) => {
+          onProgress: (progress: FinalExportProgress) => {
             workerMadeProgress = true
             emit('export-progress', progress)
           },
-        })
+        } as const
+        return await (loopSnapshot?.workerSession
+          ? loopSnapshot.workerSession.render(options)
+          : renderImageExportInWorker(options))
       } catch (error) {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
-        if (workerMadeProgress) throw error
+        const failure = decideImageExportWorkerFailure({
+          error,
+          signal: controller.signal,
+          sequence: Boolean(loopSnapshot),
+          workerMadeProgress,
+        })
+        if (loopSnapshot && failure.disableSequenceWorker) {
+          loopSnapshot.workerSession?.dispose()
+          loopSnapshot.workerSession = null
+          // Retire a failed WebGL context for the rest of this sequence. The
+          // current frame has not been archived yet, so the exact same snapshot
+          // can safely restart on the established main-thread High renderer.
+          loopSnapshot.workerDisabled = true
+        }
+        if (!failure.retryOnMainThread) throw error
         // Older browsers and constrained GPUs fall back to the same tiled render
-        // on the main thread only when the background renderer never started.
+        // on the main thread. Loop frames retry even after progress because the
+        // caller has not committed the frame until this promise resolves.
       }
     }
 
@@ -198,6 +347,7 @@ async function captureFinalPng(
   dimensions: { width: number; height: number },
   background: ImageExportBackground,
   suggestedName = 'rasterform-final.png',
+  livingPhase = props.livingPhase,
 ): Promise<FinalImagePngResult | DesktopFinalCaptureResult> {
   if (!canvas.value || !camera || !props.mesh) throw new Error('There is no model to export.')
   if (Math.max(dimensions.width, dimensions.height) > 4096) {
@@ -210,7 +360,7 @@ async function captureFinalPng(
   controls?.update()
   camera.updateMatrixWorld(true)
   const exportCamera = camera.clone()
-  const exportMesh = props.mesh
+  const exportMesh = snapshotLivingFormMesh(livingPhase)
   const exportColorMode = props.colorMode
   const exportAppearance: AppearanceSettings = {
     heightGradient: { ...props.appearance.heightGradient },
@@ -271,7 +421,13 @@ function cancelImageExport() {
   activeExport?.abort()
 }
 
-defineExpose({ captureHighPng, captureFinalPng, cancelImageExport })
+defineExpose({
+  captureHighPng,
+  captureFinalPng,
+  cancelImageExport,
+  beginLivingFormLoopExport,
+  endLivingFormLoopExport,
+})
 
 function resize() {
   if (!canvas.value || !renderer || !camera) return
@@ -285,6 +441,7 @@ function resize() {
 
 function render() {
   animationFrame = requestAnimationFrame(render)
+  applyLivingFormFrame()
   controls?.update()
   if (!mainThreadExport.value) composer?.render()
 }
@@ -381,6 +538,21 @@ watch(
 watch(() => props.background, updateBackground)
 
 watch(
+  () => [
+    props.livingForm.enabled,
+    props.livingForm.behavior,
+    props.livingForm.amount,
+    props.livingForm.frequency,
+    props.livingForm.seed,
+    props.livingPhase,
+  ] as const,
+  () => {
+    livingFrameDirty = true
+  },
+  { deep: false, flush: 'sync' },
+)
+
+watch(
   () => props.interactionLocked,
   (locked) => {
     if (controls) controls.enabled = !locked && !mainThreadExport.value
@@ -390,6 +562,7 @@ watch(
 onBeforeUnmount(() => {
   mounted = false
   cancelImageExport()
+  endLivingFormLoopExport()
   cancelAnimationFrame(animationFrame)
   resizeObserver?.disconnect()
   controls?.dispose()

@@ -45,6 +45,7 @@ export interface ImageExportEnvironmentSnapshot {
 
 export interface ImageExportWorkerRequest {
   type: 'render'
+  requestId: number
   quality: 'high'
   mesh: MeshData
   colorMode: ColorMode
@@ -59,9 +60,9 @@ export interface ImageExportWorkerRequest {
 }
 
 export type ImageExportWorkerResponse =
-  | { type: 'progress'; progress: FinalExportProgress }
-  | { type: 'result'; quality: 'high'; result: ViewportPngResult }
-  | { type: 'error'; name: string; message: string }
+  | { type: 'progress'; requestId: number; progress: FinalExportProgress }
+  | { type: 'result'; requestId: number; quality: 'high'; result: ViewportPngResult }
+  | { type: 'error'; requestId: number; name: string; message: string }
 
 interface BaseWorkerOptions {
   mesh: MeshData
@@ -82,8 +83,41 @@ export interface HighWorkerOptions extends BaseWorkerOptions {
   supersample: ViewportSupersample
 }
 
+export interface ImageExportWorkerSession {
+  readonly disposed: boolean
+  render(options: HighWorkerOptions): Promise<ViewportPngResult>
+  dispose(): void
+}
+
+export interface ImageExportWorkerFailureDecision {
+  aborted: boolean
+  disableSequenceWorker: boolean
+  retryOnMainThread: boolean
+}
+
 function abortError(): DOMException {
   return new DOMException('Image export cancelled.', 'AbortError')
+}
+
+/**
+ * Keep one-shot High exports conservative after a worker has begun drawing, but
+ * never strand a loop on a failed background WebGL context. No loop frame is
+ * committed until this render resolves, so retrying the same snapshot on the
+ * established main-thread renderer is safe even after worker progress events.
+ */
+export function decideImageExportWorkerFailure(options: {
+  error: unknown
+  signal?: AbortSignal
+  sequence: boolean
+  workerMadeProgress: boolean
+}): ImageExportWorkerFailureDecision {
+  const aborted = options.signal?.aborted === true
+    || (options.error instanceof DOMException && options.error.name === 'AbortError')
+  return {
+    aborted,
+    disableSequenceWorker: options.sequence,
+    retryOnMainThread: !aborted && (options.sequence || !options.workerMadeProgress),
+  }
 }
 
 function copyTexturePixels(data: unknown): TexturePixels | null {
@@ -149,16 +183,15 @@ export function canUseImageExportWorker(): boolean {
   return typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined'
 }
 
-export function renderImageExportInWorker(
-  options: HighWorkerOptions,
-): Promise<ViewportPngResult> {
-  if (!canUseImageExportWorker()) return Promise.reject(new Error('Dedicated image rendering is unavailable.'))
-  if (options.signal?.aborted) return Promise.reject(abortError())
-
+function createWorkerRequest(options: HighWorkerOptions, requestId: number): {
+  request: ImageExportWorkerRequest
+  transfers: Transferable[]
+} {
   const mesh = snapshotMesh(options.mesh)
   const environment = snapshotEnvironment(options.environment)
   const request: ImageExportWorkerRequest = {
     type: 'render',
+    requestId,
     quality: options.quality,
     mesh,
     colorMode: options.colorMode,
@@ -183,47 +216,138 @@ export function renderImageExportInWorker(
   ]
   if (environment) transfers.push(environment.data.buffer)
 
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('../workers/image-export.worker.ts', import.meta.url), {
-      type: 'module',
-      name: 'rasterform-image-export',
-    })
-    let settled = false
+  return { request, transfers }
+}
 
-    const cleanup = () => {
-      options.signal?.removeEventListener('abort', handleAbort)
-      worker.terminate()
-    }
-    const finish = (callback: () => void) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      callback()
-    }
-    const handleAbort = () => finish(() => reject(abortError()))
+/**
+ * Own one dedicated renderer worker across a sequence of High-quality frames.
+ * Calls are intentionally serialized so a loop cannot accidentally overlap two
+ * WebGL jobs in the same worker. Request ids make late cancellation/error events
+ * harmless if a caller aborts between frames.
+ */
+export function createImageExportWorkerSession(): ImageExportWorkerSession {
+  if (!canUseImageExportWorker()) throw new Error('Dedicated image rendering is unavailable.')
 
-    options.signal?.addEventListener('abort', handleAbort, { once: true })
-    worker.onerror = (event) => finish(() => reject(new Error(event.message || 'Image export worker failed to start.')))
-    worker.onmessage = (event: MessageEvent<ImageExportWorkerResponse>) => {
-      const response = event.data
-      if (response.type === 'progress') {
-        options.onProgress?.(response.progress)
-        return
-      }
-      if (response.type === 'error') {
-        const error = response.name === 'AbortError'
-          ? abortError()
-          : new Error(response.message)
-        finish(() => reject(error))
-        return
-      }
-      finish(() => resolve(response.result))
-    }
-
-    try {
-      worker.postMessage(request, transfers)
-    } catch (error) {
-      finish(() => reject(error))
-    }
+  const worker = new Worker(new URL('../workers/image-export.worker.ts', import.meta.url), {
+    type: 'module',
+    name: 'rasterform-image-export',
   })
+  let nextRequestId = 1
+  let isDisposed = false
+  let pending: {
+    requestId: number
+    resolve: (result: ViewportPngResult) => void
+    reject: (reason: unknown) => void
+    onProgress?: (progress: FinalExportProgress) => void
+    signal?: AbortSignal
+    handleAbort: () => void
+  } | null = null
+
+  const finishPending = (
+    requestId: number,
+    callback: (active: NonNullable<typeof pending>) => void,
+  ) => {
+    const active = pending
+    if (!active || active.requestId !== requestId) return
+    pending = null
+    active.signal?.removeEventListener('abort', active.handleAbort)
+    callback(active)
+  }
+
+  const dispose = () => {
+    if (isDisposed) return
+    isDisposed = true
+    worker.terminate()
+    const active = pending
+    if (!active) return
+    pending = null
+    active.signal?.removeEventListener('abort', active.handleAbort)
+    active.reject(abortError())
+  }
+
+  worker.onerror = (event) => {
+    const message = event.message || 'Image export worker failed to start.'
+    const active = pending
+    if (active) finishPending(active.requestId, (request) => request.reject(new Error(message)))
+    isDisposed = true
+    worker.terminate()
+  }
+  worker.onmessage = (event: MessageEvent<ImageExportWorkerResponse>) => {
+    const response = event.data
+    const active = pending
+    if (!active || response.requestId !== active.requestId) return
+    if (response.type === 'progress') {
+      active.onProgress?.(response.progress)
+      return
+    }
+    if (response.type === 'error') {
+      const error = response.name === 'AbortError'
+        ? abortError()
+        : new Error(response.message)
+      finishPending(response.requestId, (request) => request.reject(error))
+      return
+    }
+    finishPending(response.requestId, (request) => request.resolve(response.result))
+  }
+
+  return {
+    get disposed() {
+      return isDisposed
+    },
+    render(options: HighWorkerOptions): Promise<ViewportPngResult> {
+      if (isDisposed) return Promise.reject(new Error('Dedicated image renderer is no longer available.'))
+      if (pending) return Promise.reject(new Error('Dedicated image renderer is already rendering a frame.'))
+      if (options.signal?.aborted) return Promise.reject(abortError())
+
+      const requestId = nextRequestId
+      nextRequestId += 1
+      const prepared = createWorkerRequest(options, requestId)
+
+      return new Promise((resolve, reject) => {
+        const handleAbort = () => {
+          try {
+            worker.postMessage({ type: 'cancel', requestId })
+          } catch {
+            // The promise still rejects even if the worker has already stopped.
+          }
+          finishPending(requestId, (active) => active.reject(abortError()))
+          // Cancellation ends a sequence, so terminate immediately instead of
+          // allowing an old WebGL job to overlap a later request while unwinding.
+          if (!isDisposed) {
+            isDisposed = true
+            worker.terminate()
+          }
+        }
+        pending = {
+          requestId,
+          resolve,
+          reject,
+          onProgress: options.onProgress,
+          signal: options.signal,
+          handleAbort,
+        }
+        options.signal?.addEventListener('abort', handleAbort, { once: true })
+        try {
+          worker.postMessage(prepared.request, prepared.transfers)
+        } catch (error) {
+          finishPending(requestId, (active) => active.reject(error))
+        }
+      })
+    },
+    dispose,
+  }
+}
+
+export function renderImageExportInWorker(
+  options: HighWorkerOptions,
+): Promise<ViewportPngResult> {
+  if (!canUseImageExportWorker()) return Promise.reject(new Error('Dedicated image rendering is unavailable.'))
+  if (options.signal?.aborted) return Promise.reject(abortError())
+
+  try {
+    const session = createImageExportWorkerSession()
+    return session.render(options).finally(() => session.dispose())
+  } catch (error) {
+    return Promise.reject(error)
+  }
 }

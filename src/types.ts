@@ -22,6 +22,7 @@ export type ViewportSupersample = 1 | 2
 export type WorkspaceMode = 'image' | 'text'
 export type TextAlignment = 'left' | 'center' | 'right'
 export type FontSource = 'default' | 'detected' | 'local'
+export type LivingFormBehavior = 'breathe' | 'ripple' | 'flow' | 'melt'
 
 export interface PixelImage {
   width: number
@@ -71,6 +72,19 @@ export interface ClaySettings {
 export interface AppearanceSettings {
   heightGradient: HeightGradientSettings
   clay: ClaySettings
+}
+
+export interface LivingFormSettings {
+  enabled: boolean
+  behavior: LivingFormBehavior
+  /** Normalized deformation strength. */
+  amount: number
+  /** Spatial cycles across the form. */
+  frequency: number
+  /** Stable variation control. */
+  seed: number
+  /** Seconds in one complete seamless loop. */
+  duration: number
 }
 
 export interface MeshSettings {
@@ -131,22 +145,24 @@ export interface TopologyReport {
 }
 
 export interface Recipe {
-  version: 4
+  version: 6
   app: 'Rasterform'
   image: { name: string; width: number; height: number }
   channels: ChannelLayer[]
   field: FieldSettings
   mesh: MeshSettings
   appearance: AppearanceSettings
+  livingForm: LivingFormSettings & { phase: number }
   createdAt: string
 }
 
 export interface TextRecipe {
-  version: 5
+  version: 6
   app: 'Rasterform'
   workspace: 'text'
   text: Omit<TextShapeSettings, 'text'> & { value: string }
   font: Pick<FontChoice, 'label' | 'family' | 'style' | 'source' | 'postscriptName'>
   appearance: AppearanceSettings
+  livingForm: LivingFormSettings & { phase: number }
   createdAt: string
 }

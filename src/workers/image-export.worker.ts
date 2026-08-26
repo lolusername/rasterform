@@ -23,10 +23,10 @@ import {
   disposeFinalRenderScene,
 } from '../lib/three'
 
-type WorkerCommand = ImageExportWorkerRequest | { type: 'cancel' }
+type WorkerCommand = ImageExportWorkerRequest | { type: 'cancel'; requestId: number }
 
 const workerScope = self as unknown as DedicatedWorkerGlobalScope
-let activeController: AbortController | null = null
+let activeRender: { requestId: number; controller: AbortController } | null = null
 
 function restoreCamera(snapshot: ImageExportCameraSnapshot, width: number, height: number): THREE.PerspectiveCamera {
   const camera = new THREE.PerspectiveCamera(snapshot.fov, width / height, snapshot.near, snapshot.far)
@@ -89,8 +89,8 @@ const viewportRuntime: ViewportExportRuntime = {
   yieldToHost: cooperativeExportYield,
 }
 
-function postProgress(progress: FinalExportProgress) {
-  const response: ImageExportWorkerResponse = { type: 'progress', progress }
+function postProgress(requestId: number, progress: FinalExportProgress) {
+  const response: ImageExportWorkerResponse = { type: 'progress', requestId, progress }
   workerScope.postMessage(response)
 }
 
@@ -128,7 +128,7 @@ async function renderHigh(
       supersample: request.supersample,
       runtime: viewportRuntime,
       signal,
-      onProgress: (progress) => postProgress({
+      onProgress: (progress) => postProgress(request.requestId, {
         phase: progress.phase,
         progress: progress.progress,
         tile: progress.tile,
@@ -143,32 +143,39 @@ async function renderHigh(
 }
 
 async function renderRequest(request: ImageExportWorkerRequest) {
-  activeController?.abort()
+  activeRender?.controller.abort()
   const controller = new AbortController()
-  activeController = controller
+  const current = { requestId: request.requestId, controller }
+  activeRender = current
   const environment = restoreEnvironment(request.environment)
   const camera = restoreCamera(request.camera, request.width, request.height)
 
   try {
     const result = await renderHigh(request, camera, environment, controller.signal)
-    const response: ImageExportWorkerResponse = { type: 'result', quality: 'high', result }
+    const response: ImageExportWorkerResponse = {
+      type: 'result',
+      requestId: request.requestId,
+      quality: 'high',
+      result,
+    }
     workerScope.postMessage(response)
   } catch (error) {
     const response: ImageExportWorkerResponse = {
       type: 'error',
+      requestId: request.requestId,
       name: error instanceof DOMException ? error.name : 'Error',
       message: error instanceof Error ? error.message : 'Image export failed in the background renderer.',
     }
     workerScope.postMessage(response)
   } finally {
-    if (activeController === controller) activeController = null
+    if (activeRender === current) activeRender = null
     environment?.dispose()
   }
 }
 
 workerScope.onmessage = (event: MessageEvent<WorkerCommand>) => {
   if (event.data.type === 'cancel') {
-    activeController?.abort()
+    if (activeRender?.requestId === event.data.requestId) activeRender.controller.abort()
     return
   }
   void renderRequest(event.data)

@@ -10,16 +10,21 @@ It is a focused **2.5D tool**: more tactile than an image editor, more immediate
 
 1. **Choose Image or Text** — derive height from brightness, hue, saturation, color channels, transparency, or edges; or type directly with an installed font.
 2. **Compose the form** — layer image signals, tune text extrusion and bevels, or use Blob mode to dilate and round either source into organic forms.
-3. **Find the material** — explore original color, height gradients, clay finishes, or wireframe structure.
-4. **Light and export** — work quickly in the HDR studio preview, switch to a progressive Final Render, or continue in other tools.
+3. **Bring it to life** — enable Living Form to make the finished mesh breathe, ripple, flow, or melt on an exact procedural loop.
+4. **Find the material** — explore original color, height gradients, clay finishes, or wireframe structure.
+5. **Light and export** — work quickly in the HDR studio preview, switch to a progressive Final Render, or continue in other tools.
 
 Right-click the 3D viewport to choose a white, dark-gray, or black background, or use the `W`, `G`, and `B` shortcuts. The background is always a flat color—no floor or grid geometry is added to the viewport or image exports.
 
 Opening Export swaps the right-hand inspector without resizing the screen-bounded viewport or visible WebGL canvas. High images use a dedicated background renderer when supported. Final keeps the full path-traced sample and denoising contract on the main thread, where its BVH worker is not nested inside another worker; it may pause the studio while it renders, but preserves the requested resolution, material, lighting, and background options.
 
-The optional macOS desktop edition keeps that web behavior intact while moving Final into a separate hidden Electron renderer process. It uses the same quality owner and exact 1,536/2,048-sample contract, but the visible studio remains responsive and shows progress while the native shell prevents sleep and saves the completed PNG atomically.
+Living Form is deterministic and post-mesh: it never rewrites the source image, text contours, or base geometry, and every displayed or exported frame is evaluated from that immutable base rather than the previous frame. Image and Text keep independent motion settings. Still PNG, GLB, STL, and recipe exports bake the visible phase. Living Loop export creates a transparent or studio-background, lossless RGBA PNG-sequence ZIP at High 2× quality with a timing manifest; frames use `phase = index / frameCount`, so no duplicate terminal frame introduces a hitch. Long sequences stream through private browser storage when available instead of retaining every rendered frame in memory. The archive switches to ZIP64 when it crosses the classic 4 GiB boundary, checks available storage as soon as the first frame establishes a useful size projection, and scavenges abandoned private archives after 24 hours.
 
-Rasterform can export transparent 2K/4K/8K PNGs, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
+Living Loop is deliberately labeled **High 2×**, not Final. It does not replace or weaken the existing still-image Final path tracer: Final retains its exact 1,536/2,048-sample, bounce, MIS, tile, and denoising contract.
+
+The optional macOS desktop edition keeps that web behavior intact while moving Final into a separate hidden Electron renderer process. It uses the same quality owner and exact 1,536/2,048-sample contract, but the visible studio remains responsive and shows progress while the native shell prevents sleep and saves the completed PNG atomically. Living Loop remains the same shared renderer and ZIP writer; the shell adds app-suspension protection, disables background throttling for the active job, warns before quit, waits for the ZIP to finish writing, and adds successful loops to Reveal Last Export and Recent Documents.
+
+Rasterform can export transparent 2K/4K/8K still PNGs, lossless 2K/4K Living Form frame sequences, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
 
 ## Text workspace
 
@@ -70,9 +75,11 @@ npm run desktop:package:universal
 npm run desktop:smoke:packaged
 ```
 
+`npm run desktop:build` only builds and stages the desktop runtime. To create an installable `.app`, run `npm run desktop:package:arm64` on an Apple-silicon Mac. The result is `electron/out/Rasterform-darwin-arm64/Rasterform.app`; packaging does not copy it into `/Applications`.
+
 The unqualified package and packaged-smoke commands build and run only the physical host Mac's native architecture (`arm64` on Apple silicon), even if Node itself was started through Rosetta. Intel and universal artifacts are explicit compatibility builds; Rasterform refuses to launch the x64 smoke test on an Apple-silicon Mac. Package verification still checks restrictive ATS metadata, the Rasterform icon, embedded ASAR integrity, locked Electron fuse values, every nested Mach-O architecture/deployment target, and the internal consistency of the ad-hoc code-signature seal. That integrity check does not authenticate a Developer ID identity or verify notarization; distributable releases still require the separate Apple-credentialed release workflow.
 
-See [docs/DESKTOP.md](docs/DESKTOP.md) for the architecture, quality guarantees, macOS support policy, verification gates, and signing/notarization release checklist.
+New to Mac app bundles or Electron? See [docs/INSTALLING_MACOS.md](docs/INSTALLING_MACOS.md) for a beginner-friendly guide to installing, launching, updating, and removing Rasterform. See [docs/DESKTOP.md](docs/DESKTOP.md) for the architecture, quality guarantees, macOS support policy, verification gates, and signing/notarization release checklist.
 
 ## Rendering credits
 

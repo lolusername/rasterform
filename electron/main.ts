@@ -20,14 +20,21 @@ import {
 } from 'electron'
 import {
   assertDesktopFinalRenderSnapshot,
+  DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
   DESKTOP_MAX_PNG_BYTES,
   DESKTOP_PROTOCOL_VERSION,
+  isDesktopJobId,
+  isDesktopLongExportOutcome,
+  isDesktopLongExportStartRequest,
   isDesktopFinalRenderResultMetadata,
   isFinalExportProgress,
   type DesktopFinalCancelResult,
   type DesktopFinalRenderResultMetadata,
   type DesktopFinalRenderSubmission,
   type DesktopFinalRenderSnapshot,
+  type DesktopLongExportEndResult,
+  type DesktopLongExportErrorCode,
+  type DesktopLongExportStartResult,
   type DesktopRenderErrorCode,
   type DesktopRenderEvent,
   type DesktopSavedFinalResult,
@@ -42,6 +49,7 @@ import {
   finalRenderCancellationAction,
   finalRenderCompletionAction,
   isPngBytes,
+  isLivingLoopDownload,
   isDesktopSmokeHeartbeatResponsive,
   resolveProtocolFile,
   safeFileSystemErrorMessage,
@@ -50,6 +58,7 @@ import {
   writePngAtomically,
   type DesktopJobState,
 } from './main-helpers'
+import { NativeLongExportLifecycle } from './long-export-lifecycle'
 
 const SCHEME = 'rasterform'
 const APP_URL = `${SCHEME}://app/index.html`
@@ -97,6 +106,15 @@ let quitting = false
 const jobs = new Map<string, PreparedJob>()
 const terminalJobs = new Map<string, TerminalJob>()
 const pendingWrites = new Set<Promise<void>>()
+const longExports = new NativeLongExportLifecycle(powerSaveBlocker, {
+  setBackgroundThrottling: (allowed) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (!allowed) throw new Error('The editor renderer is unavailable.')
+      return
+    }
+    mainWindow.webContents.setBackgroundThrottling(allowed)
+  },
+})
 
 function appRoot(): string {
   return app.getAppPath()
@@ -280,9 +298,32 @@ function createMainWindow(): BrowserWindow {
       spellcheck: true,
     },
   })
+  const ownerWebContentsId = window.webContents.id
   configureWindowSecurity(window, `${SCHEME}://app/`)
   window.once('ready-to-show', () => window.show())
+  window.on('close', (event) => {
+    const active = longExports.active
+    if (!active || active.ownerWebContentsId !== ownerWebContentsId) return
+    const choice = dialog.showMessageBoxSync(window, {
+      type: 'warning',
+      title: 'Living Loop export in progress',
+      message: 'Keep Rasterform open until the Living Loop finishes?',
+      detail: 'Closing now stops Rasterform’s active export. Any ZIP still being written will be cancelled.',
+      buttons: ['Keep Exporting', 'Stop Export and Close'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    if (choice === 0) {
+      event.preventDefault()
+      // A deferred quit may have set this while waiting for a Final atomic write.
+      quitting = false
+      return
+    }
+    longExports.releaseActive(true)
+  })
   window.on('closed', () => {
+    longExports.releaseOwner(ownerWebContentsId)
     if (mainWindow === window) mainWindow = null
     for (const job of [...jobs.values()]) {
       // Once the atomic write starts, closing the editor must not turn a file
@@ -291,6 +332,7 @@ function createMainWindow(): BrowserWindow {
     }
   })
   window.webContents.on('render-process-gone', () => {
+    longExports.releaseOwner(ownerWebContentsId)
     for (const job of [...jobs.values()]) {
       if (shouldCancelFinalJobOnEditorClose(job.state)) {
         failJob(job.id, 'process-gone', 'The editor process stopped unexpectedly. Your design is safe.')
@@ -377,10 +419,31 @@ async function runDesktopSmokeProbe(): Promise<void> {
   try {
     await probe.loadURL(RENDER_URL)
     const [editorCapabilities, hdr, assetNames] = await Promise.all([
-      editor.webContents.executeJavaScript(`({
-        protocolVersion: window.rasterformDesktop?.protocolVersion ?? null,
-        localFontApiAvailable: typeof window.queryLocalFonts === 'function',
-      })`),
+      editor.webContents.executeJavaScript(`(async () => {
+        const bridge = window.rasterformDesktop;
+        const result = {
+          protocolVersion: bridge?.protocolVersion ?? null,
+          longExportProtocolVersion: bridge?.longExportProtocolVersion ?? null,
+          longExportLifecycleAvailable: (
+            typeof bridge?.beginLongExport === 'function'
+            && typeof bridge?.endLongExport === 'function'
+          ),
+          longExportLifecycleHandshake: false,
+          localFontApiAvailable: typeof window.queryLocalFonts === 'function',
+        };
+        if (!result.longExportLifecycleAvailable) return result;
+        try {
+          const started = await bridge.beginLongExport({
+            protocolVersion: ${DESKTOP_LONG_EXPORT_PROTOCOL_VERSION},
+            kind: 'living-loop',
+            frames: 12,
+          });
+          if (!started?.accepted) return result;
+          const ended = await bridge.endLongExport(started.jobId, 'cancelled');
+          result.longExportLifecycleHandshake = ended?.ended === true;
+        } catch {}
+        return result;
+      })()`),
       probe.webContents.executeJavaScript(`fetch('/hdri/studio_small_08_1k.hdr').then(async response => ({ ok: response.ok, bytes: (await response.arrayBuffer()).byteLength }))`),
       readdir(join(appRoot(), 'render', 'assets')),
     ])
@@ -479,6 +542,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
     }
     const result = {
       protocolVersion: editorCapabilities.protocolVersion,
+      longExportProtocolVersion: editorCapabilities.longExportProtocolVersion,
+      longExportLifecycleAvailable: editorCapabilities.longExportLifecycleAvailable === true,
+      longExportLifecycleHandshake: editorCapabilities.longExportLifecycleHandshake === true,
       localFontApiAvailable: editorCapabilities.localFontApiAvailable === true,
       editorPid: editor.webContents.getOSProcessId(),
       renderPid: probe.webContents.getOSProcessId(),
@@ -491,6 +557,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
       heartbeatAttempts,
     }
     const passed = result.protocolVersion === DESKTOP_PROTOCOL_VERSION
+      && result.longExportProtocolVersion === DESKTOP_LONG_EXPORT_PROTOCOL_VERSION
+      && result.longExportLifecycleAvailable
+      && result.longExportLifecycleHandshake
       && result.editorPid > 0
       && result.renderPid > 0
       && result.editorPid !== result.renderPid
@@ -531,7 +600,9 @@ async function savePreferences(): Promise<void> {
 
 async function prepareFinalSave(event: IpcMainInvokeEvent, suggestedName: unknown) {
   if (!isTrustedAppSender(event)) throw new Error('Untrusted Final render request.')
-  if (saveDialogOpen || jobs.size > 0) throw new Error('A Final render is already active.')
+  if (saveDialogOpen || jobs.size > 0 || longExports.active) {
+    throw new Error('Another export is already active.')
+  }
   const fileName = sanitizePngFileName(suggestedName)
   const defaultPath = join(lastExportDirectory ?? app.getPath('downloads'), fileName)
   saveDialogOpen = true
@@ -585,6 +656,37 @@ function rejectedSubmission(
   message: string,
 ): Extract<DesktopFinalRenderSubmission, { accepted: false }> {
   return { accepted: false, error: { code, message } }
+}
+
+function rejectedLongExport(
+  code: DesktopLongExportErrorCode,
+  message: string,
+): Extract<DesktopLongExportStartResult, { accepted: false }> {
+  return { accepted: false, error: { code, message } }
+}
+
+function beginLongExport(
+  event: IpcMainInvokeEvent,
+  request: unknown,
+): DesktopLongExportStartResult {
+  if (!isTrustedAppSender(event) || !isDesktopLongExportStartRequest(request)) {
+    return rejectedLongExport('invalid-request', 'The long export lifecycle request was invalid.')
+  }
+  if (saveDialogOpen || jobs.size > 0) {
+    return rejectedLongExport('busy', 'Another export is already active.')
+  }
+  return longExports.begin(event.sender.id, request, randomUUID)
+}
+
+async function endLongExport(
+  event: IpcMainInvokeEvent,
+  jobId: unknown,
+  outcome: unknown,
+): Promise<DesktopLongExportEndResult> {
+  if (!isTrustedAppSender(event)
+    || !isDesktopJobId(jobId)
+    || !isDesktopLongExportOutcome(outcome)) return { ended: false }
+  return { ended: await longExports.end(event.sender.id, jobId, outcome) }
 }
 
 async function submitFinalRender(
@@ -964,6 +1066,8 @@ function installIpc(): void {
   ipcMain.handle('desktop:prepare-final-save', prepareFinalSave)
   ipcMain.handle('desktop:submit-final-render', submitFinalRender)
   ipcMain.handle('desktop:cancel-final-render', requestCancel)
+  ipcMain.handle('desktop:begin-long-export', beginLongExport)
+  ipcMain.handle('desktop:end-long-export', endLongExport)
   ipcMain.on('desktop:render-progress', handleRenderProgress)
   ipcMain.on('desktop:render-cancelled', handleRenderCancelled)
   ipcMain.on('desktop:render-failed', handleRenderFailed)
@@ -1000,6 +1104,44 @@ function installPermissionPolicy(): void {
   })
 }
 
+function installLongExportDownloadLifecycle(): void {
+  session.defaultSession.on('will-download', (_event, item, webContents) => {
+    const job = longExports.active
+    if (!job
+      || !webContents
+      || webContents.id !== job.ownerWebContentsId
+      || !isLivingLoopDownload(item.getURL(), item.getFilename())) return
+
+    const attached = longExports.attachDownload(
+      webContents.id,
+      job.id,
+      () => item.cancel(),
+    )
+    if (!attached) return
+    item.once('done', (_downloadEvent, state) => {
+      if (state === 'completed') {
+        const savePath = item.getSavePath()
+        if (savePath) {
+          lastExportPath = savePath
+          lastExportDirectory = dirname(savePath)
+          try {
+            app.addRecentDocument(savePath)
+          } catch {
+            // Recent Documents is optional; the completed ZIP remains valid.
+          }
+          void savePreferences()
+          installApplicationMenu()
+          showCompletionNotification(
+            'Rasterform Living Loop saved',
+            `${job.request.frames.toLocaleString()} lossless frames · ${item.getFilename()}`,
+          )
+        }
+      }
+      longExports.finishDownload(job.id, state)
+    })
+  })
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -1022,6 +1164,7 @@ if (!app.requestSingleInstanceLock()) {
     installProtocol()
     installIpc()
     installPermissionPolicy()
+    installLongExportDownloadLifecycle()
     await loadPreferences()
     installApplicationMenu()
     mainWindow = createMainWindow()

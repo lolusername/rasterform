@@ -416,6 +416,14 @@ body { background: var(--editor-bg); }
 .segmented.stacked span, .segmented.stacked small, .segmented.cards strong, .segmented.cards small { display: block; }
 .segmented.stacked small, .segmented.cards small { margin-top: 2px; color: #858585; font-size: 9px; }
 .segmented button[aria-pressed="true"] small { color: #3e4c1b; }
+.segmented button[aria-pressed="true"]:disabled { opacity: 1; }
+.segmented.motion-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.segmented.motion-presets button { border-bottom: 1px solid #464646; }
+.segmented.motion-presets button:nth-child(even) { border-right: 0; }
+.segmented.motion-presets button:nth-last-child(-n + 2) { border-bottom: 0; }
+.living-transport { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.living-transport button { min-height: 32px; color: #ddd; background: #2b2b2b; border: 1px solid #464646; border-radius: 5px; }
+.living-transport button:hover:not(:disabled) { border-color: #686868; background: #343434; }
 
 .viewport-pane { display: grid; grid-template-rows: 40px minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: #282828; }
 .viewport-toolbar { z-index: 5; display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; padding: 4px 8px; background: #222; border-bottom: 1px solid var(--editor-border); }
@@ -519,7 +527,7 @@ body { background: var(--editor-bg); }
   .background-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
   .viewport-toolbar .view-switcher button { min-height: 34px; }
   .inspector-section > summary { min-height: 44px; }
-  .compact-buttons button, .wide-control, .alignment-control button, .segmented button, .file-export-section button { min-height: 40px; }
+  .compact-buttons button, .wide-control, .alignment-control button, .segmented button, .living-transport button, .file-export-section button { min-height: 40px; }
   .status-bar { grid-template-columns: minmax(0, 1fr) auto; }
   .shortcut-hint { display: none; }
 }

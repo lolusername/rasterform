@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { DesktopFinalRenderSnapshot, DesktopRenderEvent } from './contracts'
 import {
+  DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
+  DESKTOP_MAX_LONG_EXPORT_FRAMES,
   DESKTOP_PROTOCOL_VERSION,
   DESKTOP_MAX_IMAGE_EDGE,
   DESKTOP_MAX_MESH_BYTES,
@@ -11,9 +13,15 @@ import {
   isDesktopFinalRenderResultMetadata,
   isDesktopFinalRenderSubmission,
   isDesktopJobId,
+  isDesktopLongExportEndResult,
+  isDesktopLongExportOutcome,
+  isDesktopLongExportStartRequest,
+  isDesktopLongExportStartResult,
   isDesktopPngName,
   isDesktopRenderEvent,
   isFinalExportProgress,
+  isRasterformDesktopBridge,
+  isRasterformDesktopLongExportBridge,
 } from './contracts'
 
 function validSnapshot(): DesktopFinalRenderSnapshot {
@@ -200,6 +208,55 @@ describe('desktop Final IPC contracts', () => {
     expect(isDesktopFinalCancelResult({ state: 'saved', result: saved })).toBe(true)
     expect(isDesktopFinalCancelResult({ state: 'error', error })).toBe(true)
     expect(isDesktopFinalCancelResult({ state: 'saved', result: { ...saved, fileName: '/tmp/final.png' } })).toBe(false)
+  })
+
+  it('strictly validates the independent native long-export lifecycle protocol', () => {
+    const request = {
+      protocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
+      kind: 'living-loop',
+      frames: 360,
+    }
+    expect(DESKTOP_PROTOCOL_VERSION).toBe(1)
+    expect(DESKTOP_LONG_EXPORT_PROTOCOL_VERSION).toBe(1)
+    expect(DESKTOP_MAX_LONG_EXPORT_FRAMES).toBe(360)
+    expect(isDesktopLongExportStartRequest(request)).toBe(true)
+    expect(isDesktopLongExportStartRequest({ ...request, protocolVersion: 2 })).toBe(false)
+    expect(isDesktopLongExportStartRequest({ ...request, frames: 361 })).toBe(false)
+    expect(isDesktopLongExportStartRequest({ ...request, debug: true })).toBe(false)
+    expect(isDesktopLongExportStartResult({ accepted: true, jobId: 'living_job_1' })).toBe(true)
+    expect(isDesktopLongExportStartResult({ accepted: true, jobId: '../living' })).toBe(false)
+    expect(isDesktopLongExportStartResult({
+      accepted: false,
+      error: { code: 'busy', message: 'Another export is active.' },
+    })).toBe(true)
+    expect(isDesktopLongExportStartResult({
+      accepted: false,
+      error: { code: 'arbitrary', message: 'No.' },
+    })).toBe(false)
+    expect(isDesktopLongExportOutcome('completed')).toBe(true)
+    expect(isDesktopLongExportOutcome('cancelled')).toBe(true)
+    expect(isDesktopLongExportOutcome('failed')).toBe(true)
+    expect(isDesktopLongExportOutcome('rendering')).toBe(false)
+    expect(isDesktopLongExportEndResult({ ended: true })).toBe(true)
+    expect(isDesktopLongExportEndResult({ ended: false, debug: true })).toBe(false)
+  })
+
+  it('keeps the exact Final-v1 bridge valid when the optional lifecycle is absent', () => {
+    const finalBridge = {
+      protocolVersion: DESKTOP_PROTOCOL_VERSION,
+      prepareFinalSave: () => Promise.resolve({ cancelled: true as const }),
+      submitFinalRender: () => Promise.resolve({ accepted: true as const }),
+      cancelFinalRender: () => Promise.resolve({ state: 'cancelled' as const }),
+      onFinalRenderEvent: () => () => undefined,
+    }
+    expect(isRasterformDesktopBridge(finalBridge)).toBe(true)
+    expect(isRasterformDesktopLongExportBridge(finalBridge)).toBe(false)
+    expect(isRasterformDesktopLongExportBridge({
+      ...finalBridge,
+      longExportProtocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
+      beginLongExport: () => Promise.resolve({ accepted: true as const, jobId: 'living_job_1' }),
+      endLongExport: () => Promise.resolve({ ended: true as const }),
+    })).toBe(true)
   })
 
   it('requires exact, bounded hidden-renderer result metadata', () => {

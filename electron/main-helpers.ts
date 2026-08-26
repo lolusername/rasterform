@@ -11,6 +11,15 @@ export type DesktopJobState = 'prepared' | 'rendering' | 'cancelling' | 'writing
 export const DESKTOP_SMOKE_HEARTBEAT_MAX_ATTEMPTS = 3
 export const DESKTOP_SMOKE_HEARTBEAT_REQUIRED_BEATS = 2
 
+const LIVING_LOOP_DOWNLOAD_NAME = /^rasterform-living-(?:breathe|ripple|flow|melt)-\d+x\d+-(?:12|24|30)fps-(?:transparent|white|dark-gray|black)\.zip$/i
+
+export function isLivingLoopDownload(url: unknown, fileName: unknown): boolean {
+  return typeof url === 'string'
+    && url.startsWith('blob:rasterform://app/')
+    && typeof fileName === 'string'
+    && LIVING_LOOP_DOWNLOAD_NAME.test(fileName)
+}
+
 export function desktopSmokeHeartbeatBeatsDuringBlock(
   tickTimestamps: unknown,
   blockStartedAt: unknown,

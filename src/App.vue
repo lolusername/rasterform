@@ -29,9 +29,28 @@ import {
   type FinalExportProgress,
   type FinalImagePngResult,
 } from './lib/final-image-export'
-import { DesktopFinalRenderError, type DesktopFinalCaptureResult } from './desktop/client'
+import {
+  DesktopFinalRenderError,
+  beginDesktopLongExport,
+  endDesktopLongExport,
+  type DesktopFinalCaptureResult,
+  type DesktopLongExportSession,
+} from './desktop/client'
 import { createDefaultAppearanceSettings } from './lib/three'
 import { calculateViewportDimensions, type ViewportPngResult } from './lib/viewport-export'
+import {
+  DEFAULT_LIVING_FORM_SETTINGS,
+  animateLivingFormMesh,
+  normalizeLivingFormPhase,
+} from './lib/living-form'
+import {
+  LIVING_FORM_FRAME_RATES,
+  calculateLivingFormFrameCount,
+  exportLivingFormPngSequence,
+  type LivingFormFrameRate,
+  type LivingFormLoopProgress,
+} from './lib/living-form-export'
+import { cleanupStaleStoredZipArchives } from './lib/zip-writer'
 import type {
   AppearanceSettings,
   ChannelBlendMode,
@@ -45,6 +64,8 @@ import type {
   ImageExportLongEdge,
   ImageExportQuality,
   FontChoice,
+  LivingFormBehavior,
+  LivingFormSettings,
   MeshSettings,
   MeshData,
   Recipe,
@@ -55,14 +76,18 @@ import type {
 } from './types'
 
 interface ThreePreviewHandle {
+  beginLivingFormLoopExport: (settings: LivingFormSettings) => void
+  endLivingFormLoopExport: () => void
   captureHighPng: (
     dimensions: { width: number; height: number },
     background: ImageExportBackground,
+    livingPhase?: number,
   ) => Promise<ViewportPngResult>
   captureFinalPng: (
     dimensions: { width: number; height: number },
     background: ImageExportBackground,
     suggestedName?: string,
+    livingPhase?: number,
   ) => Promise<FinalImagePngResult | DesktopFinalCaptureResult>
   cancelImageExport: () => void
 }
@@ -74,6 +99,17 @@ interface ImageExportRequestSnapshot {
   viewportBackground: ViewportBackground
   colorMode: ColorMode
   samples: number
+  livingEnabled: boolean
+  livingPhase: number
+}
+
+interface LivingLoopExportRequestSnapshot {
+  dimensions: { width: number; height: number }
+  fps: LivingFormFrameRate
+  frameCount: number
+  settings: LivingFormSettings
+  background: ImageExportBackground
+  studioBackground: ViewportBackground
 }
 
 const image = shallowRef(createDemoImage())
@@ -103,10 +139,24 @@ const exportingImage = ref(false)
 const imageExportQuality = ref<ImageExportQuality>('high')
 const imageExportLongEdge = ref<ImageExportLongEdge>(4096)
 const imageExportBackground = ref<ImageExportBackground>('transparent')
+const imageExportKind = ref<'still' | 'loop'>('still')
+const livingLoopLongEdge = ref<2048 | 4096>(2048)
+const livingLoopFps = ref<LivingFormFrameRate>(24)
 const imageExportError = ref('')
 const imageExportNotice = ref('')
 const imageExportAnnouncement = ref('')
+const livingLoopNativeSaving = ref(false)
 const activeImageExportRequest = shallowRef<ImageExportRequestSnapshot | null>(null)
+const activeLivingLoopRequest = shallowRef<LivingLoopExportRequestSnapshot | null>(null)
+const livingLoopProgress = reactive<LivingFormLoopProgress>({
+  phase: 'rendering',
+  progress: 0,
+  frame: 0,
+  frames: 0,
+})
+let livingLoopController: AbortController | null = null
+let activeLivingLoopFrame: { frame: number; frames: number } | null = null
+let livingLoopWakeLock: WakeLockSentinel | null = null
 const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
 const desktopFinalAvailable = window.rasterformDesktop?.protocolVersion === 1
 
@@ -137,6 +187,32 @@ const textAppearance = reactive<AppearanceSettings>({
   clay: { color: '#d9ff63', finish: 'matte' },
 })
 const appearance = computed<AppearanceSettings>(() => workspace.value === 'image' ? imageAppearance : textAppearance)
+const imageLivingForm = reactive<LivingFormSettings>({
+  ...DEFAULT_LIVING_FORM_SETTINGS,
+  seed: 17,
+})
+const textLivingForm = reactive<LivingFormSettings>({
+  ...DEFAULT_LIVING_FORM_SETTINGS,
+  behavior: 'flow',
+  amount: 0.42,
+  frequency: 1.25,
+  seed: 31,
+})
+const livingForm = computed<LivingFormSettings>(() => workspace.value === 'image' ? imageLivingForm : textLivingForm)
+const imageLivingPhase = ref(0)
+const textLivingPhase = ref(0)
+const livingPhase = computed<number>({
+  get: () => workspace.value === 'image' ? imageLivingPhase.value : textLivingPhase.value,
+  set: (phase) => {
+    const normalized = normalizeLivingFormPhase(phase)
+    if (workspace.value === 'image') imageLivingPhase.value = normalized
+    else textLivingPhase.value = normalized
+  },
+})
+const livingPlaying = ref(false)
+let livingAnimationFrame = 0
+let livingAnimationTime = 0
+let livingAnimationElapsed = 0
 let channelSequence = 0
 
 function createChannelLayer(
@@ -344,6 +420,19 @@ const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
   { value: 'metallic', label: 'Metallic' },
 ]
 
+const livingFormBehaviors: Array<{ value: LivingFormBehavior; label: string; note: string }> = [
+  { value: 'breathe', label: 'Breathe', note: 'A soft whole-form inhale and release.' },
+  { value: 'ripple', label: 'Ripple', note: 'Concentric waves travel through the surface.' },
+  { value: 'flow', label: 'Flow', note: 'Multiple fields drift through one another.' },
+  { value: 'melt', label: 'Melt', note: 'The form slumps and organically reforms.' },
+]
+const activeLivingBehavior = computed(() => livingFormBehaviors.find((item) => item.value === livingForm.value.behavior)!)
+const livingFormStatus = computed(() => !livingForm.value.enabled
+  ? 'Off'
+  : livingPlaying.value
+    ? 'Playing'
+    : 'Paused')
+
 const gradientPreviewStyle = computed(() => ({
   background: `linear-gradient(90deg, ${appearance.value.heightGradient.low} 0%, ${appearance.value.heightGradient.mid} ${Math.round(appearance.value.heightGradient.midpoint * 100)}%, ${appearance.value.heightGradient.high} 100%)`,
 }))
@@ -362,6 +451,24 @@ const imageExportDimensions = computed(() => calculateViewportDimensions(
   activeFrameSize.value.height,
   imageExportLongEdge.value,
 ))
+const livingLoopDimensions = computed(() => calculateViewportDimensions(
+  activeFrameSize.value.width,
+  activeFrameSize.value.height,
+  livingLoopLongEdge.value,
+))
+const livingLoopFrameCount = computed(() => calculateLivingFormFrameCount(
+  livingForm.value.duration,
+  livingLoopFps.value,
+))
+const displayLivingLoopRequest = computed<LivingLoopExportRequestSnapshot>(() =>
+  activeLivingLoopRequest.value ?? {
+    dimensions: livingLoopDimensions.value,
+    fps: livingLoopFps.value,
+    frameCount: livingLoopFrameCount.value,
+    settings: { ...livingForm.value },
+    background: imageExportBackground.value,
+    studioBackground: viewportBackground.value,
+  })
 const displayImageExportRequest = computed<ImageExportRequestSnapshot>(() =>
   activeImageExportRequest.value ?? {
     dimensions: imageExportDimensions.value,
@@ -372,6 +479,8 @@ const displayImageExportRequest = computed<ImageExportRequestSnapshot>(() =>
     samples: imageExportQuality.value === 'final'
       ? finalSampleTarget(colorMode.value, appearance.value)
       : 1,
+    livingEnabled: livingForm.value.enabled,
+    livingPhase: livingPhase.value,
   })
 const imageExportUnsupported = computed(() => {
   const request = displayImageExportRequest.value
@@ -385,16 +494,48 @@ const imageExportSummary = computed(() => {
     ? 'transparent'
     : `${viewportBackgroundPreset(request.viewportBackground).label.toLowerCase()} background`
   const quality = request.quality === 'final' ? 'Final' : 'High'
-  return `${quality} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} PNG`
+  const living = request.livingEnabled ? ` · Living Form ${Math.round(request.livingPhase * 100)}%` : ''
+  return `${quality} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} PNG${living}`
 })
+const livingLoopSummary = computed(() => {
+  const request = displayLivingLoopRequest.value
+  const { width, height } = request.dimensions
+  const behavior = livingFormBehaviors.find((item) => item.value === request.settings.behavior)?.label
+    ?? request.settings.behavior
+  const background = request.background === 'transparent'
+    ? 'transparent RGBA'
+    : `${viewportBackgroundPreset(request.studioBackground).label.toLowerCase()} background`
+  return `${behavior} · ${request.frameCount} frames · ${request.fps} fps · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background}`
+})
+const livingLoopHelp = computed(() => {
+  const sizeWarning = Math.max(
+    displayLivingLoopRequest.value.dimensions.width,
+    displayLivingLoopRequest.value.dimensions.height,
+  ) === 4096
+    ? ' 4K sequences can be very large and may take a long time.'
+    : ''
+  return `Lossless PNG master with 2× edge smoothing. Model, material, camera, and background are snapshotted when export starts. Frame zero is not duplicated at the end, so the ZIP loops cleanly in After Effects, Resolve, Blender, or Premiere.${sizeWarning}`
+})
+const livingLoopProgressLabel = computed(() => {
+  if (livingLoopNativeSaving.value) return 'Saving Living Form ZIP to disk · keep Rasterform open…'
+  if (livingLoopProgress.phase === 'packaging') return 'Packaging lossless PNG sequence…'
+  const frame = Math.min(livingLoopProgress.frames, livingLoopProgress.frame + 1)
+  return `Rendering frame ${frame.toLocaleString()} of ${livingLoopProgress.frames.toLocaleString()} · ${Math.round(livingLoopProgress.progress * 100)}%`
+})
+const livingLoopProgressBarValue = computed<number | undefined>(() => livingLoopNativeSaving.value
+  ? undefined
+  : livingLoopProgress.phase === 'packaging'
+    ? 0.98 + livingLoopProgress.progress * 0.02
+    : livingLoopProgress.progress * 0.98)
 const imageExportHelp = computed(() => {
   const request = displayImageExportRequest.value
-  if (request.colorMode === 'wireframe') return 'Wireframe exports use High quality.'
-  if (request.quality === 'high') return 'Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.'
+  const pose = request.livingEnabled ? ' The visible Living Form phase is baked into this still.' : ''
+  if (request.colorMode === 'wireframe') return `Wireframe exports use High quality.${pose}`
+  if (request.quality === 'high') return `Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.${pose}`
   if (Math.max(request.dimensions.width, request.dimensions.height) > 4096) return '8K Final is too large for a reliable browser render. Choose 4K or High quality.'
   return desktopFinalAvailable
-    ? `Path-traced light and shadows · ${request.samples} samples with gentle denoising · renders separately so the studio stays responsive.`
-    : `Path-traced light and shadows · ${request.samples} samples with gentle denoising · Final may pause the studio while it renders.`
+    ? `Path-traced light and shadows · ${request.samples} samples with gentle denoising · renders separately so the studio stays responsive.${pose}`
+    : `Path-traced light and shadows · ${request.samples} samples with gentle denoising · Final may pause the studio while it renders.${pose}`
 })
 const imageExportProgressLabel = computed(() => {
   if (imageExportProgress.phase === 'preparing') return `Preparing geometry · ${Math.round(imageExportProgress.progress * 100)}%`
@@ -527,7 +668,43 @@ function rebuildTextMesh() {
   }, 90)
 }
 
+function animateLivingForm(time: number) {
+  livingAnimationFrame = window.requestAnimationFrame(animateLivingForm)
+  const previous = livingAnimationTime
+  livingAnimationTime = time
+  if (!previous || !livingPlaying.value || !livingForm.value.enabled) return
+  // Ignore long background-tab gaps instead of making the form jump on return.
+  const elapsed = Math.min(100, Math.max(0, time - previous))
+  livingAnimationElapsed += elapsed
+  // The preview and exported loop top out at 30 unique frames per second. Keeping
+  // the reactive editor clock on that cadence avoids re-rendering the entire
+  // inspector and recomputing a dense mesh on 60–120 Hz displays.
+  if (livingAnimationElapsed < 1000 / 30) return
+  livingPhase.value = livingPhase.value + livingAnimationElapsed / (livingForm.value.duration * 1000)
+  livingAnimationElapsed = 0
+}
+
+function toggleLivingFormPlayback() {
+  if (!livingForm.value.enabled) livingForm.value.enabled = true
+  livingPlaying.value = !livingPlaying.value
+  livingAnimationTime = performance.now()
+  livingAnimationElapsed = 0
+}
+
+function restartLivingForm() {
+  livingPhase.value = 0
+  livingAnimationTime = performance.now()
+  livingAnimationElapsed = 0
+}
+
+function pauseLivingFormForScrub() {
+  livingPlaying.value = false
+  livingAnimationElapsed = 0
+}
+
 function switchWorkspace(next: WorkspaceMode) {
+  livingPlaying.value = false
+  livingAnimationElapsed = 0
   workspace.value = next
   imageExportOpen.value = false
   closeBackgroundMenu()
@@ -676,12 +853,35 @@ function handleWindowResize() {
   closeBackgroundMenu()
 }
 
+async function acquireLivingLoopWakeLock(): Promise<void> {
+  try {
+    livingLoopWakeLock = await navigator.wakeLock?.request('screen') ?? null
+  } catch {
+    // Wake lock is best-effort on the web; the desktop shell also protects long jobs.
+    livingLoopWakeLock = null
+  }
+}
+
+async function releaseLivingLoopWakeLock(): Promise<void> {
+  const wakeLock = livingLoopWakeLock
+  livingLoopWakeLock = null
+  if (!wakeLock || wakeLock.released) return
+  try {
+    await wakeLock.release()
+  } catch {
+    // The browser may already have released it when the tab became hidden.
+  }
+}
+
 onMounted(() => {
   appDisposed = false
+  void cleanupStaleStoredZipArchives()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', handleWindowResize)
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   document.addEventListener('focusin', handleDocumentFocusIn)
+  livingAnimationTime = performance.now()
+  livingAnimationFrame = window.requestAnimationFrame(animateLivingForm)
   rebuildTextMesh()
   const request = ++passiveFontRequest
   const statusRevision = fontStatusRevision
@@ -710,6 +910,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleWindowResize)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
   document.removeEventListener('focusin', handleDocumentFocusIn)
+  window.cancelAnimationFrame(livingAnimationFrame)
+  livingLoopController?.abort()
+  void releaseLivingLoopWakeLock()
   window.clearTimeout(textBuildTimer)
   cleanupRegisteredFont(activeFontRegistration)
   activeFontRegistration = undefined
@@ -731,6 +934,10 @@ watch(exportingImage, (isExporting) => {
 })
 
 watch([() => selectedFont.value.cssFamily, textSettings], rebuildTextMesh, { deep: true })
+
+watch(() => livingForm.value.enabled, (enabled) => {
+  if (!enabled) livingPlaying.value = false
+})
 
 function selectColorMode(mode: ColorMode) {
   if (mode === 'wireframe' && imageExportQuality.value === 'final' && !exportingImage.value) {
@@ -757,8 +964,24 @@ function selectImageExportQuality(quality: ImageExportQuality) {
 
 let lastAnnouncedPhase: FinalExportProgress['phase'] | '' = ''
 let lastAnnouncedBucket = -1
+let lastAnnouncedLivingPhase: LivingFormLoopProgress['phase'] | '' = ''
 
 function handleImageExportProgress(progress: FinalExportProgress) {
+  if (activeLivingLoopFrame) {
+    const overall = (activeLivingLoopFrame.frame + progress.progress) / activeLivingLoopFrame.frames
+    Object.assign(livingLoopProgress, {
+      phase: 'rendering',
+      progress: overall,
+      frame: activeLivingLoopFrame.frame,
+      frames: activeLivingLoopFrame.frames,
+    } satisfies LivingFormLoopProgress)
+    const bucket = Math.floor(overall * 20)
+    if (bucket !== lastAnnouncedBucket) {
+      lastAnnouncedBucket = bucket
+      imageExportAnnouncement.value = livingLoopProgressLabel.value
+    }
+    return
+  }
   Object.assign(imageExportProgress, progress)
   const bucket = Math.floor(progress.progress * 10)
   if (progress.phase !== lastAnnouncedPhase || bucket !== lastAnnouncedBucket) {
@@ -845,7 +1068,7 @@ function resetDemo() {
 
 function recipe(): Recipe {
   return {
-    version: 4,
+    version: 6,
     app: 'Rasterform',
     image: { name: image.value.name, width: image.value.width, height: image.value.height },
     channels: channelLayers.map((layer) => ({ ...layer })),
@@ -855,6 +1078,7 @@ function recipe(): Recipe {
       heightGradient: { ...imageAppearance.heightGradient },
       clay: { ...imageAppearance.clay },
     },
+    livingForm: { ...imageLivingForm, phase: imageLivingPhase.value },
     createdAt: new Date().toISOString(),
   }
 }
@@ -862,7 +1086,7 @@ function recipe(): Recipe {
 function textRecipe(): TextRecipe {
   const { text, ...shape } = textSettings
   return {
-    version: 5,
+    version: 6,
     app: 'Rasterform',
     workspace: 'text',
     text: { ...shape, value: text },
@@ -877,16 +1101,25 @@ function textRecipe(): TextRecipe {
       heightGradient: { ...textAppearance.heightGradient },
       clay: { ...textAppearance.clay },
     },
+    livingForm: { ...textLivingForm, phase: textLivingPhase.value },
     createdAt: new Date().toISOString(),
   }
 }
 
+function currentMeshSnapshot(): MeshData | null {
+  if (!mesh.value) return null
+  return livingForm.value.enabled
+    ? animateLivingFormMesh(mesh.value, livingPhase.value, livingForm.value)
+    : mesh.value
+}
+
 async function downloadGlb() {
-  if (!mesh.value) return
+  const exportMesh = currentMeshSnapshot()
+  if (!exportMesh) return
   exporting.value = true
   status.value = 'Exporting GLB…'
   try {
-    await exportGlb(mesh.value, colorMode.value, appearance.value)
+    await exportGlb(exportMesh, colorMode.value, appearance.value)
     status.value = 'GLB exported for Blender / Cycles'
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'GLB export failed.'
@@ -896,14 +1129,19 @@ async function downloadGlb() {
 }
 
 function downloadStl() {
-  if (!mesh.value || !topology.value?.watertight) return
-  exportStl(mesh.value)
+  const exportMesh = currentMeshSnapshot()
+  if (!exportMesh || !topology.value?.watertight) return
+  exportStl(exportMesh)
   status.value = 'STL exported · geometry only'
 }
 
 function cancelImageExport() {
+  if (livingLoopNativeSaving.value) return
+  livingLoopController?.abort()
   threePreview.value?.cancelImageExport()
-  imageExportNotice.value = 'Cancelling image export…'
+  imageExportNotice.value = imageExportKind.value === 'loop'
+    ? 'Cancelling Living Form export…'
+    : 'Cancelling image export…'
 }
 
 function friendlyImageExportError(error: unknown): string {
@@ -921,11 +1159,24 @@ function friendlyImageExportError(error: unknown): string {
     return 'The separate Final renderer could not finish. Your design is safe; try Final again.'
   }
   const message = error instanceof Error ? error.message : ''
+  const requestedFinal = activeImageExportRequest.value?.quality === 'final'
   if (message.includes('8K Final')) return 'Final quality supports up to 4K. Choose 4K or use High quality for 8K.'
-  if (message.includes('canvas') || message.includes('size')) return 'This image is too large for the device. Choose 2K or use High quality.'
-  if (message.includes('context') || message.includes('progress')) return 'Final rendering stopped on this device. Your design is safe; try again or use High quality.'
-  if (message.includes('Transparency check failed')) return 'The transparency check failed, so Rasterform did not save a bad file. Try High quality.'
-  return 'Image export could not finish on this device. Your design is safe; try High quality or a smaller size.'
+  if (message.includes('canvas') || message.includes('size')) {
+    return requestedFinal
+      ? 'The device could not allocate the requested Final canvas. Close other graphics-heavy apps and retry Final with the same settings.'
+      : 'The device could not allocate this image canvas. Close other graphics-heavy apps and try the export again.'
+  }
+  if (message.includes('context') || message.includes('progress')) {
+    return requestedFinal
+      ? 'Final rendering stopped on this device. Your design is safe; retry Final with the same settings.'
+      : 'High-quality rendering stopped on this device. Your design is safe; try the export again.'
+  }
+  if (message.includes('Transparency check failed')) {
+    return `The transparency check failed, so Rasterform did not save a bad file. Retry ${requestedFinal ? 'Final' : 'the export'} with the same settings.`
+  }
+  return requestedFinal
+    ? 'Final could not finish on this device. Your design is safe; retry Final with the same settings.'
+    : 'Image export could not finish on this device. Your design is safe; try the export again.'
 }
 
 async function downloadImagePng() {
@@ -944,6 +1195,8 @@ async function downloadImagePng() {
     samples: imageExportQuality.value === 'final'
       ? finalSampleTarget(colorMode.value, appearance.value)
       : 1,
+    livingEnabled: livingForm.value.enabled,
+    livingPhase: livingPhase.value,
   }
   activeImageExportRequest.value = request
   exportingImage.value = true
@@ -966,8 +1219,8 @@ async function downloadImagePng() {
     const quality = request.quality === 'final' ? 'final' : 'high'
     const fileName = `rasterform-${view}-${quality}-${request.dimensions.width}x${request.dimensions.height}-${background}.png`
     const result = request.quality === 'final'
-      ? await threePreview.value.captureFinalPng(request.dimensions, request.background, fileName)
-      : await threePreview.value.captureHighPng(request.dimensions, request.background)
+      ? await threePreview.value.captureFinalPng(request.dimensions, request.background, fileName, request.livingPhase)
+      : await threePreview.value.captureHighPng(request.dimensions, request.background, request.livingPhase)
     if (!('desktopSaved' in result)) downloadBlob(fileName, result.blob)
     const sampleDetail = 'samples' in result ? ` · ${result.samples} samples` : ' · 2× edge smoothing'
     status.value = `PNG · ${result.width} × ${result.height}${sampleDetail} · ${background} · ${result.dpi} PPI`
@@ -984,6 +1237,165 @@ async function downloadImagePng() {
     if (colorMode.value === 'wireframe' && imageExportQuality.value === 'final') {
       imageExportQuality.value = 'high'
     }
+  }
+}
+
+function friendlyLivingFormExportError(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'AbortError') return ''
+  const message = error instanceof Error ? error.message : ''
+  if (message.includes('too large')) {
+    return 'This browser cannot safely store the full lossless sequence. Use Rasterform desktop or a browser with private file storage; render quality was not changed.'
+  }
+  if (message.includes('PNG')) {
+    return 'A loop frame failed validation, so Rasterform did not save a damaged sequence. Your design is safe; try the export again.'
+  }
+  return 'The Living Form sequence could not finish on this device. Your design and still-image Final settings are unchanged.'
+}
+
+async function downloadLivingFormLoop() {
+  if (!threePreview.value || !mesh.value) return
+  if (exportingImage.value) {
+    cancelImageExport()
+    return
+  }
+  if (!livingForm.value.enabled) {
+    imageExportError.value = 'Enable Living Form in Properties before exporting a loop.'
+    return
+  }
+
+  const controller = new AbortController()
+  livingLoopController = controller
+  const request: LivingLoopExportRequestSnapshot = {
+    dimensions: { ...livingLoopDimensions.value },
+    fps: livingLoopFps.value,
+    frameCount: calculateLivingFormFrameCount(livingForm.value.duration, livingLoopFps.value),
+    settings: { ...livingForm.value },
+    background: imageExportBackground.value,
+    studioBackground: viewportBackground.value,
+  }
+  activeLivingLoopRequest.value = request
+  exportingImage.value = true
+  imageExportError.value = ''
+  imageExportNotice.value = ''
+  imageExportAnnouncement.value = 'Preparing Living Form loop.'
+  lastAnnouncedBucket = -1
+  lastAnnouncedLivingPhase = ''
+  Object.assign(livingLoopProgress, {
+    phase: 'rendering',
+    progress: 0,
+    frame: 0,
+    frames: request.frameCount,
+  } satisfies LivingFormLoopProgress)
+
+  let desktopLongExport: DesktopLongExportSession | null = null
+  let desktopOutcome: 'completed' | 'cancelled' | 'failed' = 'failed'
+  let completedLoopCleanup: (() => Promise<void>) | null = null
+  let cleanupScheduled = false
+  const scheduleCompletedLoopCleanup = () => {
+    const cleanup = completedLoopCleanup
+    if (!cleanup || cleanupScheduled) return
+    cleanupScheduled = true
+    window.setTimeout(() => void cleanup(), 24 * 60 * 60 * 1000)
+  }
+  try {
+    threePreview.value.beginLivingFormLoopExport(request.settings)
+    desktopLongExport = await beginDesktopLongExport({ frames: request.frameCount })
+    await acquireLivingLoopWakeLock()
+    if (controller.signal.aborted) throw new DOMException('Living Form export cancelled.', 'AbortError')
+    const result = await exportLivingFormPngSequence({
+      width: request.dimensions.width,
+      height: request.dimensions.height,
+      fps: request.fps,
+      settings: request.settings,
+      background: request.background,
+      studioBackground: request.studioBackground,
+      signal: controller.signal,
+      renderFrame: async (phase, frame, frames) => {
+        activeLivingLoopFrame = { frame, frames }
+        const result = await threePreview.value!.captureHighPng(request.dimensions, request.background, phase)
+        return result.blob
+      },
+      onProgress: (progress) => {
+        if (progress.phase === 'packaging') activeLivingLoopFrame = null
+        Object.assign(livingLoopProgress, progress)
+        const bucket = Math.floor(progress.progress * 20)
+        if (progress.phase !== lastAnnouncedLivingPhase || bucket !== lastAnnouncedBucket) {
+          lastAnnouncedLivingPhase = progress.phase
+          lastAnnouncedBucket = bucket
+          imageExportAnnouncement.value = livingLoopProgressLabel.value
+        }
+      },
+    })
+    const backgroundLabel = request.background === 'transparent' ? 'transparent' : request.studioBackground
+    const fileName = `rasterform-living-${request.settings.behavior}-${request.dimensions.width}x${request.dimensions.height}-${result.fps}fps-${backgroundLabel}.zip`
+    completedLoopCleanup = result.cleanup
+    downloadBlob(fileName, result.blob)
+    // Browsers do not expose download-completion events. Retain a private-file
+    // archive long enough for multi-gigabyte downloads; stale archives are also
+    // scavenged on a later export.
+    if (!desktopLongExport) {
+      if (result.archiveStorage === 'temporary-file') scheduleCompletedLoopCleanup()
+      else void result.cleanup()
+    }
+    status.value = `Living Form · ${result.frames} lossless frames · ${result.width} × ${result.height} · ${result.fps} fps`
+    imageExportNotice.value = desktopLongExport
+      ? `All ${result.frames.toLocaleString()} frames are complete · saving the lossless ZIP…`
+      : `PNG sequence download started · ${result.frames.toLocaleString()} frames · seamless ${result.durationSeconds}s loop.`
+    imageExportAnnouncement.value = imageExportNotice.value
+    desktopOutcome = 'completed'
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') desktopOutcome = 'cancelled'
+    const friendly = friendlyLivingFormExportError(error)
+    if (friendly) {
+      imageExportError.value = friendly
+      imageExportAnnouncement.value = friendly
+    } else {
+      imageExportNotice.value = 'Living Form export cancelled.'
+      imageExportAnnouncement.value = imageExportNotice.value
+    }
+  } finally {
+    threePreview.value?.endLivingFormLoopExport()
+    if (desktopLongExport && desktopOutcome === 'completed') {
+      livingLoopNativeSaving.value = true
+      imageExportAnnouncement.value = 'Saving Living Form ZIP.'
+    }
+    let nativeCleanupSafe = false
+    try {
+      const desktopSaved = await endDesktopLongExport(desktopLongExport, desktopOutcome)
+      nativeCleanupSafe = desktopSaved
+      if (desktopLongExport && desktopOutcome === 'completed' && desktopSaved) {
+        imageExportNotice.value = `Living Form ZIP saved · ${request.frameCount.toLocaleString()} lossless frames · seamless ${request.settings.duration}s loop.`
+        imageExportAnnouncement.value = imageExportNotice.value
+      }
+      if (desktopLongExport && desktopOutcome === 'completed' && !desktopSaved) {
+        imageExportNotice.value = ''
+        imageExportError.value = 'macOS did not finish saving the Living Form ZIP. Your design and full-quality frames are unchanged; export the loop again.'
+        imageExportAnnouncement.value = imageExportError.value
+        status.value = 'Living Form ZIP was not saved'
+      }
+    } catch {
+      if (desktopLongExport && desktopOutcome === 'completed') {
+        imageExportNotice.value = ''
+        imageExportError.value = 'macOS could not confirm the Living Form ZIP save. Your design is safe; export the loop again.'
+        imageExportAnnouncement.value = imageExportError.value
+        status.value = 'Living Form ZIP save could not be confirmed'
+      }
+    }
+    if (desktopLongExport && nativeCleanupSafe && completedLoopCleanup) {
+      try {
+        await completedLoopCleanup()
+      } catch {
+        // The ZIP is already terminal; stale private storage is scavenged later.
+      }
+    } else if (desktopLongExport && completedLoopCleanup) {
+      scheduleCompletedLoopCleanup()
+    }
+    livingLoopNativeSaving.value = false
+    await releaseLivingLoopWakeLock()
+    if (livingLoopController === controller) livingLoopController = null
+    activeLivingLoopFrame = null
+    activeLivingLoopRequest.value = null
+    exportingImage.value = false
   }
 }
 </script>
@@ -1008,6 +1420,7 @@ async function downloadImagePng() {
           role="tab"
           :aria-selected="workspace === 'image'"
           :tabindex="workspace === 'image' ? 0 : -1"
+          :disabled="exportingImage"
           aria-controls="workspace-panel"
           @click="switchWorkspace('image')"
         >Image</button>
@@ -1017,6 +1430,7 @@ async function downloadImagePng() {
           role="tab"
           :aria-selected="workspace === 'text'"
           :tabindex="workspace === 'text' ? 0 : -1"
+          :disabled="exportingImage"
           aria-controls="workspace-panel"
           @click="switchWorkspace('text')"
         >Text</button>
@@ -1027,6 +1441,7 @@ async function downloadImagePng() {
         class="top-export"
         :aria-expanded="imageExportOpen"
         aria-controls="export-inspector"
+        :disabled="exportingImage"
         @click="imageExportOpen = !imageExportOpen"
       >{{ imageExportOpen ? 'Back to edit' : 'Export' }}</button>
     </header>
@@ -1164,6 +1579,9 @@ async function downloadImagePng() {
             :color-mode="colorMode"
             :appearance="appearance"
             :background="viewportBackground"
+            :interaction-locked="exportingImage"
+            :living-form="livingForm"
+            :living-phase="livingPhase"
             @export-progress="handleImageExportProgress"
           />
           <div v-if="workspace === 'text' && (textBuilding || !mesh)" class="viewport-message" role="status">
@@ -1254,6 +1672,33 @@ async function downloadImagePng() {
           </details>
 
           <details class="inspector-section" open>
+            <summary><span>Living Form</span><small :class="{ success: livingForm.enabled }">{{ livingFormStatus }}</small></summary>
+            <div class="inspector-body">
+              <label class="check-control"><input v-model="livingForm.enabled" type="checkbox" />Enable kinetic form</label>
+              <div class="segmented motion-presets" role="group" aria-label="Living Form behavior">
+                <button
+                  v-for="behavior in livingFormBehaviors"
+                  :key="behavior.value"
+                  type="button"
+                  :title="behavior.note"
+                  :aria-pressed="livingForm.behavior === behavior.value"
+                  @click="livingForm.behavior = behavior.value"
+                >{{ behavior.label }}</button>
+              </div>
+              <p class="inline-note">{{ activeLivingBehavior.note }} Motion is procedural, deterministic, and closes on an exact seamless loop.</p>
+              <label class="slider-control"><span>Intensity <output>{{ Math.round(livingForm.amount * 100) }}%</output></span><input v-model.number="livingForm.amount" aria-label="Living Form intensity" :aria-valuetext="`${Math.round(livingForm.amount * 100)}%`" type="range" min="0" max="1" step="0.01" /></label>
+              <label class="slider-control"><span>Complexity <output>{{ livingForm.frequency.toFixed(2) }}</output></span><input v-model.number="livingForm.frequency" aria-label="Living Form complexity" :aria-valuetext="livingForm.frequency.toFixed(2)" type="range" min="0.25" max="5" step="0.05" /></label>
+              <label class="slider-control"><span>Variation <output>{{ Math.round(livingForm.seed) }}</output></span><input v-model.number="livingForm.seed" aria-label="Living Form variation" :aria-valuetext="`${Math.round(livingForm.seed)}`" type="range" min="0" max="100" step="1" /></label>
+              <label class="slider-control"><span>Loop duration <output>{{ livingForm.duration.toFixed(1) }}s</output></span><input v-model.number="livingForm.duration" aria-label="Living Form loop duration" :aria-valuetext="`${livingForm.duration.toFixed(1)} seconds`" type="range" min="1" max="12" step="0.5" /></label>
+              <div class="living-transport">
+                <button type="button" class="primary-control" :aria-pressed="livingPlaying" :disabled="!hasModel" @click="toggleLivingFormPlayback">{{ livingPlaying ? 'Pause' : 'Play' }}</button>
+                <button type="button" :disabled="!hasModel" @click="restartLivingForm">Restart</button>
+              </div>
+              <label class="slider-control"><span>Phase <output>{{ Math.round(livingPhase * 100) }}%</output></span><input v-model.number="livingPhase" aria-label="Living Form phase" :aria-valuetext="`${Math.round(livingPhase * 100)}%`" type="range" min="0" max="0.999" step="0.001" @input="pauseLivingFormForScrub" /></label>
+            </div>
+          </details>
+
+          <details class="inspector-section" open>
             <summary><span>Material</span><small>{{ colorMode === 'clay' ? appearance.clay.finish : colorMode }}</small></summary>
             <div class="inspector-body">
               <template v-if="colorMode === 'clay'">
@@ -1295,25 +1740,40 @@ async function downloadImagePng() {
 
         <section v-else id="export-inspector" class="export-inspector" :aria-busy="exportingImage">
           <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>Export model</h2></div><button type="button" class="icon-control" :disabled="exportingImage" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
-          <div class="export-summary">{{ imageExportSummary }}</div>
+          <fieldset class="export-group"><legend>Output</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportKind === 'still'" :disabled="exportingImage" @click="imageExportKind = 'still'; imageExportError = ''; imageExportNotice = ''"><strong>Still</strong><small>PNG image</small></button><button type="button" :aria-pressed="imageExportKind === 'loop'" :disabled="exportingImage" @click="imageExportKind = 'loop'; imageExportError = ''; imageExportNotice = ''"><strong>Living loop</strong><small>PNG sequence</small></button></div></fieldset>
 
-          <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportQuality === 'high'" :disabled="exportingImage" @click="selectImageExportQuality('high')"><strong>High</strong><small>Clean and quick</small></button><button type="button" :aria-pressed="imageExportQuality === 'final'" :disabled="exportingImage || colorMode === 'wireframe'" @click="selectImageExportQuality('final')"><strong>Final</strong><small>Refined light</small></button></div></fieldset>
-          <fieldset class="export-group"><legend>Long edge</legend><div class="segmented"><button type="button" :aria-pressed="imageExportLongEdge === 2048" :disabled="exportingImage" @click="imageExportLongEdge = 2048">2K</button><button type="button" :aria-pressed="imageExportLongEdge === 4096" :disabled="exportingImage" @click="imageExportLongEdge = 4096">4K</button><button type="button" :aria-pressed="imageExportLongEdge === 8192" :disabled="exportingImage || imageExportQuality === 'final'" @click="imageExportLongEdge = 8192">8K</button></div></fieldset>
-          <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ activeBackground.label }}</small></button></div></fieldset>
-          <p class="inline-note">{{ imageExportHelp }}</p>
+          <template v-if="imageExportKind === 'still'">
+            <div class="export-summary">{{ imageExportSummary }}</div>
+            <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportQuality === 'high'" :disabled="exportingImage" @click="selectImageExportQuality('high')"><strong>High</strong><small>Clean and quick</small></button><button type="button" :aria-pressed="imageExportQuality === 'final'" :disabled="exportingImage || colorMode === 'wireframe'" @click="selectImageExportQuality('final')"><strong>Final</strong><small>Refined light</small></button></div></fieldset>
+            <fieldset class="export-group"><legend>Long edge</legend><div class="segmented"><button type="button" :aria-pressed="imageExportLongEdge === 2048" :disabled="exportingImage" @click="imageExportLongEdge = 2048">2K</button><button type="button" :aria-pressed="imageExportLongEdge === 4096" :disabled="exportingImage" @click="imageExportLongEdge = 4096">4K</button><button type="button" :aria-pressed="imageExportLongEdge === 8192" :disabled="exportingImage || imageExportQuality === 'final'" @click="imageExportLongEdge = 8192">8K</button></div></fieldset>
+            <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ activeBackground.label }}</small></button></div></fieldset>
+            <p class="inline-note">{{ imageExportHelp }}</p>
+          </template>
 
-          <div v-if="exportingImage" class="render-progress"><span>{{ imageExportProgressLabel }}</span><progress :value="imageExportProgressBarValue" max="1" :aria-valuetext="imageExportProgressLabel"></progress><button type="button" @click="cancelImageExport">Cancel</button></div>
+          <template v-else>
+            <div class="export-summary">{{ livingLoopSummary }}</div>
+            <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" aria-pressed="true" disabled><strong>High 2×</strong><small>Lossless frames</small></button><button type="button" aria-pressed="false" disabled><strong>Final</strong><small>Still images only</small></button></div></fieldset>
+            <fieldset class="export-group"><legend>Long edge</legend><div class="segmented cards"><button type="button" :aria-pressed="livingLoopLongEdge === 2048" :disabled="exportingImage" @click="livingLoopLongEdge = 2048">2K</button><button type="button" :aria-pressed="livingLoopLongEdge === 4096" :disabled="exportingImage" @click="livingLoopLongEdge = 4096">4K</button></div></fieldset>
+            <fieldset class="export-group"><legend>Frame rate</legend><div class="segmented"><button v-for="fps in LIVING_FORM_FRAME_RATES" :key="fps" type="button" :aria-pressed="livingLoopFps === fps" :disabled="exportingImage" @click="livingLoopFps = fps">{{ fps }} fps</button></div></fieldset>
+            <fieldset class="export-group"><legend>Timing</legend><label class="slider-control"><span>Duration <output>{{ displayLivingLoopRequest.settings.duration.toFixed(1) }}s · {{ displayLivingLoopRequest.frameCount }} frames</output></span><input v-model.number="livingForm.duration" aria-label="Living Loop duration" :aria-valuetext="`${displayLivingLoopRequest.settings.duration.toFixed(1)} seconds, ${displayLivingLoopRequest.frameCount} frames`" type="range" min="1" max="12" step="0.5" :disabled="exportingImage" /></label></fieldset>
+            <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ viewportBackgroundPreset(displayLivingLoopRequest.studioBackground).label }}</small></button></div></fieldset>
+            <p class="inline-note">{{ livingLoopHelp }}</p>
+            <p v-if="!livingForm.enabled" class="export-message error" role="alert">Enable Living Form in Properties to export a loop.</p>
+          </template>
+
+          <div v-if="exportingImage" class="render-progress"><span>{{ imageExportKind === 'loop' ? livingLoopProgressLabel : imageExportProgressLabel }}</span><progress :value="imageExportKind === 'loop' ? livingLoopProgressBarValue : imageExportProgressBarValue" max="1" :aria-label="imageExportKind === 'loop' ? 'Living Form export progress' : 'Image export progress'" :aria-valuetext="imageExportKind === 'loop' ? livingLoopProgressLabel : imageExportProgressLabel"></progress><button type="button" :disabled="livingLoopNativeSaving" @click="cancelImageExport">{{ livingLoopNativeSaving ? 'Saving…' : 'Cancel' }}</button></div>
           <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
           <p v-if="imageExportError" class="export-message error" role="alert">{{ imageExportError }}</p>
           <p v-else-if="imageExportNotice" class="export-message" role="status">{{ imageExportNotice }}</p>
-          <button type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel" @click="downloadImagePng">{{ exportingImage ? 'Cancel render' : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}</button>
+          <button v-if="imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel" @click="downloadImagePng">{{ exportingImage ? 'Cancel render' : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}</button>
+          <button v-else type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled" @click="downloadLivingFormLoop">{{ livingLoopNativeSaving ? 'Saving ZIP…' : exportingImage ? 'Cancel sequence' : 'Export lossless loop ZIP' }}</button>
 
           <div class="file-export-section">
             <h3>3D &amp; project files</h3>
-            <button type="button" :disabled="exporting || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing GLB…' : 'GLB for Blender / Cycles' }}</button>
-            <button type="button" :disabled="!topology?.watertight" @click="downloadStl">STL geometry</button>
-            <button v-if="workspace === 'image'" type="button" @click="exportHeightPng(heightField)">Height PNG</button>
-            <button type="button" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
+            <button type="button" :disabled="exporting || exportingImage || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing GLB…' : 'GLB for Blender / Cycles' }}</button>
+            <button type="button" :disabled="exportingImage || !topology?.watertight" @click="downloadStl">STL geometry</button>
+            <button v-if="workspace === 'image'" type="button" :disabled="exportingImage" @click="exportHeightPng(heightField)">Height PNG</button>
+            <button type="button" :disabled="exportingImage" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
           </div>
         </section>
       </aside>

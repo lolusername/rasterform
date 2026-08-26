@@ -9,11 +9,14 @@ import type { FinalExportProgress } from '../lib/final-image-export'
 import type { ImageExportCameraSnapshot } from '../lib/image-export-worker'
 
 export const DESKTOP_PROTOCOL_VERSION = 1 as const
+/** Independent protocol for native lifecycle protection around shared long exports. */
+export const DESKTOP_LONG_EXPORT_PROTOCOL_VERSION = 1 as const
 export const DESKTOP_MAX_IMAGE_EDGE = 4096
 export const DESKTOP_MAX_MESH_VERTICES = 2_000_000
 export const DESKTOP_MAX_MESH_INDICES = 12_000_000
 export const DESKTOP_MAX_MESH_BYTES = 256 * 1024 * 1024
 export const DESKTOP_MAX_PNG_BYTES = 128 * 1024 * 1024
+export const DESKTOP_MAX_LONG_EXPORT_FRAMES = 360
 
 export type DesktopFinalColorMode = Exclude<ColorMode, 'wireframe'>
 
@@ -82,6 +85,26 @@ export type DesktopRenderEvent =
   | { type: 'cancelled'; jobId: string }
   | { type: 'error'; jobId: string; code: DesktopRenderErrorCode; message: string }
 
+export type DesktopLongExportKind = 'living-loop'
+export type DesktopLongExportOutcome = 'completed' | 'cancelled' | 'failed'
+export type DesktopLongExportErrorCode = 'busy' | 'sleep-protection-failed' | 'invalid-request'
+
+/** Metadata only: rendered frames and archives never cross native IPC. */
+export interface DesktopLongExportStartRequest {
+  protocolVersion: typeof DESKTOP_LONG_EXPORT_PROTOCOL_VERSION
+  kind: DesktopLongExportKind
+  frames: number
+}
+
+export type DesktopLongExportStartResult =
+  | { accepted: true; jobId: string }
+  | {
+      accepted: false
+      error: { code: DesktopLongExportErrorCode; message: string }
+    }
+
+export type DesktopLongExportEndResult = { ended: true } | { ended: false }
+
 /** The only native capabilities exposed to the web renderer. */
 export interface RasterformDesktopBridge {
   readonly protocolVersion: typeof DESKTOP_PROTOCOL_VERSION
@@ -92,6 +115,16 @@ export interface RasterformDesktopBridge {
   ) => Promise<DesktopFinalRenderSubmission>
   cancelFinalRender: (jobId: string) => Promise<DesktopFinalCancelResult>
   onFinalRenderEvent: (listener: (event: DesktopRenderEvent) => void) => () => void
+}
+
+/** Optional independently versioned capability; Final protocol v1 stays valid without it. */
+export interface RasterformDesktopLongExportBridge extends RasterformDesktopBridge {
+  readonly longExportProtocolVersion: typeof DESKTOP_LONG_EXPORT_PROTOCOL_VERSION
+  beginLongExport: (request: DesktopLongExportStartRequest) => Promise<DesktopLongExportStartResult>
+  endLongExport: (
+    jobId: string,
+    outcome: DesktopLongExportOutcome,
+  ) => Promise<DesktopLongExportEndResult>
 }
 
 type UnknownRecord = Record<string, unknown>
@@ -350,6 +383,50 @@ function isRenderFailure(value: unknown): value is DesktopRenderFailure {
     && value.message.length <= 2000
 }
 
+function isLongExportError(value: unknown): value is DesktopLongExportStartResult & { accepted: false } {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['accepted', 'error']) || value.accepted !== false) return false
+  const error = value.error
+  return isRecord(error)
+    && hasOnlyKeys(error, ['code', 'message'])
+    && (error.code === 'busy'
+      || error.code === 'sleep-protection-failed'
+      || error.code === 'invalid-request')
+    && typeof error.message === 'string'
+    && error.message.length >= 1
+    && error.message.length <= 2000
+}
+
+export function isDesktopLongExportOutcome(value: unknown): value is DesktopLongExportOutcome {
+  return value === 'completed' || value === 'cancelled' || value === 'failed'
+}
+
+export function isDesktopLongExportStartRequest(
+  value: unknown,
+): value is DesktopLongExportStartRequest {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['protocolVersion', 'kind', 'frames'])
+    && value.protocolVersion === DESKTOP_LONG_EXPORT_PROTOCOL_VERSION
+    && value.kind === 'living-loop'
+    && isIntegerInRange(value.frames, 1, DESKTOP_MAX_LONG_EXPORT_FRAMES)
+}
+
+export function isDesktopLongExportStartResult(
+  value: unknown,
+): value is DesktopLongExportStartResult {
+  if (!isRecord(value)) return false
+  return value.accepted === true
+    ? hasOnlyKeys(value, ['accepted', 'jobId']) && isDesktopJobId(value.jobId)
+    : isLongExportError(value)
+}
+
+export function isDesktopLongExportEndResult(
+  value: unknown,
+): value is DesktopLongExportEndResult {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['ended'])
+    && typeof value.ended === 'boolean'
+}
+
 export function isDesktopFinalRenderSubmission(value: unknown): value is DesktopFinalRenderSubmission {
   if (!isRecord(value)) return false
   if (value.accepted === true) return hasOnlyKeys(value, ['accepted'])
@@ -402,6 +479,16 @@ export function isRasterformDesktopBridge(value: unknown): value is RasterformDe
     && typeof value.submitFinalRender === 'function'
     && typeof value.cancelFinalRender === 'function'
     && typeof value.onFinalRenderEvent === 'function'
+}
+
+export function isRasterformDesktopLongExportBridge(
+  value: unknown,
+): value is RasterformDesktopLongExportBridge {
+  if (!isRasterformDesktopBridge(value)) return false
+  const candidate = value as unknown as UnknownRecord
+  return candidate.longExportProtocolVersion === DESKTOP_LONG_EXPORT_PROTOCOL_VERSION
+    && typeof candidate.beginLongExport === 'function'
+    && typeof candidate.endLongExport === 'function'
 }
 
 export function assertDesktopFinalRenderSnapshot(

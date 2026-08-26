@@ -10,22 +10,30 @@ import { finalTileCount } from '../lib/final-quality'
 import { snapshotCamera, snapshotMesh } from '../lib/image-export-worker'
 import { PNG_DPI } from '../lib/viewport-export'
 import {
+  DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
   DESKTOP_PROTOCOL_VERSION,
   assertDesktopFinalRenderSnapshot,
   isDesktopFinalCancelResult,
   isDesktopFinalRenderSubmission,
+  isDesktopLongExportEndResult,
+  isDesktopLongExportStartRequest,
+  isDesktopLongExportStartResult,
   isDesktopPngName,
   isDesktopRenderEvent,
   isDesktopSavePreparation,
   isRasterformDesktopBridge,
+  isRasterformDesktopLongExportBridge,
   type DesktopFinalColorMode,
   type DesktopFinalCancelResult,
   type DesktopFinalCaptureResult,
   type DesktopFinalRenderSnapshot,
+  type DesktopLongExportErrorCode,
+  type DesktopLongExportOutcome,
   type DesktopSavedFinalResult,
   type DesktopRenderErrorCode,
   type DesktopRenderEvent,
   type RasterformDesktopBridge,
+  type RasterformDesktopLongExportBridge,
 } from './contracts'
 
 export type { DesktopFinalCaptureResult } from './contracts'
@@ -53,6 +61,16 @@ export interface RenderFinalImageInDesktopOptions extends CreateDesktopFinalRend
   bridge?: RasterformDesktopBridge | null
 }
 
+export interface BeginDesktopLongExportOptions {
+  frames: number
+  /** Test/integration injection; omitted means discover the optional window bridge. */
+  bridge?: RasterformDesktopLongExportBridge | null
+}
+
+export interface DesktopLongExportSession {
+  readonly jobId: string
+}
+
 export class DesktopFinalRenderError extends Error {
   readonly code: DesktopRenderErrorCode
 
@@ -62,6 +80,18 @@ export class DesktopFinalRenderError extends Error {
     this.code = code
   }
 }
+
+export class DesktopLongExportError extends Error {
+  readonly code: DesktopLongExportErrorCode
+
+  constructor(code: DesktopLongExportErrorCode, message: string) {
+    super(message)
+    this.name = 'DesktopLongExportError'
+    this.code = code
+  }
+}
+
+const longExportSessionBridges = new WeakMap<DesktopLongExportSession, RasterformDesktopLongExportBridge>()
 
 function abortError(): DOMException {
   return new DOMException('Final image export cancelled.', 'AbortError')
@@ -86,6 +116,96 @@ export function rasterformDesktopBridge(): RasterformDesktopBridge | null {
     )
   }
   return candidate
+}
+
+export function rasterformDesktopLongExportBridge(): RasterformDesktopLongExportBridge | null {
+  if (typeof window === 'undefined') return null
+  const candidate = (window as unknown as DesktopWindow).rasterformDesktop
+  if (candidate === undefined) return null
+  // An older Final-v1 desktop remains valid; it simply uses the shared web
+  // fallback for this independently versioned optional lifecycle.
+  if (isRasterformDesktopBridge(candidate) && !isRasterformDesktopLongExportBridge(candidate)) return null
+  if (!isRasterformDesktopLongExportBridge(candidate)) {
+    throw new DesktopLongExportError(
+      'invalid-request',
+      'This Rasterform desktop runtime uses an unsupported long-export protocol.',
+    )
+  }
+  return candidate
+}
+
+/**
+ * Ask the optional desktop shell to protect a shared Living Loop render from
+ * app suspension. Null means the ordinary browser path should continue.
+ */
+export async function beginDesktopLongExport(
+  options: BeginDesktopLongExportOptions,
+): Promise<DesktopLongExportSession | null> {
+  const bridge = options.bridge === undefined ? rasterformDesktopLongExportBridge() : options.bridge
+  if (!bridge) return null
+  const request = {
+    protocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
+    kind: 'living-loop',
+    frames: options.frames,
+  } as const
+  if (!isDesktopLongExportStartRequest(request)) {
+    throw new DesktopLongExportError(
+      'invalid-request',
+      'The Living Loop frame count is outside the native lifecycle contract.',
+    )
+  }
+
+  let candidate: unknown
+  try {
+    candidate = await bridge.beginLongExport(request)
+  } catch {
+    throw new DesktopLongExportError(
+      'invalid-request',
+      'The desktop runtime could not start Living Loop protection.',
+    )
+  }
+  if (!isDesktopLongExportStartResult(candidate)) {
+    throw new DesktopLongExportError(
+      'invalid-request',
+      'The desktop runtime returned an invalid long-export acknowledgement.',
+    )
+  }
+  if (!candidate.accepted) {
+    throw new DesktopLongExportError(candidate.error.code, candidate.error.message)
+  }
+  const session: DesktopLongExportSession = Object.freeze({ jobId: candidate.jobId })
+  longExportSessionBridges.set(session, bridge)
+  return session
+}
+
+/** Release native protection. No frame or archive bytes cross this boundary. */
+export async function endDesktopLongExport(
+  session: DesktopLongExportSession | null,
+  outcome: DesktopLongExportOutcome,
+): Promise<boolean> {
+  if (!session) return false
+  const bridge = longExportSessionBridges.get(session)
+  if (!bridge) {
+    throw new DesktopLongExportError('invalid-request', 'The long-export session is not active.')
+  }
+
+  let candidate: unknown
+  try {
+    candidate = await bridge.endLongExport(session.jobId, outcome)
+  } catch {
+    throw new DesktopLongExportError(
+      'invalid-request',
+      'The desktop runtime could not end Living Loop protection.',
+    )
+  }
+  if (!isDesktopLongExportEndResult(candidate)) {
+    throw new DesktopLongExportError(
+      'invalid-request',
+      'The desktop runtime returned an invalid long-export completion acknowledgement.',
+    )
+  }
+  longExportSessionBridges.delete(session)
+  return candidate.ended
 }
 
 export function createDesktopFinalRenderSnapshot(
