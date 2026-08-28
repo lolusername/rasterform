@@ -23,6 +23,7 @@ const requiredInputs = [
   join(renderDirectory, 'index.html'),
   join(webDirectory, 'index.html'),
   join(cyclesDirectory, 'render.py'),
+  join(cyclesDirectory, 'export_blend.py'),
 ]
 
 await Promise.all(requiredInputs.map((input) => access(input)))

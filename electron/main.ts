@@ -50,6 +50,15 @@ import {
   type DesktopProRenderSnapshot,
   type DesktopSavedProResult,
 } from '../src/desktop/pro-contracts'
+import {
+  assertDesktopBlenderExportSnapshot,
+  DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,
+  type DesktopBlenderExportCancelResult,
+  type DesktopBlenderExportEvent,
+  type DesktopBlenderExportSubmission,
+  type DesktopBlenderExportSnapshot,
+  type DesktopSavedBlenderExportResult,
+} from '../src/desktop/blender-export-contracts'
 import type { FinalExportProgress } from '../src/lib/final-image-export'
 import { finalSampleTarget, finalTileCount } from '../src/lib/final-quality'
 import {
@@ -83,12 +92,23 @@ import {
   type CyclesProJob,
   type CyclesProOutputState,
 } from './cycles-pro'
+import {
+  buildBlenderExportInvocation,
+  cleanupBlenderExportJob,
+  commitBlenderExportAtomically,
+  createBlenderExportJob,
+  createBlenderExportOutputState,
+  parseBlenderExportOutput,
+  type BlenderExportJob,
+  type BlenderExportOutputState,
+} from './blender-export'
 
 const SCHEME = 'rasterform'
 const APP_URL = `${SCHEME}://app/index.html`
 const RENDER_URL = `${SCHEME}://render/index.html`
 const CANCEL_GRACE_MS = 1_500
 const PRO_CANCEL_GRACE_MS = 5_000
+const BLENDER_EXPORT_CANCEL_GRACE_MS = 5_000
 const PREPARED_JOB_TTL_MS = 2 * 60_000
 const TERMINAL_JOB_TTL_MS = 5 * 60_000
 const PRO_STDERR_TAIL_BYTES = 32 * 1024
@@ -146,6 +166,28 @@ interface TerminalProJob {
   expiryTimer: ReturnType<typeof setTimeout>
 }
 
+interface PreparedBlenderExportJob {
+  id: string
+  ownerWebContentsId: number
+  destination: string
+  snapshot: DesktopBlenderExportSnapshot | null
+  state: DesktopJobState
+  process: ReturnType<typeof spawn> | null
+  privateJob: BlenderExportJob | null
+  outputState: BlenderExportOutputState | null
+  sleepBlockerId: number | null
+  cancelTimer: ReturnType<typeof setTimeout> | null
+  preparedTimer: ReturnType<typeof setTimeout> | null
+  runPromise: Promise<void> | null
+  stderrTail: string
+}
+
+interface TerminalBlenderExportJob {
+  ownerWebContentsId: number
+  result: Exclude<DesktopBlenderExportCancelResult, { state: 'cancelling' } | { state: 'saving' }>
+  expiryTimer: ReturnType<typeof setTimeout>
+}
+
 let mainWindow: BrowserWindow | null = null
 let lastExportPath: string | null = null
 let lastExportDirectory: string | null = null
@@ -155,8 +197,11 @@ const jobs = new Map<string, PreparedJob>()
 const terminalJobs = new Map<string, TerminalJob>()
 const proJobs = new Map<string, PreparedProJob>()
 const terminalProJobs = new Map<string, TerminalProJob>()
+const blenderExportJobs = new Map<string, PreparedBlenderExportJob>()
+const terminalBlenderExportJobs = new Map<string, TerminalBlenderExportJob>()
 const pendingWrites = new Set<Promise<void>>()
 const pendingProRuns = new Set<Promise<void>>()
+const pendingBlenderExportRuns = new Set<Promise<void>>()
 let lastProProbe: BlenderProbeResult | null = null
 const longExports = new NativeLongExportLifecycle(powerSaveBlocker, {
   setBackgroundThrottling: (allowed) => {
@@ -208,8 +253,90 @@ function emitProToEditor(event: DesktopProRenderEvent): void {
   }
 }
 
+function emitBlenderExportToEditor(event: DesktopBlenderExportEvent): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.webContents.send('desktop:blender-export-event', event)
+  } catch {
+    // The visible window can close between the liveness check and IPC send.
+  }
+}
+
 function anyExportReservedOrActive(): boolean {
-  return saveDialogOpen || jobs.size > 0 || proJobs.size > 0 || Boolean(longExports.active)
+  return saveDialogOpen
+    || jobs.size > 0
+    || proJobs.size > 0
+    || blenderExportJobs.size > 0
+    || Boolean(longExports.active)
+}
+
+function stopBlenderExportResources(
+  job: PreparedBlenderExportJob,
+  clearDockProgress = true,
+): void {
+  if (job.preparedTimer) {
+    clearTimeout(job.preparedTimer)
+    job.preparedTimer = null
+  }
+  if (job.cancelTimer) {
+    clearTimeout(job.cancelTimer)
+    job.cancelTimer = null
+  }
+  if (job.sleepBlockerId !== null) {
+    try {
+      if (powerSaveBlocker.isStarted(job.sleepBlockerId)) powerSaveBlocker.stop(job.sleepBlockerId)
+    } catch {
+      // Cleanup is best-effort after the isolated Blender child exits.
+    }
+  }
+  job.sleepBlockerId = null
+  if (clearDockProgress && mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1)
+}
+
+function rememberTerminalBlenderExportJob(
+  job: PreparedBlenderExportJob,
+  result: TerminalBlenderExportJob['result'],
+): void {
+  const previous = terminalBlenderExportJobs.get(job.id)
+  if (previous) clearTimeout(previous.expiryTimer)
+  const expiryTimer = setTimeout(
+    () => terminalBlenderExportJobs.delete(job.id),
+    TERMINAL_JOB_TTL_MS,
+  )
+  expiryTimer.unref()
+  terminalBlenderExportJobs.set(job.id, {
+    ownerWebContentsId: job.ownerWebContentsId,
+    result,
+    expiryTimer,
+  })
+}
+
+function takeBlenderExportJob(jobId: string): PreparedBlenderExportJob | null {
+  const job = blenderExportJobs.get(jobId)
+  if (!job) return null
+  blenderExportJobs.delete(jobId)
+  stopBlenderExportResources(job)
+  installApplicationMenu()
+  return job
+}
+
+function failBlenderExportJob(
+  jobId: string,
+  code: DesktopRenderErrorCode,
+  message: string,
+): void {
+  const job = takeBlenderExportJob(jobId)
+  if (!job) return
+  rememberTerminalBlenderExportJob(job, { state: 'error', error: { code, message } })
+  emitBlenderExportToEditor({ type: 'error', jobId, code, message })
+  showCompletionNotification('Rasterform Blender export failed', message)
+}
+
+function finishCancelledBlenderExportJob(jobId: string): void {
+  const job = takeBlenderExportJob(jobId)
+  if (!job) return
+  rememberTerminalBlenderExportJob(job, { state: 'cancelled' })
+  emitBlenderExportToEditor({ type: 'cancelled', jobId })
 }
 
 function stopProJobResources(job: PreparedProJob, clearDockProgress = true): void {
@@ -449,16 +576,19 @@ function createMainWindow(): BrowserWindow {
     const activePro = [...proJobs.values()].find((job) => (
       job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing'
     ))
+    const activeBlenderExport = [...blenderExportJobs.values()].find((job) => (
+      job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing'
+    ))
     const activeFinal = [...jobs.values()].find((job) => (
       job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing'
     ))
-    if (!activePro && !activeFinal) return
-    const label = activePro ? 'Cycles Pro' : 'Final'
+    if (!activePro && !activeBlenderExport && !activeFinal) return
+    const label = activePro ? 'Cycles Pro' : activeBlenderExport ? 'Blender project export' : 'Final'
     const choice = dialog.showMessageBoxSync(window, {
       type: 'warning',
       title: `${label} render in progress`,
       message: `Keep Rasterform open until ${label} finishes?`,
-      detail: activePro
+      detail: activePro || activeBlenderExport
         ? 'Closing now stops only Rasterform’s isolated background Blender process. Any other open Blender project is untouched.'
         : 'Closing now stops Rasterform’s isolated Final renderer. Your design is safe.',
       buttons: ['Keep Rendering', 'Stop Render and Close'],
@@ -471,6 +601,7 @@ function createMainWindow(): BrowserWindow {
       return
     }
     if (activePro) requestProCancellation(activePro)
+    else if (activeBlenderExport) requestBlenderExportCancellation(activeBlenderExport)
     else cancelActiveFromMenu()
   })
   window.on('closed', () => {
@@ -486,6 +617,11 @@ function createMainWindow(): BrowserWindow {
         requestProCancellation(job)
       }
     }
+    for (const job of [...blenderExportJobs.values()]) {
+      if (job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing') {
+        requestBlenderExportCancellation(job)
+      }
+    }
   })
   window.webContents.on('render-process-gone', () => {
     longExports.releaseOwner(ownerWebContentsId)
@@ -497,6 +633,11 @@ function createMainWindow(): BrowserWindow {
     for (const job of [...proJobs.values()]) {
       if (job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing') {
         requestProCancellation(job)
+      }
+    }
+    for (const job of [...blenderExportJobs.values()]) {
+      if (job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing') {
+        requestBlenderExportCancellation(job)
       }
     }
   })
@@ -579,13 +720,14 @@ async function runDesktopSmokeProbe(): Promise<void> {
   configureWindowSecurity(probe, `${SCHEME}://render/`)
   try {
     await probe.loadURL(RENDER_URL)
-    const [editorCapabilities, hdr, assetNames, cyclesScript] = await Promise.all([
+    const [editorCapabilities, hdr, assetNames, cyclesScript, blenderExportScript] = await Promise.all([
       editor.webContents.executeJavaScript(`(async () => {
         const bridge = window.rasterformDesktop;
         const result = {
           protocolVersion: bridge?.protocolVersion ?? null,
           longExportProtocolVersion: bridge?.longExportProtocolVersion ?? null,
           proRenderProtocolVersion: bridge?.proRenderProtocolVersion ?? null,
+          blenderExportProtocolVersion: bridge?.blenderExportProtocolVersion ?? null,
           longExportLifecycleAvailable: (
             typeof bridge?.beginLongExport === 'function'
             && typeof bridge?.endLongExport === 'function'
@@ -599,6 +741,12 @@ async function runDesktopSmokeProbe(): Promise<void> {
             && typeof bridge?.onProRenderEvent === 'function'
           ),
           proRendererProbeHandshake: false,
+          blenderExportBridgeAvailable: (
+            typeof bridge?.prepareBlenderExport === 'function'
+            && typeof bridge?.submitBlenderExport === 'function'
+            && typeof bridge?.cancelBlenderExport === 'function'
+            && typeof bridge?.onBlenderExportEvent === 'function'
+          ),
           localFontApiAvailable: typeof window.queryLocalFonts === 'function',
         };
         if (result.proRendererBridgeAvailable) {
@@ -627,6 +775,7 @@ async function runDesktopSmokeProbe(): Promise<void> {
       probe.webContents.executeJavaScript(`fetch('/hdri/studio_small_08_1k.hdr').then(async response => ({ ok: response.ok, bytes: (await response.arrayBuffer()).byteLength }))`),
       readdir(join(appRoot(), 'render', 'assets')),
       readFile(join(appRoot(), 'cycles', 'render.py'), 'utf8'),
+      readFile(join(appRoot(), 'cycles', 'export_blend.py'), 'utf8'),
     ])
     const bvhWorker = assetNames.find((name) => /^generateMeshBVH\.worker-.*\.js$/.test(name))
     if (!bvhWorker) throw new Error('The packaged BVH worker is missing.')
@@ -725,10 +874,12 @@ async function runDesktopSmokeProbe(): Promise<void> {
       protocolVersion: editorCapabilities.protocolVersion,
       longExportProtocolVersion: editorCapabilities.longExportProtocolVersion,
       proRenderProtocolVersion: editorCapabilities.proRenderProtocolVersion,
+      blenderExportProtocolVersion: editorCapabilities.blenderExportProtocolVersion,
       longExportLifecycleAvailable: editorCapabilities.longExportLifecycleAvailable === true,
       longExportLifecycleHandshake: editorCapabilities.longExportLifecycleHandshake === true,
       proRendererBridgeAvailable: editorCapabilities.proRendererBridgeAvailable === true,
       proRendererProbeHandshake: editorCapabilities.proRendererProbeHandshake === true,
+      blenderExportBridgeAvailable: editorCapabilities.blenderExportBridgeAvailable === true,
       localFontApiAvailable: editorCapabilities.localFontApiAvailable === true,
       editorPid: editor.webContents.getOSProcessId(),
       renderPid: probe.webContents.getOSProcessId(),
@@ -739,6 +890,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
       cyclesScriptBundled: cyclesScript.includes('emit("COMPLETE"')
         && cyclesScript.includes('OPEN_EXR_MULTILAYER')
         && cyclesScript.length > 10_000,
+      blenderExportScriptBundled: blenderExportScript.includes('emit("COMPLETE"')
+        && blenderExportScript.includes('quadriflow_remesh')
+        && blenderExportScript.length > 5_000,
       hiddenBlockedMilliseconds: Math.round(Number(blockedFor)),
       editorHeartbeatBeats: Number(beats),
       heartbeatAttempts,
@@ -750,6 +904,8 @@ async function runDesktopSmokeProbe(): Promise<void> {
       && result.proRenderProtocolVersion === DESKTOP_PRO_RENDER_PROTOCOL_VERSION
       && result.proRendererBridgeAvailable
       && result.proRendererProbeHandshake
+      && result.blenderExportProtocolVersion === DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION
+      && result.blenderExportBridgeAvailable
       && result.editorPid > 0
       && result.renderPid > 0
       && result.editorPid !== result.renderPid
@@ -758,6 +914,7 @@ async function runDesktopSmokeProbe(): Promise<void> {
       && result.hdrLoaded
       && result.bvhWorkerLoaded
       && result.cyclesScriptBundled
+      && result.blenderExportScriptBundled
       && result.hiddenBlockedMilliseconds >= 900
       && result.editorHeartbeatBeats >= DESKTOP_SMOKE_HEARTBEAT_REQUIRED_BEATS
     console.log(`RASTERFORM_DESKTOP_SMOKE ${JSON.stringify({ passed, ...result })}`)
@@ -846,6 +1003,25 @@ function exrDestinationForPng(pngPath: string): string {
   const extension = extname(pngPath)
   if (extension.toLowerCase() !== '.png') throw new Error('Cycles Pro requires a PNG destination.')
   return pngPath.slice(0, -extension.length) + '.exr'
+}
+
+function sanitizeBlendFileName(value: unknown): string {
+  const source = typeof value === 'string' ? value : 'rasterform.blend'
+  const withoutPath = basename(source.replaceAll('\\', '/'))
+  const cleaned = withoutPath
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f/:]/g, '-')
+    .replace(/^\.+/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const fallback = cleaned || 'rasterform'
+  const extension = extname(fallback).toLowerCase() === '.blend' ? '.blend' : ''
+  const stem = extension ? fallback.slice(0, -extension.length) : fallback
+  return `${stem.slice(0, 174).replace(/[. ]+$/g, '') || 'rasterform'}.blend`
+}
+
+function ensureBlendPath(path: string): string {
+  return extname(path).toLowerCase() === '.blend' ? path : `${path}.blend`
 }
 
 async function fileSystemPathExists(path: string): Promise<boolean> {
@@ -948,6 +1124,65 @@ async function prepareProSave(event: IpcMainInvokeEvent, suggestedName: unknown)
   }
 }
 
+async function prepareBlenderExport(
+  event: IpcMainInvokeEvent,
+  suggestedName: unknown,
+) {
+  if (!isTrustedAppSender(event)) throw new Error('Untrusted Blender project export request.')
+  if (anyExportReservedOrActive()) throw new Error('Another export is already active.')
+  const fileName = sanitizeBlendFileName(suggestedName)
+  const defaultPath = join(lastExportDirectory ?? app.getPath('downloads'), fileName)
+  saveDialogOpen = true
+  try {
+    let result: Awaited<ReturnType<typeof dialog.showSaveDialog>>
+    try {
+      result = await dialog.showSaveDialog(mainWindow!, {
+        title: 'Save Blender Project',
+        buttonLabel: 'Prepare and Save',
+        defaultPath,
+        filters: [{ name: 'Blender project', extensions: ['blend'] }],
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+        message: 'Rasterform will prepare the model in a separate background Blender process.',
+      })
+    } catch {
+      throw new Error('The macOS Save dialog could not be opened.')
+    }
+    if (result.canceled || !result.filePath) return { cancelled: true as const }
+    const destination = ensureBlendPath(result.filePath)
+    const job: PreparedBlenderExportJob = {
+      id: randomUUID(),
+      ownerWebContentsId: event.sender.id,
+      destination,
+      snapshot: null,
+      state: 'prepared',
+      process: null,
+      privateJob: null,
+      outputState: null,
+      sleepBlockerId: null,
+      cancelTimer: null,
+      preparedTimer: null,
+      runPromise: null,
+      stderrTail: '',
+    }
+    job.preparedTimer = setTimeout(() => {
+      const current = blenderExportJobs.get(job.id)
+      if (current === job && current.state === 'prepared') {
+        failBlenderExportJob(
+          job.id,
+          'request-expired',
+          'The Blender project save reservation expired before export started. Try again.',
+        )
+      }
+    }, PREPARED_JOB_TTL_MS)
+    job.preparedTimer.unref()
+    blenderExportJobs.set(job.id, job)
+    installApplicationMenu()
+    return { cancelled: false as const, jobId: job.id }
+  } finally {
+    saveDialogOpen = false
+  }
+}
+
 function rejectedSubmission(
   code: DesktopRenderErrorCode,
   message: string,
@@ -969,7 +1204,7 @@ function beginLongExport(
   if (!isTrustedAppSender(event) || !isDesktopLongExportStartRequest(request)) {
     return rejectedLongExport('invalid-request', 'The long export lifecycle request was invalid.')
   }
-  if (saveDialogOpen || jobs.size > 0 || proJobs.size > 0) {
+  if (saveDialogOpen || jobs.size > 0 || proJobs.size > 0 || blenderExportJobs.size > 0) {
     return rejectedLongExport('busy', 'Another export is already active.')
   }
   return longExports.begin(event.sender.id, request, randomUUID)
@@ -1273,6 +1508,338 @@ async function runCyclesProJob(job: PreparedProJob, blenderPath: string): Promis
   }
 }
 
+function appendBlenderExportStderr(job: PreparedBlenderExportJob, chunk: Buffer): void {
+  job.stderrTail = `${job.stderrTail}${chunk.toString('utf8')}`
+  while (Buffer.byteLength(job.stderrTail) > PRO_STDERR_TAIL_BYTES) {
+    job.stderrTail = job.stderrTail.slice(Math.max(1, Math.floor(job.stderrTail.length / 4)))
+  }
+}
+
+function blenderExportJobIsCancelling(job: PreparedBlenderExportJob): boolean {
+  return job.state === 'cancelling'
+}
+
+function blenderExportDockProgress(phase: DesktopBlenderExportEvent & { type: 'progress' }): number {
+  if (phase.phase === 'preparing') return 0.08
+  if (phase.phase === 'retopologizing') return 0.35
+  if (phase.phase === 'unwrapping') return 0.72
+  return 0.94
+}
+
+function terminateBlenderExportChild(
+  job: PreparedBlenderExportJob,
+  child: ReturnType<typeof spawn>,
+): void {
+  try {
+    child.kill('SIGTERM')
+  } catch {
+    return
+  }
+  if (job.cancelTimer) return
+  job.cancelTimer = setTimeout(() => {
+    if (blenderExportJobs.get(job.id) !== job || job.process !== child) return
+    try {
+      // Address only the ChildProcess created for this export. Never enumerate
+      // or terminate any other Blender process or the user's open projects.
+      child.kill('SIGKILL')
+    } catch {
+      // The child may have exited between the identity check and the signal.
+    }
+  }, BLENDER_EXPORT_CANCEL_GRACE_MS)
+  job.cancelTimer.unref()
+}
+
+async function runBlenderExportJob(
+  job: PreparedBlenderExportJob,
+  blenderPath: string,
+): Promise<void> {
+  let privateJob: BlenderExportJob | null = null
+  try {
+    if (!job.snapshot) throw new Error('The Blender project snapshot is missing.')
+    privateJob = await createBlenderExportJob(job.snapshot, {
+      scriptPath: join(appRoot(), 'cycles', 'export_blend.py'),
+      tempRoot: app.getPath('temp'),
+    })
+    job.privateJob = privateJob
+    job.outputState = createBlenderExportOutputState(privateJob)
+    if (blenderExportJobs.get(job.id) !== job || job.state === 'cancelling') {
+      if (blenderExportJobs.get(job.id) === job) finishCancelledBlenderExportJob(job.id)
+      return
+    }
+
+    const invocation = buildBlenderExportInvocation(privateJob, blenderPath)
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: invocation.cwd,
+      env: invocation.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      windowsHide: true,
+    })
+    job.process = child
+    let stdoutRemainder = ''
+    let protocolFailure: Error | null = null
+    let scriptFailure: Error | null = null
+
+    const acceptLine = (line: string) => {
+      if (protocolFailure) return
+      try {
+        const parsed = parseBlenderExportOutput(line, job.outputState!)
+        if (!parsed) return
+        if (parsed.type === 'progress') {
+          const event: DesktopBlenderExportEvent & { type: 'progress' } = {
+            type: 'progress',
+            jobId: job.id,
+            phase: parsed.phase,
+          }
+          mainWindow?.setProgressBar(blenderExportDockProgress(event))
+          emitBlenderExportToEditor(event)
+        } else if (parsed.type === 'error') {
+          scriptFailure = new Error('Blender reported that project preparation could not finish.')
+        }
+      } catch (error) {
+        protocolFailure = error instanceof Error ? error : new Error('Invalid Blender export output.')
+        terminateBlenderExportChild(job, child)
+      }
+    }
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutRemainder += chunk.toString('utf8')
+      if (Buffer.byteLength(stdoutRemainder) > 1024 * 1024) {
+        protocolFailure = new Error('Blender export produced an unexpectedly long status line.')
+        terminateBlenderExportChild(job, child)
+        return
+      }
+      const lines = stdoutRemainder.split(/\r?\n/)
+      stdoutRemainder = lines.pop() ?? ''
+      for (const line of lines) acceptLine(line)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => appendBlenderExportStderr(job, chunk))
+
+    const outcome = await new Promise<{
+      code: number | null
+      signal: NodeJS.Signals | null
+      spawnError: Error | null
+    }>((resolvePromise) => {
+      let settled = false
+      const finish = (
+        code: number | null,
+        signal: NodeJS.Signals | null,
+        spawnError: Error | null,
+      ) => {
+        if (settled) return
+        settled = true
+        if (stdoutRemainder) acceptLine(stdoutRemainder)
+        resolvePromise({ code, signal, spawnError })
+      }
+      child.once('error', (error) => finish(null, null, error))
+      child.once('close', (code, signal) => finish(code, signal, null))
+    })
+    job.process = null
+    if (blenderExportJobs.get(job.id) !== job) return
+    if (blenderExportJobIsCancelling(job)) {
+      finishCancelledBlenderExportJob(job.id)
+      return
+    }
+    if (outcome.spawnError || outcome.code !== 0 || outcome.signal) {
+      throw new Error('The isolated background Blender process stopped before saving the project.')
+    }
+    if (protocolFailure) throw protocolFailure
+    if (scriptFailure || job.outputState.error) {
+      throw scriptFailure ?? new Error('Blender project preparation failed.')
+    }
+    const completion = job.outputState.completion
+    if (!completion) throw new Error('Blender export omitted completion metadata.')
+
+    job.state = 'writing'
+    stopBlenderExportResources(job, false)
+    mainWindow?.setProgressBar(1)
+    const committed = await commitBlenderExportAtomically(privateJob, job.destination, completion)
+    if (blenderExportJobs.get(job.id) !== job) return
+    const result: DesktopSavedBlenderExportResult = {
+      fileName: basename(committed),
+      topology: completion.topology,
+      sourceVertices: completion.sourceVertices,
+      sourceFaces: completion.sourceFaces,
+      outputVertices: completion.outputVertices,
+      outputFaces: completion.outputFaces,
+      outputTriangleCount: completion.outputTriangleCount,
+      quads: completion.quads,
+      triangles: completion.triangles,
+      ngons: completion.ngons,
+      uvLayerName: completion.uvLayerName,
+      uvLoops: completion.uvLoops,
+      colorAttributeName: completion.colorAttributeName,
+      blenderVersion: completion.blenderVersion,
+      elapsedSeconds: completion.elapsedSeconds,
+    }
+    rememberTerminalBlenderExportJob(job, { state: 'saved', result })
+    blenderExportJobs.delete(job.id)
+    stopBlenderExportResources(job)
+    lastExportPath = committed
+    lastExportDirectory = dirname(committed)
+    try {
+      app.addRecentDocument(committed)
+    } catch {
+      // Recent Documents is optional; the validated project remains saved.
+    }
+    void savePreferences()
+    emitBlenderExportToEditor({ type: 'saved', jobId: job.id, result })
+    installApplicationMenu()
+    const reduction = result.sourceFaces > 0
+      ? Math.max(0, Math.round((1 - result.outputTriangleCount / result.sourceFaces) * 100))
+      : 0
+    showCompletionNotification(
+      'Rasterform Blender project saved',
+      result.topology === 'exact'
+        ? `${result.outputFaces.toLocaleString()} exact faces · ${result.uvLayerName}`
+        : `${result.outputFaces.toLocaleString()} editable polygons · ${result.outputTriangleCount.toLocaleString()} render triangles${reduction > 0 ? ` · ${reduction}% fewer` : ''}`,
+    )
+  } catch (error) {
+    if (job.process) {
+      try {
+        job.process.kill('SIGTERM')
+      } catch {
+        // Only this export's exact child is addressed; it may already be gone.
+      }
+      job.process = null
+    }
+    if (blenderExportJobs.get(job.id) === job) {
+      if (job.state === 'cancelling') finishCancelledBlenderExportJob(job.id)
+      else {
+        if (job.stderrTail) console.error(`RASTERFORM_BLENDER_EXPORT_STDERR\n${job.stderrTail}`)
+        console.error('RASTERFORM_BLENDER_EXPORT_ERROR', error)
+        failBlenderExportJob(
+          job.id,
+          'render-failed',
+          'The isolated Blender project exporter could not finish. Your Rasterform design and any open Blender project are safe.',
+        )
+      }
+    }
+  } finally {
+    job.process = null
+    if (privateJob) {
+      await cleanupBlenderExportJob(privateJob).catch((error) => {
+        console.error('RASTERFORM_BLENDER_EXPORT_CLEANUP_ERROR', error)
+      })
+    }
+    job.privateJob = null
+    job.outputState = null
+  }
+}
+
+function rejectedBlenderExportSubmission(
+  code: DesktopRenderErrorCode,
+  message: string,
+): Extract<DesktopBlenderExportSubmission, { accepted: false }> {
+  return { accepted: false, error: { code, message } }
+}
+
+async function submitBlenderExport(
+  event: IpcMainInvokeEvent,
+  jobId: unknown,
+  snapshot: unknown,
+): Promise<DesktopBlenderExportSubmission> {
+  const unavailable = rejectedBlenderExportSubmission(
+    'request-expired',
+    'The Blender project save reservation is no longer available. Choose the destination again.',
+  )
+  if (!isTrustedAppSender(event) || typeof jobId !== 'string') return unavailable
+  const job = blenderExportJobs.get(jobId)
+  if (!job || job.ownerWebContentsId !== event.sender.id || job.state !== 'prepared') {
+    const terminal = terminalBlenderExportJobs.get(jobId)
+    if (terminal?.ownerWebContentsId === event.sender.id && terminal.result.state === 'error') {
+      return { accepted: false, error: terminal.result.error }
+    }
+    return unavailable
+  }
+  try {
+    assertDesktopBlenderExportSnapshot(snapshot)
+  } catch {
+    const failure = rejectedBlenderExportSubmission(
+      'render-failed',
+      'The Blender project export request was invalid.',
+    )
+    failBlenderExportJob(job.id, failure.error.code, failure.error.message)
+    return failure
+  }
+
+  let probe = lastProProbe
+  if (!probe?.available || !probe.executablePath) probe = await inspectProRenderer()
+  if (blenderExportJobs.get(job.id) !== job || job.state !== 'prepared') return unavailable
+  if (!probe.available || !probe.executablePath) {
+    const failure = rejectedBlenderExportSubmission('render-failed', probe.message)
+    failBlenderExportJob(job.id, failure.error.code, failure.error.message)
+    return failure
+  }
+
+  job.snapshot = snapshot
+  job.state = 'rendering'
+  if (job.preparedTimer) {
+    clearTimeout(job.preparedTimer)
+    job.preparedTimer = null
+  }
+  try {
+    job.sleepBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    if (!powerSaveBlocker.isStarted(job.sleepBlockerId)) throw new Error('Sleep blocker did not start.')
+  } catch {
+    const failure = rejectedBlenderExportSubmission(
+      'render-failed',
+      'Rasterform could not protect Blender project export from system sleep. Your design is safe.',
+    )
+    failBlenderExportJob(job.id, failure.error.code, failure.error.message)
+    return failure
+  }
+  mainWindow?.setProgressBar(0)
+  const run = runBlenderExportJob(job, probe.executablePath)
+  job.runPromise = run
+  pendingBlenderExportRuns.add(run)
+  void run.finally(() => {
+    pendingBlenderExportRuns.delete(run)
+    job.runPromise = null
+  })
+  installApplicationMenu()
+  return { accepted: true }
+}
+
+function requestBlenderExportCancellation(
+  job: PreparedBlenderExportJob,
+): DesktopBlenderExportCancelResult {
+  const action = finalRenderCancellationAction(job.state)
+  if (action === 'cancel-now') {
+    finishCancelledBlenderExportJob(job.id)
+    return { state: 'cancelled' }
+  }
+  if (action === 'finish-save') return { state: 'saving' }
+  if (action === 'await-cancel') return { state: 'cancelling' }
+  job.state = 'cancelling'
+  if (job.process) terminateBlenderExportChild(job, job.process)
+  else {
+    finishCancelledBlenderExportJob(job.id)
+    return { state: 'cancelled' }
+  }
+  installApplicationMenu()
+  return { state: 'cancelling' }
+}
+
+function requestBlenderExportCancel(
+  event: IpcMainInvokeEvent,
+  jobId: unknown,
+): DesktopBlenderExportCancelResult {
+  const unavailable: DesktopBlenderExportCancelResult = {
+    state: 'error',
+    error: {
+      code: 'request-expired',
+      message: 'The Blender project export is no longer active. Start another export to continue.',
+    },
+  }
+  if (!isTrustedAppSender(event) || typeof jobId !== 'string') return unavailable
+  const job = blenderExportJobs.get(jobId)
+  if (!job || job.ownerWebContentsId !== event.sender.id) {
+    const terminal = terminalBlenderExportJobs.get(jobId)
+    return terminal?.ownerWebContentsId === event.sender.id ? terminal.result : unavailable
+  }
+  return requestBlenderExportCancellation(job)
+}
+
 async function submitProRender(
   event: IpcMainInvokeEvent,
   jobId: unknown,
@@ -1564,6 +2131,13 @@ function cancelActiveFromMenu(): void {
     requestProCancellation(proJob)
     return
   }
+  const blenderJob = [...blenderExportJobs.values()].find(
+    (candidate) => candidate.state === 'rendering',
+  )
+  if (blenderJob) {
+    requestBlenderExportCancellation(blenderJob)
+    return
+  }
   const job = [...jobs.values()].find((candidate) => candidate.state === 'rendering')
   if (!job) return
   job.state = 'cancelling'
@@ -1580,6 +2154,9 @@ function cancelActiveFromMenu(): void {
 function installApplicationMenu(): void {
   const active = [...jobs.values()].some((job) => job.state === 'rendering' || job.state === 'cancelling')
     || [...proJobs.values()].some((job) => job.state === 'rendering' || job.state === 'cancelling')
+    || [...blenderExportJobs.values()].some(
+      (job) => job.state === 'rendering' || job.state === 'cancelling',
+    )
   const template: MenuItemConstructorOptions[] = [
     {
       label: app.name,
@@ -1604,7 +2181,7 @@ function installApplicationMenu(): void {
           click: () => { if (lastExportPath) shell.showItemInFolder(lastExportPath) },
         },
         {
-          label: 'Cancel Active Render',
+          label: 'Cancel Active Export',
           accelerator: 'CommandOrControl+.',
           enabled: active,
           click: cancelActiveFromMenu,
@@ -1677,6 +2254,9 @@ function installIpc(): void {
   ipcMain.handle('desktop:prepare-pro-save', prepareProSave)
   ipcMain.handle('desktop:submit-pro-render', submitProRender)
   ipcMain.handle('desktop:cancel-pro-render', requestProCancel)
+  ipcMain.handle('desktop:prepare-blender-export', prepareBlenderExport)
+  ipcMain.handle('desktop:submit-blender-export', submitBlenderExport)
+  ipcMain.handle('desktop:cancel-blender-export', requestBlenderExportCancel)
   ipcMain.on('desktop:render-progress', handleRenderProgress)
   ipcMain.on('desktop:render-cancelled', handleRenderCancelled)
   ipcMain.on('desktop:render-failed', handleRenderFailed)
@@ -1762,13 +2342,24 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('before-quit', (event) => {
-    if (quitting || (pendingWrites.size === 0 && pendingProRuns.size === 0)) return
+    if (quitting || (
+      pendingWrites.size === 0
+      && pendingProRuns.size === 0
+      && pendingBlenderExportRuns.size === 0
+    )) return
     event.preventDefault()
     quitting = true
     for (const job of [...proJobs.values()]) {
       if (job.state !== 'writing') requestProCancellation(job)
     }
-    void Promise.allSettled([...pendingWrites, ...pendingProRuns]).then(() => app.quit())
+    for (const job of [...blenderExportJobs.values()]) {
+      if (job.state !== 'writing') requestBlenderExportCancellation(job)
+    }
+    void Promise.allSettled([
+      ...pendingWrites,
+      ...pendingProRuns,
+      ...pendingBlenderExportRuns,
+    ]).then(() => app.quit())
   })
 
   app.whenReady().then(async () => {
@@ -1815,3 +2406,4 @@ if (!app.requestSingleInstanceLock()) {
 
 export const desktopProtocolVersion = DESKTOP_PROTOCOL_VERSION
 export const desktopProRenderProtocolVersion = DESKTOP_PRO_RENDER_PROTOCOL_VERSION
+export const desktopBlenderExportProtocolVersion = DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION

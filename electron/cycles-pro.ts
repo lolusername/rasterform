@@ -221,7 +221,7 @@ export async function findBlenderExecutable(
   return null
 }
 
-function isolatedEnvironment(directories: {
+export interface BlenderIsolationDirectories {
   config: string
   scripts: string
   dataFiles: string
@@ -229,7 +229,11 @@ function isolatedEnvironment(directories: {
   cache: string
   home: string
   temp: string
-}): NodeJS.ProcessEnv {
+}
+
+export function isolatedBlenderEnvironment(
+  directories: BlenderIsolationDirectories,
+): NodeJS.ProcessEnv {
   return {
     PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
     LANG: 'en_US.UTF-8',
@@ -248,15 +252,9 @@ function isolatedEnvironment(directories: {
   }
 }
 
-async function createIsolationDirectories(root: string): Promise<{
-  config: string
-  scripts: string
-  dataFiles: string
-  extensions: string
-  cache: string
-  home: string
-  temp: string
-}> {
+export async function createBlenderIsolationDirectories(
+  root: string,
+): Promise<BlenderIsolationDirectories> {
   const directories = {
     config: join(root, 'private', 'config'),
     scripts: join(root, 'private', 'scripts'),
@@ -314,7 +312,7 @@ export async function probeBlender(
   }
 
   const probeRoot = await mkdtemp(join(tmpdir(), PROBE_PREFIX))
-  const directories = await createIsolationDirectories(probeRoot)
+  const directories = await createBlenderIsolationDirectories(probeRoot)
   const timeoutMs = Math.max(1_000, Math.min(120_000, options.timeoutMs ?? 30_000))
   try {
     const result = await new Promise<{
@@ -334,7 +332,7 @@ export async function probeBlender(
         `exec(${JSON.stringify(BLENDER_PROBE_SCRIPT)})`,
       ], {
         cwd: probeRoot,
-        env: isolatedEnvironment(directories),
+        env: isolatedBlenderEnvironment(directories),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
         windowsHide: true,
@@ -475,7 +473,7 @@ export async function createCyclesProJob(
       mkdir(environmentDirectory, { mode: 0o700 }),
       mkdir(outputDirectory, { mode: 0o700 }),
     ])
-    const isolation = await createIsolationDirectories(root)
+    const isolation = await createBlenderIsolationDirectories(root)
     const positionsPath = join(meshDirectory, 'positions.f32')
     const indicesPath = join(meshDirectory, 'indices.u32')
     const colorsPath = join(meshDirectory, 'colors.f32')
@@ -572,7 +570,7 @@ export function buildBlenderInvocation(job: CyclesProJob, blenderPath: string): 
       job.manifestPath,
     ],
     cwd: job.root,
-    env: isolatedEnvironment({
+    env: isolatedBlenderEnvironment({
       config: job.configDirectory,
       scripts: job.scriptsDirectory,
       dataFiles: job.dataFilesDirectory,

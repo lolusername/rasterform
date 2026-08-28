@@ -11,10 +11,15 @@ import {
   DESKTOP_PRO_RENDER_PROTOCOL_VERSION,
   type DesktopProRenderEvent,
   type DesktopProRenderSnapshot,
-  type RasterformDesktopProBridge,
 } from '../src/desktop/pro-contracts'
+import {
+  DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,
+  type DesktopBlenderExportEvent,
+  type DesktopBlenderExportSnapshot,
+  type RasterformDesktopBlenderExportBridge,
+} from '../src/desktop/blender-export-contracts'
 
-const bridge: RasterformDesktopProBridge = Object.freeze({
+const bridge: RasterformDesktopBlenderExportBridge = Object.freeze({
   protocolVersion: DESKTOP_PROTOCOL_VERSION,
   longExportProtocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
   prepareFinalSave: (suggestedName: string) => ipcRenderer.invoke('desktop:prepare-final-save', suggestedName),
@@ -46,6 +51,23 @@ const bridge: RasterformDesktopProBridge = Object.freeze({
     const wrapped = (_event: Electron.IpcRendererEvent, payload: DesktopProRenderEvent) => listener(payload)
     ipcRenderer.on('desktop:pro-render-event', wrapped)
     return () => ipcRenderer.removeListener('desktop:pro-render-event', wrapped)
+  },
+  blenderExportProtocolVersion: DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,
+  prepareBlenderExport: (suggestedName: string) => (
+    ipcRenderer.invoke('desktop:prepare-blender-export', suggestedName)
+  ),
+  submitBlenderExport: (jobId: string, snapshot: DesktopBlenderExportSnapshot) => (
+    ipcRenderer.invoke('desktop:submit-blender-export', jobId, snapshot)
+  ),
+  cancelBlenderExport: (jobId: string) => (
+    ipcRenderer.invoke('desktop:cancel-blender-export', jobId)
+  ),
+  onBlenderExportEvent: (listener: (event: DesktopBlenderExportEvent) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: DesktopBlenderExportEvent) => (
+      listener(payload)
+    )
+    ipcRenderer.on('desktop:blender-export-event', wrapped)
+    return () => ipcRenderer.removeListener('desktop:blender-export-event', wrapped)
   },
 })
 

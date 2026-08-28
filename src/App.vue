@@ -47,12 +47,23 @@ import {
   type DesktopProRendererAvailability,
   type DesktopProRenderSettings,
 } from './desktop/pro-contracts'
+import {
+  DesktopBlenderExportError,
+  desktopBlenderExporterAvailable,
+  exportBlenderProjectInDesktop,
+} from './desktop/blender-export-client'
+import type {
+  DesktopBlenderExportPhase,
+  DesktopBlenderTopology,
+} from './desktop/blender-export-contracts'
 import { createDefaultAppearanceSettings } from './lib/three'
 import { calculateViewportDimensions, type ViewportPngResult } from './lib/viewport-export'
 import {
   DEFAULT_LIVING_FORM_SETTINGS,
   animateLivingFormMesh,
+  createLivingFormEngine,
   normalizeLivingFormPhase,
+  type LivingFormEngine,
 } from './lib/living-form'
 import {
   LIVING_FORM_FRAME_RATES,
@@ -142,6 +153,13 @@ const backgroundMenu = ref<HTMLDivElement | null>(null)
 const backgroundTrigger = ref<HTMLButtonElement | null>(null)
 const status = ref('Demo image · 360 × 270')
 const exporting = ref(false)
+const exportingBlenderProject = ref(false)
+const blenderExportDetails = ref<HTMLDetailsElement | null>(null)
+const blenderExportTopology = ref<DesktopBlenderTopology>('balanced')
+const blenderExportPhase = ref<DesktopBlenderExportPhase>('preparing')
+const blenderExportError = ref('')
+const blenderExportNotice = ref('')
+let blenderExportController: AbortController | null = null
 const dragging = ref(false)
 const workspace = ref<WorkspaceMode>('image')
 const imageColorMode = ref<ColorMode>('original')
@@ -179,6 +197,7 @@ let livingLoopWakeLock: WakeLockSentinel | null = null
 const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
 const desktopFinalAvailable = window.rasterformDesktop?.protocolVersion === 1
 const desktopProBridgeAvailable = desktopProRendererAvailable()
+const desktopBlenderBridgeAvailable = desktopBlenderExporterAvailable()
 const desktopProRenderer = ref<DesktopProRendererAvailability | null>(null)
 const desktopProProbePending = ref(desktopProBridgeAvailable)
 const desktopProProbeError = ref('')
@@ -507,6 +526,43 @@ const desktopProStatus = computed(() => {
   return desktopProRenderer.value?.message
     || desktopProProbeError.value
     || 'Cycles Pro is not available.'
+})
+const blenderTopologyOptions: ReadonlyArray<{
+  value: DesktopBlenderTopology
+  label: string
+  note: string
+}> = [
+  { value: 'exact', label: 'Exact', note: 'No geometry changes' },
+  { value: 'balanced', label: 'Balanced', note: 'Editable quads · recommended' },
+  { value: 'lightweight', label: 'Lightweight', note: 'Lowest working mesh' },
+]
+const activeBlenderTopology = computed(() => (
+  blenderTopologyOptions.find((option) => option.value === blenderExportTopology.value)!
+))
+const blenderExportProgressLabel = computed(() => {
+  if (blenderExportPhase.value === 'preparing') return 'Preparing an isolated Blender project…'
+  if (blenderExportPhase.value === 'retopologizing') return 'Rebuilding editable topology in Blender…'
+  if (blenderExportPhase.value === 'unwrapping') return 'Creating a padded UV layout…'
+  return 'Compressing and saving the Blender project…'
+})
+const blenderExportHelp = computed(() => {
+  if (!desktopBlenderBridgeAvailable) {
+    return 'Blender-ready retopology requires Rasterform desktop and Blender 5.2 or newer. Exact GLB remains available in the browser.'
+  }
+  if (!desktopProReady.value) return desktopProStatus.value
+  if (colorMode.value === 'wireframe') {
+    return 'Choose Original, Height, or Clay before preparing an editable Blender surface.'
+  }
+  const method = workspace.value === 'image'
+    ? 'Regular image reliefs are rebuilt as an efficient quad grid.'
+    : 'Irregular text geometry is rebuilt with sharp borders, open boundaries, and color attributes protected.'
+  if (blenderExportTopology.value === 'exact') {
+    return 'Saves the current source mesh and material in a clean one-object .blend without changing geometry. The visible Living Form phase is baked in.'
+  }
+  const density = blenderExportTopology.value === 'balanced'
+    ? 'Balanced lowers the face count while favoring shape detail.'
+    : 'Lightweight uses the lowest practical working mesh.'
+  return `${method} ${density} A new padded UV map and angle-aware smooth shading are included. Rasterform uses a separate background Blender process and never opens, saves, or closes your current Blender project.`
 })
 const displayLivingLoopRequest = computed<LivingLoopExportRequestSnapshot>(() =>
   activeLivingLoopRequest.value ?? {
@@ -1000,6 +1056,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('focusin', handleDocumentFocusIn)
   window.cancelAnimationFrame(livingAnimationFrame)
   livingLoopController?.abort()
+  blenderExportController?.abort()
   void releaseLivingLoopWakeLock()
   window.clearTimeout(textBuildTimer)
   cleanupRegisteredFont(activeFontRegistration)
@@ -1017,8 +1074,14 @@ watch(viewportBackground, (background) => {
   }
 })
 
-watch(exportingImage, (isExporting) => {
+watch([exportingImage, exportingBlenderProject], ([isExportingImage, isExportingBlender]) => {
+  const isExporting = isExportingImage || isExportingBlender
   if (isExporting) closeBackgroundMenu()
+  if (isExportingBlender) {
+    void nextTick(() => {
+      if (blenderExportDetails.value) blenderExportDetails.value.open = true
+    })
+  }
 })
 
 watch([() => selectedFont.value.cssFamily, textSettings], rebuildTextMesh, { deep: true })
@@ -1209,6 +1272,32 @@ function currentMeshSnapshot(): MeshData | null {
     : mesh.value
 }
 
+const blenderLivingFormEngines = new WeakMap<MeshData, LivingFormEngine>()
+
+function currentBlenderMeshSnapshot(): { mesh: MeshData; owned: boolean } | null {
+  const source = mesh.value
+  if (!source) return null
+  if (!livingForm.value.enabled) return { mesh: source, owned: false }
+  let engine = blenderLivingFormEngines.get(source)
+  if (!engine) {
+    engine = createLivingFormEngine(source)
+    blenderLivingFormEngines.set(source, engine)
+  }
+  // The engine is cached per immutable source mesh. These arrays are created
+  // specifically for this export, so the client can hand them to IPC without
+  // cloning the full animated mesh a second time.
+  return {
+    mesh: {
+      ...source,
+      positions: engine.samplePositions(livingPhase.value, livingForm.value),
+      indices: source.indices.slice(),
+      colors: source.colors.slice(),
+      uvs: source.uvs.slice(),
+    },
+    owned: true,
+  }
+}
+
 async function downloadGlb() {
   const exportMesh = currentMeshSnapshot()
   if (!exportMesh) return
@@ -1222,6 +1311,82 @@ async function downloadGlb() {
   } finally {
     exporting.value = false
   }
+}
+
+function friendlyBlenderExportError(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'AbortError') return ''
+  if (error instanceof DesktopBlenderExportError) {
+    if (error.code === 'save-failed') {
+      return 'macOS could not save the Blender project. Choose a writable location and try again; your design is safe.'
+    }
+    if (error.code === 'process-gone') {
+      return 'The isolated Blender exporter stopped unexpectedly. Your Rasterform design and any open Blender project are safe.'
+    }
+    if (error.code === 'request-expired') {
+      return 'The Blender project save reservation expired before preparation started. Try the export again.'
+    }
+    return error.message
+  }
+  return error instanceof Error ? error.message : 'Blender project export failed.'
+}
+
+async function downloadBlenderProject() {
+  if (exportingBlenderProject.value) {
+    blenderExportController?.abort()
+    blenderExportNotice.value = 'Cancelling Blender project export…'
+    return
+  }
+  const sourceMesh = mesh.value
+  if (!sourceMesh || colorMode.value === 'wireframe' || !desktopProReady.value) return
+  const controller = new AbortController()
+  blenderExportController = controller
+  exportingBlenderProject.value = true
+  blenderExportPhase.value = 'preparing'
+  blenderExportError.value = ''
+  blenderExportNotice.value = ''
+  status.value = `Preparing ${activeBlenderTopology.value.label.toLowerCase()} Blender project…`
+  try {
+    const result = await exportBlenderProjectInDesktop({
+      mesh: sourceMesh,
+      prepareMesh: () => {
+        const prepared = currentBlenderMeshSnapshot()
+        if (!prepared) throw new Error('The model is no longer available.')
+        return { mesh: prepared.mesh, ownedMeshSnapshot: prepared.owned }
+      },
+      colorMode: colorMode.value,
+      appearance: appearance.value,
+      topology: blenderExportTopology.value,
+      suggestedName: `rasterform-${blenderExportTopology.value}.blend`,
+      signal: controller.signal,
+      onProgress: (phase) => {
+        blenderExportPhase.value = phase
+      },
+    })
+    const reduction = result.sourceFaces > 0
+      ? Math.max(0, Math.round((1 - result.outputTriangleCount / result.sourceFaces) * 100))
+      : 0
+    blenderExportNotice.value = result.topology === 'exact'
+      ? `Saved ${result.fileName} · exact ${result.outputFaces.toLocaleString()}-face model · ${result.uvLayerName}`
+      : `Saved ${result.fileName} · ${result.outputFaces.toLocaleString()} editable polygons · ${result.outputTriangleCount.toLocaleString()} render triangles${reduction > 0 ? ` (${reduction}% fewer)` : ''} · ${result.quads.toLocaleString()} quads · ${result.uvLayerName}`
+    status.value = `Blender project saved · ${result.fileName}`
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      blenderExportNotice.value = 'Blender project export cancelled. No destination file was changed.'
+      status.value = 'Blender project export cancelled'
+    } else {
+      blenderExportError.value = friendlyBlenderExportError(error)
+      status.value = 'Blender project export failed'
+    }
+  } finally {
+    if (blenderExportController === controller) blenderExportController = null
+    exportingBlenderProject.value = false
+  }
+}
+
+function keepBlenderExportAccordionOpen(event: Event) {
+  if (!exportingBlenderProject.value) return
+  const details = event.currentTarget as HTMLDetailsElement
+  if (!details.open) details.open = true
 }
 
 function downloadStl() {
@@ -1557,7 +1722,7 @@ async function downloadLivingFormLoop() {
           role="tab"
           :aria-selected="workspace === 'image'"
           :tabindex="workspace === 'image' ? 0 : -1"
-          :disabled="exportingImage"
+          :disabled="exportingImage || exportingBlenderProject"
           aria-controls="workspace-panel"
           @click="switchWorkspace('image')"
         >Image</button>
@@ -1567,7 +1732,7 @@ async function downloadLivingFormLoop() {
           role="tab"
           :aria-selected="workspace === 'text'"
           :tabindex="workspace === 'text' ? 0 : -1"
-          :disabled="exportingImage"
+          :disabled="exportingImage || exportingBlenderProject"
           aria-controls="workspace-panel"
           @click="switchWorkspace('text')"
         >Text</button>
@@ -1578,7 +1743,7 @@ async function downloadLivingFormLoop() {
         class="top-export"
         :aria-expanded="imageExportOpen"
         aria-controls="export-inspector"
-        :disabled="exportingImage"
+        :disabled="exportingImage || exportingBlenderProject"
         @click="imageExportOpen = !imageExportOpen"
       >{{ imageExportOpen ? 'Back to edit' : 'Export' }}</button>
     </header>
@@ -1875,8 +2040,8 @@ async function downloadLivingFormLoop() {
           </details>
         </template>
 
-        <section v-else id="export-inspector" class="export-inspector" :aria-busy="exportingImage">
-          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>Export model</h2></div><button type="button" class="icon-control" :disabled="exportingImage" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
+        <section v-else id="export-inspector" class="export-inspector" :aria-busy="exportingImage || exportingBlenderProject">
+          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>Export model</h2></div><button type="button" class="icon-control" :disabled="exportingImage || exportingBlenderProject" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
           <fieldset class="export-group"><legend>Output</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportKind === 'still'" :disabled="exportingImage" @click="imageExportKind = 'still'; imageExportError = ''; imageExportNotice = ''"><strong>Still</strong><small>PNG image</small></button><button type="button" :aria-pressed="imageExportKind === 'loop'" :disabled="exportingImage" @click="imageExportKind = 'loop'; imageExportError = ''; imageExportNotice = ''"><strong>Living loop</strong><small>PNG sequence</small></button></div></fieldset>
 
           <template v-if="imageExportKind === 'still'">
@@ -1914,15 +2079,34 @@ async function downloadLivingFormLoop() {
           <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
           <p v-if="imageExportError" class="export-message error" role="alert">{{ imageExportError }}</p>
           <p v-else-if="imageExportNotice" class="export-message" role="status">{{ imageExportNotice }}</p>
-          <button v-if="imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel" @click="downloadImagePng">{{ exportingImage ? 'Cancel render' : imageExportQuality === 'pro' ? 'Render & save PNG + EXR' : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}</button>
-          <button v-else type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled" @click="downloadLivingFormLoop">{{ livingLoopNativeSaving ? 'Saving ZIP…' : exportingImage ? 'Cancel sequence' : 'Export lossless loop ZIP' }}</button>
+          <button v-if="imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel || exportingBlenderProject" @click="downloadImagePng">{{ exportingImage ? 'Cancel render' : imageExportQuality === 'pro' ? 'Render & save PNG + EXR' : imageExportQuality === 'final' ? 'Render & export PNG' : 'Export PNG' }}</button>
+          <button v-else type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled || exportingBlenderProject" @click="downloadLivingFormLoop">{{ livingLoopNativeSaving ? 'Saving ZIP…' : exportingImage ? 'Cancel sequence' : 'Export lossless loop ZIP' }}</button>
 
           <div class="file-export-section">
             <h3>3D &amp; project files</h3>
-            <button type="button" :disabled="exporting || exportingImage || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing GLB…' : 'GLB for Blender / Cycles' }}</button>
-            <button type="button" :disabled="exportingImage || !topology?.watertight" @click="downloadStl">STL geometry</button>
-            <button v-if="workspace === 'image'" type="button" :disabled="exportingImage" @click="exportHeightPng(heightField)">Height PNG</button>
-            <button type="button" :disabled="exportingImage" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
+            <button type="button" :disabled="exporting || exportingImage || exportingBlenderProject || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing exact GLB…' : 'Exact GLB · portable mesh' }}</button>
+
+            <details v-if="desktopBlenderBridgeAvailable" ref="blenderExportDetails" class="blender-export-controls" @toggle="keepBlenderExportAccordionOpen">
+              <summary><span>Blender project</span><small>{{ activeBlenderTopology.label }} · .blend</small></summary>
+              <div class="blender-export-controls__body">
+                <fieldset class="export-group blender-topology-group">
+                  <legend>Topology</legend>
+                  <div class="segmented cards blender-topology-cards">
+                    <button v-for="option in blenderTopologyOptions" :key="option.value" type="button" :aria-pressed="blenderExportTopology === option.value" :disabled="exportingBlenderProject" @click="blenderExportTopology = option.value; blenderExportError = ''; blenderExportNotice = ''"><strong>{{ option.label }}</strong><small>{{ option.note }}</small></button>
+                  </div>
+                </fieldset>
+                <p id="blender-export-help" class="blender-export-help">{{ blenderExportHelp }}</p>
+                <div v-if="exportingBlenderProject" class="render-progress blender-export-progress" role="status" aria-live="polite" aria-atomic="true"><span>{{ blenderExportProgressLabel }}</span><progress aria-label="Blender project export progress"></progress><button type="button" @click="downloadBlenderProject">Cancel</button></div>
+                <p v-if="blenderExportError" class="export-message error" role="alert">{{ blenderExportError }}</p>
+                <p v-else-if="blenderExportNotice" class="export-message" role="status">{{ blenderExportNotice }}</p>
+                <button type="button" class="blender-export-button" aria-describedby="blender-export-help" :disabled="!hasModel || !desktopProReady || colorMode === 'wireframe' || exporting || exportingImage" @click="downloadBlenderProject">{{ exportingBlenderProject ? 'Cancel Blender export' : 'Save Blender project (.blend)' }}</button>
+              </div>
+            </details>
+            <p v-else class="blender-export-help blender-export-help--web">{{ blenderExportHelp }}</p>
+
+            <button type="button" :disabled="exportingImage || exportingBlenderProject || !topology?.watertight" @click="downloadStl">STL geometry</button>
+            <button v-if="workspace === 'image'" type="button" :disabled="exportingImage || exportingBlenderProject" @click="exportHeightPng(heightField)">Height PNG</button>
+            <button type="button" :disabled="exportingImage || exportingBlenderProject" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
           </div>
         </section>
       </aside>

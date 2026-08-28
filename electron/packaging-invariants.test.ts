@@ -230,6 +230,7 @@ describe('desktop packaging invariants', () => {
       await writeFixture(join(fixtureElectron, '.build/runtime/preload.cjs'), 'editor preload')
       await writeFixture(join(fixtureElectron, '.build/runtime/render-preload.cjs'), 'render preload')
       await writeFixture(join(fixtureElectron, 'cycles/render.py'), 'cycles renderer')
+      await writeFixture(join(fixtureElectron, 'cycles/export_blend.py'), 'blender project exporter')
       await writeFixture(join(fixtureElectron, '.stage/stale.txt'), 'must be deleted')
 
       await execFileAsync(process.execPath, [fixtureScript], { cwd: fixtureElectron })
@@ -257,6 +258,8 @@ describe('desktop packaging invariants', () => {
         readFile(join(stage, 'render/hdri/studio_small_08_1k.hdr'), 'utf8'),
       ).resolves.toBe('render hdr')
       await expect(readFile(join(stage, 'cycles/render.py'), 'utf8')).resolves.toBe('cycles renderer')
+      await expect(readFile(join(stage, 'cycles/export_blend.py'), 'utf8'))
+        .resolves.toBe('blender project exporter')
 
       const runtimePackage = JSON.parse(await readFile(join(stage, 'package.json'), 'utf8'))
       expect(runtimePackage).toMatchObject({

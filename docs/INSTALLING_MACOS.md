@@ -82,9 +82,9 @@ Rasterform's desktop toolchain requires Node.js 22.12 or newer. Check with:
 node --version
 ```
 
-### Blender prerequisite for Cycles Pro
+### Blender prerequisite for Cycles Pro and editable projects
 
-Cycles Pro is optional and desktop-only. It requires a separate **Blender 5.2 LTS or newer** installation; Blender is not included inside either Rasterform app. Put `Blender.app` in `/Applications` as with any normal Mac app. Rasterform also recognizes supported version-named Blender apps there and common Homebrew command-line locations.
+Cycles Pro and editable `.blend` project preparation are optional and desktop-only. They require a separate **Blender 5.2 LTS or newer** installation; Blender is not included inside either Rasterform app. Put `Blender.app` in `/Applications` as with any normal Mac app. Rasterform also recognizes supported version-named Blender apps there and common Homebrew command-line locations. Exact GLB remains available without Blender and in the browser edition.
 
 You may keep Blender open on another project while Rasterform renders. Rasterform launches a new isolated background process and does not open, save, close, or otherwise touch the `.blend` file in Blender's UI. The two processes still share the Mac's GPU, unified memory, CPU, and cooling, so running two heavy renders together can make both slower or use substantial memory.
 
