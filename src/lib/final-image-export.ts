@@ -36,6 +36,19 @@ export const FINAL_DENOISE_SETTINGS = Object.freeze({
   threshold: 0.055,
 })
 
+const FINAL_SAMPLE_OPACITY_STATEMENT = 'gl_FragColor.a *= opacity;'
+export const FINAL_RANDOM_TYPE_PCG = 0
+const FINAL_FINITE_SAMPLE_GUARD = `// Rasterform: reject non-finite path samples before they poison the float accumulator.
+if ( any( isnan( gl_FragColor.rgb ) ) || any( isinf( gl_FragColor.rgb ) ) ) {
+
+  gl_FragColor = vec4( 0.0 );
+
+} else {
+
+  ${FINAL_SAMPLE_OPACITY_STATEMENT}
+
+}`
+
 export interface FinalRenderTile {
   x: number
   y: number
@@ -248,6 +261,46 @@ export function configureFinalShaderCompilation(renderer: THREE.WebGLRenderer): 
   renderer.compileAsync = async (object: THREE.Object3D) => object
 }
 
+/**
+ * Keep Final's stochastic input numerically valid and spatially decorrelated.
+ * A single NaN or Infinity survives every later floating-point accumulation
+ * sample and is finally encoded as a black speck. The dependency's default
+ * 64×64 blue-noise scalar also repeats as visible grain across export tiles.
+ * Reject only undefined samples, keep finite HDR values completely unclamped,
+ * and use its unbiased macOS-safe PCG sampler for independent pixels.
+ */
+export function configureFinalPathTracerIntegrity(tracer: WebGLPathTracer): void {
+  const internal = tracer as WebGLPathTracer & {
+    _pathTracer?: { material?: THREE.ShaderMaterial }
+  }
+  const material = internal._pathTracer?.material
+  if (!material || typeof material.fragmentShader !== 'string') {
+    throw new Error('The Final renderer cannot install its path-sampling integrity guard.')
+  }
+  const needsGuard = !material.fragmentShader.includes(FINAL_FINITE_SAMPLE_GUARD)
+  const occurrences = material.fragmentShader.split(FINAL_SAMPLE_OPACITY_STATEMENT).length - 1
+  if (needsGuard && occurrences !== 1) {
+    throw new Error('The Final renderer shader contract is incompatible with this build.')
+  }
+  let changed = false
+  if (material.defines?.RANDOM_TYPE !== FINAL_RANDOM_TYPE_PCG) {
+    // The dependency's 64×64 blue-noise texture repeats a correlated scalar
+    // offset across every output tile. PCG is non-periodic per pixel and is the
+    // dependency's macOS-safe unbiased sampler; Sobol currently breaks Apple's
+    // shader compiler.
+    material.defines = { ...material.defines, RANDOM_TYPE: FINAL_RANDOM_TYPE_PCG }
+    changed = true
+  }
+  if (needsGuard) {
+    material.fragmentShader = material.fragmentShader.replace(
+      FINAL_SAMPLE_OPACITY_STATEMENT,
+      FINAL_FINITE_SAMPLE_GUARD,
+    )
+    changed = true
+  }
+  if (changed) material.needsUpdate = true
+}
+
 function assertTileSupport(renderer: THREE.WebGLRenderer, tiles: FinalRenderTile[]): void {
   const gl = renderer.getContext()
   const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array
@@ -367,6 +420,7 @@ export async function renderFinalImagePng(options: FinalImageExportOptions): Pro
     tracer.fadeDuration = 0
     tracer.rasterizeScene = false
     tracer.renderToCanvas = false
+    configureFinalPathTracerIntegrity(tracer)
 
     reportProgress({
       phase: 'preparing',

@@ -32,6 +32,12 @@ const qualityAudit = vi.hoisted(() => ({
     rasterizeScene: boolean
     renderToCanvas: boolean
     samples: number
+    _pathTracer: {
+      material: {
+        fragmentShader: string
+        defines?: Record<string, number>
+      }
+    }
   },
   denoiseSettings: null as unknown,
   sceneBuilds: 0,
@@ -41,6 +47,12 @@ vi.mock('three-gpu-pathtracer', async () => {
   const THREE = await import('three')
 
   class WebGLPathTracer {
+    _pathTracer = {
+      material: {
+        fragmentShader: 'void main() { gl_FragColor.a *= opacity; }',
+        needsUpdate: false,
+      },
+    }
     bounces = 0
     transmissiveBounces = 0
     multipleImportanceSampling = false
@@ -233,6 +245,8 @@ describe('desktop Final quality delegation', () => {
     expect(FINAL_BATCH_BUDGET_MS).toBe(6)
     expect(FINAL_PATH_TRACER_TILES).toBe(3)
     expect(FINAL_DENOISE_SETTINGS).toEqual({ sigma: 2.5, kSigma: 1.5, threshold: 0.055 })
+    expect(qualityAudit.tracer?._pathTracer.material.defines?.RANDOM_TYPE).toBe(0)
+    expect(qualityAudit.tracer?._pathTracer.material.fragmentShader).toContain('isnan( gl_FragColor.rgb )')
 
     appearance.clay.finish = 'glossy'
     expect(finalSampleTarget('clay', appearance)).toBe(8192)

@@ -10,6 +10,12 @@ const tracerAudit = vi.hoisted(() => ({ renderSamples: 0, sceneBuilds: 0 }))
 vi.mock('three-gpu-pathtracer', async () => {
   const THREE = await import('three')
   class WebGLPathTracer {
+    _pathTracer = {
+      material: {
+        fragmentShader: 'void main() { gl_FragColor.a *= opacity; }',
+        needsUpdate: false,
+      },
+    }
     bounces = 0
     transmissiveBounces = 0
     multipleImportanceSampling = false

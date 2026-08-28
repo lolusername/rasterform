@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
+import * as PathTracerModule from 'three-gpu-pathtracer'
 import { createDefaultAppearanceSettings } from './three'
 import {
   calculateFinalRenderTiles,
   applyFinalTileView,
   awaitExportTask,
+  configureFinalPathTracerIntegrity,
   configureFinalShaderCompilation,
   createFinalProgressReporter,
   FINAL_BATCH_BUDGET_MS,
@@ -12,6 +14,7 @@ import {
   FINAL_DENOISE_PADDING,
   FINAL_PATH_TRACER_TILES,
   FINAL_PROGRESS_INTERVAL_MS,
+  FINAL_RANDOM_TYPE_PCG,
   finalSampleTarget,
   type FinalExportProgress,
 } from './final-image-export'
@@ -30,6 +33,76 @@ describe('final image export contract', () => {
     expect(renderer.debug.checkShaderErrors).toBe(false)
     await expect(renderer.compileAsync(object, new THREE.PerspectiveCamera())).resolves.toBe(object)
     expect(originalCompile).not.toHaveBeenCalled()
+  })
+
+  it('rejects non-finite samples and selects non-periodic PCG without clamping finite HDR', () => {
+    const material = {
+      fragmentShader: `
+        void main() {
+          gl_FragColor = vec4( 12.0, 3.0, 1.5, 1.0 );
+          gl_FragColor.a *= opacity;
+        }
+      `,
+      needsUpdate: false,
+    }
+    const tracer = {
+      _pathTracer: { material },
+    } as unknown as import('three-gpu-pathtracer').WebGLPathTracer
+
+    configureFinalPathTracerIntegrity(tracer)
+    configureFinalPathTracerIntegrity(tracer)
+
+    expect(material.fragmentShader.match(/reject non-finite path samples/g)).toHaveLength(1)
+    expect(material.fragmentShader).toContain('any( isnan( gl_FragColor.rgb ) )')
+    expect(material.fragmentShader).toContain('any( isinf( gl_FragColor.rgb ) )')
+    expect(material.fragmentShader).toContain('gl_FragColor = vec4( 0.0 );')
+    expect(material.fragmentShader).toContain('gl_FragColor.a *= opacity;')
+    expect(material.fragmentShader).not.toMatch(/clamp\s*\(\s*gl_FragColor/)
+    const configured = material as typeof material & { defines: Record<string, number> }
+    expect(configured.defines.RANDOM_TYPE).toBe(FINAL_RANDOM_TYPE_PCG)
+    expect(material.needsUpdate).toBe(true)
+  })
+
+  it('patches the locked path-tracer dependency contract, not only a shader mock', () => {
+    // The dependency still exports this legacy material at runtime, but omits it
+    // from its 0.0.24 declaration file. Keep the contract probe honest without
+    // widening Rasterform's production-facing dependency types.
+    const PhysicalPathTracingMaterial = (
+      PathTracerModule as unknown as {
+        PhysicalPathTracingMaterial: new () => THREE.ShaderMaterial
+      }
+    ).PhysicalPathTracingMaterial
+    const material = new PhysicalPathTracingMaterial()
+    const originalOpacityStatements = material.fragmentShader.match(/gl_FragColor\.a \*= opacity;/g) ?? []
+    const tracer = {
+      _pathTracer: { material },
+    } as unknown as import('three-gpu-pathtracer').WebGLPathTracer
+
+    try {
+      expect(material.defines.RANDOM_TYPE).toBe(2)
+      expect(originalOpacityStatements).toHaveLength(1)
+
+      configureFinalPathTracerIntegrity(tracer)
+
+      expect(material.defines.RANDOM_TYPE).toBe(FINAL_RANDOM_TYPE_PCG)
+      expect(material.fragmentShader.match(/reject non-finite path samples/g)).toHaveLength(1)
+      expect(material.fragmentShader).toContain('any( isnan( gl_FragColor.rgb ) )')
+      expect(material.fragmentShader).toContain('any( isinf( gl_FragColor.rgb ) )')
+      expect(material.fragmentShader).toContain('gl_FragColor = vec4( 0.0 );')
+      expect(material.fragmentShader).not.toMatch(/clamp\s*\(\s*gl_FragColor/)
+    } finally {
+      material.dispose()
+    }
+  })
+
+  it('fails closed if the path-tracer shader contract changes upstream', () => {
+    const tracer = {
+      _pathTracer: {
+        material: { fragmentShader: 'void main() {}', needsUpdate: false },
+      },
+    } as unknown as import('three-gpu-pathtracer').WebGLPathTracer
+
+    expect(() => configureFinalPathTracerIntegrity(tracer)).toThrow(/shader contract is incompatible/i)
   })
 
   it('covers every output pixel once while keeping denoise gutters inside the image', () => {
