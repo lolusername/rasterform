@@ -269,6 +269,9 @@ function assertTileSupport(renderer: THREE.WebGLRenderer, tiles: FinalRenderTile
 /**
  * Render a clean 2K/4K final PNG without allocating one enormous floating-point target.
  * The BVH is built once, then a camera view offset traces each overlapped tile independently.
+ * Final deliberately spends a production sample budget on every output pixel. In particular,
+ * glossy and metallic surfaces receive 8,192 samples so a native 2K image does not rely on
+ * downscaling a 4K render to hide Monte Carlo noise.
  */
 export async function renderFinalImagePng(options: FinalImageExportOptions): Promise<FinalImagePngResult> {
   const width = Math.max(1, Math.round(options.width))

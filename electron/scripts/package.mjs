@@ -22,7 +22,11 @@ const scriptsDirectory = dirname(fileURLToPath(import.meta.url))
 const electronRoot = join(scriptsDirectory, '..')
 const repositoryRoot = join(electronRoot, '..')
 const stageDirectory = join(electronRoot, '.stage')
-const outputDirectory = join(electronRoot, 'out')
+const rendererLab = process.env.RASTERFORM_RENDERER_LAB === '1'
+const applicationName = rendererLab ? 'Rasterform Renderer Lab' : 'Rasterform'
+const bundleId = rendererLab ? 'io.atil.rasterform.rendererlab' : 'io.atil.rasterform'
+const helperBundleId = `${bundleId}.helper`
+const outputDirectory = join(electronRoot, rendererLab ? 'out-lab' : 'out')
 const iconPath = join(electronRoot, 'assets', 'Rasterform.icns')
 const architectures = resolvePackageArchitectures(process.argv.slice(2))
 
@@ -48,14 +52,14 @@ async function removeUnusedUsageDescriptions(applicationPath) {
 function applicationBundlePath(packagerOutputPath) {
   return basename(packagerOutputPath).endsWith('.app')
     ? packagerOutputPath
-    : join(packagerOutputPath, 'Rasterform.app')
+    : join(packagerOutputPath, `${applicationName}.app`)
 }
 
 for (const architecture of architectures) {
   const applicationPaths = await packager({
     dir: stageDirectory,
-    name: 'Rasterform',
-    executableName: 'Rasterform',
+    name: applicationName,
+    executableName: applicationName,
     platform: 'darwin',
     arch: architecture,
     electronVersion: '43.3.0',
@@ -64,8 +68,8 @@ for (const architecture of architectures) {
     asar: true,
     prune: false,
     icon: iconPath,
-    appBundleId: 'io.atil.rasterform',
-    helperBundleId: 'io.atil.rasterform.helper',
+    appBundleId: bundleId,
+    helperBundleId,
     appCategoryType: MAC_APP_CATEGORY,
     appVersion: repositoryPackage.version,
     buildVersion: repositoryPackage.version,
@@ -84,7 +88,7 @@ for (const architecture of architectures) {
   for (const applicationPath of applicationBundles) {
     await removeUnusedUsageDescriptions(applicationPath)
     const flippedFuseWires = await flipFuses(
-      join(applicationPath, 'Contents', 'MacOS', 'Rasterform'),
+      join(applicationPath, 'Contents', 'MacOS', applicationName),
       fuseConfigurationForArchitecture(architecture),
     )
     const expectedFuseWires = architecture === 'universal' ? 2 : 1
@@ -93,7 +97,10 @@ for (const architecture of architectures) {
         `Expected to harden ${expectedFuseWires} ${architecture} fuse wire(s), found ${flippedFuseWires}.`,
       )
     }
-    const verification = await verifyPackagedApplication(applicationPath, architecture)
+    const verification = await verifyPackagedApplication(applicationPath, architecture, {
+      executableName: applicationName,
+      bundleId,
+    })
     console.log(`Hardened ${architecture} package: ${JSON.stringify(verification)}`)
   }
 

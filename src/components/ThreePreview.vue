@@ -32,6 +32,11 @@ import {
   renderFinalImageInDesktop,
   type DesktopFinalCaptureResult,
 } from '../desktop/client'
+import { renderProImageInDesktop } from '../desktop/pro-client'
+import type {
+  DesktopProCaptureResult,
+  DesktopProRenderSettings,
+} from '../desktop/pro-contracts'
 import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
 import {
@@ -417,6 +422,58 @@ async function captureFinalPng(
   }
 }
 
+async function captureProRender(
+  dimensions: { width: number; height: number },
+  background: ImageExportBackground,
+  settings: DesktopProRenderSettings,
+  suggestedName = 'rasterform-pro.png',
+  livingPhase = props.livingPhase,
+): Promise<DesktopProCaptureResult> {
+  if (!camera || !props.mesh) throw new Error('There is no model to export.')
+  if (Math.max(dimensions.width, dimensions.height) > 4096) {
+    throw new Error('Cycles Pro supports 2K and 4K still renders.')
+  }
+  if (props.colorMode === 'wireframe') {
+    throw new Error('Wireframe exports use High quality.')
+  }
+
+  cancelImageExport()
+  const controller = new AbortController()
+  activeExport = controller
+  exportActive.value = true
+  controls?.update()
+  camera.updateMatrixWorld(true)
+  const exportCamera = camera.clone()
+  const exportMesh = snapshotLivingFormMesh(livingPhase)
+  const exportColorMode = props.colorMode
+  const exportAppearance: AppearanceSettings = {
+    heightGradient: { ...props.appearance.heightGradient },
+    clay: { ...props.appearance.clay },
+  }
+  const exportBackground = props.background
+
+  try {
+    return await renderProImageInDesktop({
+      mesh: exportMesh,
+      colorMode: exportColorMode,
+      appearance: exportAppearance,
+      camera: exportCamera,
+      width: dimensions.width,
+      height: dimensions.height,
+      background,
+      studioBackground: exportBackground,
+      settings: { ...settings },
+      suggestedName,
+      signal: controller.signal,
+      onProgress: (progress) => emit('export-progress', progress),
+    })
+  } finally {
+    if (activeExport === controller) activeExport = null
+    exportActive.value = false
+    if (controls) controls.enabled = !props.interactionLocked
+  }
+}
+
 function cancelImageExport() {
   activeExport?.abort()
 }
@@ -424,6 +481,7 @@ function cancelImageExport() {
 defineExpose({
   captureHighPng,
   captureFinalPng,
+  captureProRender,
   cancelImageExport,
   beginLivingFormLoopExport,
   endLivingFormLoopExport,

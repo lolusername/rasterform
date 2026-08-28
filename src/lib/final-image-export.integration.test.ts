@@ -326,8 +326,8 @@ describe('Final PNG integration', () => {
       },
     })
 
-    expect(result).toMatchObject({ width, height, dpi: 300, samples: 1536, tiles: 1 })
-    expect(tracerAudit).toEqual({ renderSamples: 1536, sceneBuilds: 1 })
+    expect(result).toMatchObject({ width, height, dpi: 300, samples: 6144, tiles: 1 })
+    expect(tracerAudit).toEqual({ renderSamples: 6144, sceneBuilds: 1 })
     expect(audit.renderSizes).toEqual([[width, height]])
     expect(audit.clearAlphas).toEqual([0, 0])
     const bytes = new Uint8Array(await result.blob.arrayBuffer())

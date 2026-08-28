@@ -5,18 +5,24 @@ import { resolvePackagedSmokeArchitecture } from './architecture.mjs'
 import { verifyPackagedApplication } from './verify-package.mjs'
 
 const architecture = resolvePackagedSmokeArchitecture(process.argv[2])
+const rendererLab = process.env.RASTERFORM_RENDERER_LAB === '1'
+const applicationName = rendererLab ? 'Rasterform Renderer Lab' : 'Rasterform'
+const bundleId = rendererLab ? 'io.atil.rasterform.rendererlab' : 'io.atil.rasterform'
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url))
 const electronRoot = join(scriptsDirectory, '..')
 const applicationPath = join(
   electronRoot,
-  'out',
-  `Rasterform-darwin-${architecture}`,
-  'Rasterform.app',
+  rendererLab ? 'out-lab' : 'out',
+  `${applicationName}-darwin-${architecture}`,
+  `${applicationName}.app`,
 )
-const executablePath = join(applicationPath, 'Contents', 'MacOS', 'Rasterform')
+const executablePath = join(applicationPath, 'Contents', 'MacOS', applicationName)
 
-const verification = await verifyPackagedApplication(applicationPath, architecture)
+const verification = await verifyPackagedApplication(applicationPath, architecture, {
+  executableName: applicationName,
+  bundleId,
+})
 console.log(`RASTERFORM_PACKAGE_VERIFIED ${JSON.stringify(verification)}`)
 
 const exitCode = await new Promise((resolveExit, reject) => {

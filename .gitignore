@@ -39,6 +39,8 @@ pnpm-debug.log*
 .temp/
 tmp/
 temp/
+__pycache__/
+*.pyc
 
 # macOS / Windows
 .DS_Store
@@ -67,4 +69,5 @@ electron/.build/
 electron/.stage/
 electron/.vite-render/
 electron/out/
+electron/out-lab/
 !electron/package-lock.json

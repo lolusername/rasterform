@@ -20,9 +20,11 @@ Opening Export swaps the right-hand inspector without resizing the screen-bounde
 
 Living Form is deterministic and post-mesh: it never rewrites the source image, text contours, or base geometry, and every displayed or exported frame is evaluated from that immutable base rather than the previous frame. Image and Text keep independent motion settings. Still PNG, GLB, STL, and recipe exports bake the visible phase. Living Loop export creates a transparent or studio-background, lossless RGBA PNG-sequence ZIP at High 2× quality with a timing manifest; frames use `phase = index / frameCount`, so no duplicate terminal frame introduces a hitch. Long sequences stream through private browser storage when available instead of retaining every rendered frame in memory. The archive switches to ZIP64 when it crosses the classic 4 GiB boundary, checks available storage as soon as the first frame establishes a useful size projection, and scavenges abandoned private archives after 24 hours.
 
-Living Loop is deliberately labeled **High 2×**, not Final. It does not replace or weaken the existing still-image Final path tracer: Final retains its exact 1,536/2,048-sample, bounce, MIS, tile, and denoising contract.
+Living Loop is deliberately labeled **High 2×**, not Final. It does not replace or weaken the existing still-image Final path tracer: Final uses 6,144 samples for diffuse/matte work and 8,192 samples for specular (glossy or metallic) work, while retaining its full bounce, MIS, tile, and denoising contract.
 
-The optional macOS desktop edition keeps that web behavior intact while moving Final into a separate hidden Electron renderer process. It uses the same quality owner and exact 1,536/2,048-sample contract, but the visible studio remains responsive and shows progress while the native shell prevents sleep and saves the completed PNG atomically. Living Loop remains the same shared renderer and ZIP writer; the shell adds app-suspension protection, disables background throttling for the active job, warns before quit, waits for the ZIP to finish writing, and adds successful loops to Reveal Last Export and Recent Documents.
+The optional macOS desktop edition keeps that web behavior intact while moving Final into a separate hidden Electron renderer process. It uses the same quality owner and exact 6,144/8,192-sample contract, but the visible studio remains responsive and shows progress while the native shell prevents sleep and saves the completed PNG atomically. Living Loop remains the same shared renderer and ZIP writer; the shell adds app-suspension protection, disables background throttling for the active job, warns before quit, waits for the ZIP to finish writing, and adds successful loops to Reveal Last Export and Recent Documents.
+
+On macOS, **Cycles Pro** is an optional desktop-only still-render path when Blender 5.2 LTS or newer is installed. Its production preset keeps adaptive Cycles at up to 8,192 samples with a 512-sample floor, a `0.001` noise threshold, 12 light bounces, and the High-quality OpenImageDenoise pass guided by albedo and normals. It saves a display-ready AgX RGBA PNG and a matching PIZ-compressed multipart EXR. The EXR's Combined and Diffuse Color passes use 16-bit half-float color channels; Normal and the other data or denoising-guide passes retain the precision appropriate to those passes. Rasterform starts a new `--background --factory-startup` Blender process with private configuration and temporary directories: it never opens, attaches to, saves, or closes the `.blend` project in an already-running Blender app. Both can run together, although they share the Mac's GPU and memory and can therefore slow each other down. No floor plane or grid is created in the Cycles scene.
 
 Rasterform can export transparent 2K/4K/8K still PNGs, lossless 2K/4K Living Form frame sequences, height maps, reusable recipes, GLB geometry for Blender, and watertight STL files when the topology is ready to fabricate.
 
@@ -70,12 +72,16 @@ Ad-hoc-signed local development packages can be built for Apple silicon, Intel, 
 ```bash
 npm run desktop:package
 npm run desktop:package:arm64
+npm run desktop:package:lab:arm64
 npm run desktop:package:x64
 npm run desktop:package:universal
 npm run desktop:smoke:packaged
+npm run desktop:smoke:packaged:lab:arm64
 ```
 
 `npm run desktop:build` only builds and stages the desktop runtime. To create an installable `.app`, run `npm run desktop:package:arm64` on an Apple-silicon Mac. The result is `electron/out/Rasterform-darwin-arm64/Rasterform.app`; packaging does not copy it into `/Applications`.
+
+`npm run desktop:package:lab:arm64` creates the renderer experiment separately at `electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app`, with bundle ID `io.atil.rasterform.rendererlab`. Install it as `/Applications/Rasterform Renderer Lab.app`; it remains independent from the known-good `/Applications/Rasterform.app` checkpoint. Blender is intentionally not bundled, so install Blender 5.2 LTS or newer in `/Applications` to enable Cycles Pro. The source recovery tag for the stable pre-Pro checkpoint is `checkpoint/pre-pro-renderer-2026-08-26`.
 
 The unqualified package and packaged-smoke commands build and run only the physical host Mac's native architecture (`arm64` on Apple silicon), even if Node itself was started through Rosetta. Intel and universal artifacts are explicit compatibility builds; Rasterform refuses to launch the x64 smoke test on an Apple-silicon Mac. Package verification still checks restrictive ATS metadata, the Rasterform icon, embedded ASAR integrity, locked Electron fuse values, every nested Mach-O architecture/deployment target, and the internal consistency of the ad-hoc code-signature seal. That integrity check does not authenticate a Developer ID identity or verify notarization; distributable releases still require the separate Apple-credentialed release workflow.
 
@@ -84,3 +90,5 @@ New to Mac app bundles or Electron? See [docs/INSTALLING_MACOS.md](docs/INSTALLI
 ## Rendering credits
 
 Progressive rendering uses [three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer). Studio lighting uses **Studio Small 08** by Sergej Majboroda from [Poly Haven](https://polyhaven.com/a/studio_small_08), provided under CC0.
+
+The optional desktop Pro path uses Blender Cycles and Blender's OpenImageDenoise integration through a separate locally installed Blender 5.2 LTS (or newer) process.

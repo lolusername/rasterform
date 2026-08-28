@@ -19,9 +19,11 @@
     "desktop:smoke:packaged:x64": "npm --prefix electron run smoke:packaged:x64",
     "desktop:package": "npm --prefix electron run package",
     "desktop:package:arm64": "npm --prefix electron run package:arm64",
+    "desktop:package:lab:arm64": "npm --prefix electron run package:lab:arm64",
     "desktop:package:x64": "npm --prefix electron run package:x64",
     "desktop:package:universal": "npm --prefix electron run package:universal",
     "desktop:package:all": "npm --prefix electron run package:all",
+    "desktop:smoke:packaged:lab:arm64": "npm --prefix electron run smoke:packaged:lab:arm64",
     "test": "vitest run",
     "test:watch": "vitest"
   },

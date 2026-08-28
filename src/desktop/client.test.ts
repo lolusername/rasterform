@@ -131,7 +131,7 @@ function savedEvent(
       width: 2048,
       height: 1536,
       dpi: 300,
-      samples: 1536,
+      samples: 6144,
       tiles: 4,
       fileName: 'rasterform-final.png',
     },
@@ -157,8 +157,8 @@ describe('desktop Final client', () => {
             progress: 0.5,
             tile: 1,
             tiles: 2,
-            samples: 768,
-            targetSamples: 1536,
+            samples: 3072,
+            targetSamples: 6144,
           },
         })
         emit(savedEvent(jobId))
@@ -176,7 +176,7 @@ describe('desktop Final client', () => {
       width: 2048,
       height: 1536,
       dpi: 300,
-      samples: 1536,
+      samples: 6144,
       tiles: 4,
       fileName: 'rasterform-final.png',
     })
@@ -207,7 +207,7 @@ describe('desktop Final client', () => {
     expect(options.appearance.clay.color).toBe('#d7d0bf')
   })
 
-  it('ignores stale job events and preserves the glossy 2048-sample contract', async () => {
+  it('ignores stale job events and preserves the glossy 8192-sample contract', async () => {
     const harness = bridgeHarness((jobId, _snapshot, emit) => {
       queueMicrotask(() => {
         emit(savedEvent('stale_job'))
@@ -216,7 +216,7 @@ describe('desktop Final client', () => {
             width: 2048,
             height: 1536,
             dpi: 300,
-            samples: 2048,
+            samples: 8192,
             tiles: 4,
             fileName: 'glossy.png',
           },
@@ -230,7 +230,7 @@ describe('desktop Final client', () => {
       bridge: harness.bridge,
     })
 
-    expect(result?.samples).toBe(2048)
+    expect(result?.samples).toBe(8192)
     expect(harness.unsubscribe).toHaveBeenCalledOnce()
   })
 
@@ -374,7 +374,7 @@ describe('desktop Final client', () => {
           width: 2048,
           height: 1536,
           dpi: 300,
-          samples: 1536,
+          samples: 6144,
           tiles: 4,
           fileName: 'rasterform-final.png',
         },
@@ -385,7 +385,7 @@ describe('desktop Final client', () => {
       ...baseOptions(),
       bridge: harness.bridge,
       signal: controller.signal,
-    })).resolves.toMatchObject({ desktopSaved: true, samples: 1536 })
+    })).resolves.toMatchObject({ desktopSaved: true, samples: 6144 })
   })
 })
 

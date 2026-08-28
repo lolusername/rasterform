@@ -164,13 +164,15 @@ function assertIcns(bytes) {
   }
 }
 
-export async function verifyPackagedApplication(applicationPath, packageArchitecture) {
+export async function verifyPackagedApplication(applicationPath, packageArchitecture, options = {}) {
   const resolvedApplication = resolve(applicationPath)
+  const executableName = options.executableName ?? 'Rasterform'
+  const expectedBundleId = options.bundleId ?? 'io.atil.rasterform'
   const resolvedPackageArchitecture = packageArchitecture
     ?? inferPackageArchitecture(resolvedApplication)
   const expectedArchitectures = expectedArchitecturesForPackage(resolvedPackageArchitecture)
   const infoPath = join(resolvedApplication, 'Contents', 'Info.plist')
-  const executablePath = join(resolvedApplication, 'Contents', 'MacOS', 'Rasterform')
+  const executablePath = join(resolvedApplication, 'Contents', 'MacOS', executableName)
   const fuseBinaryPath = join(
     resolvedApplication,
     'Contents',
@@ -195,13 +197,14 @@ export async function verifyPackagedApplication(applicationPath, packageArchitec
     sameStringSet(executableArchitectures, fuseWires.keys()),
     'The application and Electron Framework architecture sets do not match.',
   )
+  invariant(info.CFBundleExecutable === executableName, 'Unexpected application executable name.')
 
   const machOBinaries = await inspectMachOBinaries(
     resolvedApplication,
     expectedArchitectures,
   )
 
-  invariant(info.CFBundleIdentifier === 'io.atil.rasterform', 'Unexpected application bundle ID.')
+  invariant(info.CFBundleIdentifier === expectedBundleId, 'Unexpected application bundle ID.')
   invariant(info.LSApplicationCategoryType === MAC_APP_CATEGORY, 'Unexpected macOS app category.')
   invariant(info.LSMinimumSystemVersion === MAC_MINIMUM_SYSTEM_VERSION, 'Unexpected macOS minimum version.')
   invariant(info.CFBundleIconFile === 'Rasterform.icns', 'The package does not select the Rasterform icon.')
@@ -271,6 +274,9 @@ const commandArchitecture = process.argv[3]
 const invokedDirectly = process.argv[1]
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly && commandPath) {
-  const result = await verifyPackagedApplication(commandPath, commandArchitecture)
+  const rendererLab = process.env.RASTERFORM_RENDERER_LAB === '1'
+  const result = await verifyPackagedApplication(commandPath, commandArchitecture, rendererLab
+    ? { executableName: 'Rasterform Renderer Lab', bundleId: 'io.atil.rasterform.rendererlab' }
+    : undefined)
   console.log(`RASTERFORM_PACKAGE_VERIFIED ${JSON.stringify(result)}`)
 }

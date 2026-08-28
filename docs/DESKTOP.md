@@ -29,6 +29,8 @@ The hidden renderer is a `BrowserWindow`, not a Web Worker and not Electron's of
 
 Both renderers use `nodeIntegration: false`, `contextIsolation: true`, and `sandbox: true`. Preloads expose individual typed methods, never raw `ipcRenderer`. Every request, progress event, cancellation, result, and error carries a unique `jobId`. The main process validates the message shape, sender `webContents`, active job, dimensions, and typed-array lengths before forwarding it.
 
+Cycles Pro adds one optional desktop-only execution boundary: a newly spawned Blender command-line process. It is not part of the browser build and it does not replace the hidden Final renderer. The visible renderer can access it only through its separately versioned, validated Pro preload bridge; when that bridge or a compatible Blender installation is absent, the web application and the existing High/Final paths continue normally.
+
 The packaged Electron executable is hardened after ASAR creation and before any future release signing. `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`/`NODE_EXTRA_CA_CERTS`, Node CLI inspection, and legacy elevated `file://` privileges are disabled. Embedded ASAR integrity validation and `OnlyLoadAppFromAsar` are enabled together. Every current V1 fuse is configured explicitly with `strictlyRequireAllFuses`, so an Electron upgrade fails packaging instead of inheriting a newly introduced fuse. The app uses its restricted `rasterform:` protocol, not `file://`.
 
 The regular browser path remains available when the desktop bridge is absent. Electron main/preload code must never be imported into the web bundle.
@@ -39,8 +41,8 @@ Desktop Final calls the same implementation in [`src/lib/final-image-export.ts`]
 
 The quality invariant is:
 
-- 1,536 samples per output tile for original color, height color, and matte clay.
-- 2,048 samples per output tile for glossy or metallic clay.
+- 6,144 samples per output tile for original color, height color, and matte clay.
+- 8,192 samples per output tile for specular (glossy or metallic) clay. This fourfold production budget is intentional: a native 2K render must be clean without depending on 4K downsampling to hide noise.
 - Four path-tracing bounces and two transmissive bounces.
 - Multiple importance sampling enabled.
 - Glossy filtering factor `0.75`.
@@ -50,6 +52,16 @@ The quality invariant is:
 - PNG output preserves the requested 2K or 4K dimensions, transparency or selected flat studio background, RGBA content, and 300 PPI metadata.
 
 Progress scheduling, process isolation, direct-to-disk saving, and a long runtime are allowed. Reducing samples, bounces, resolution, denoising, material behavior, or lighting to satisfy an arbitrary time limit is not allowed. Elapsed time is diagnostic data, not a pass/fail quality criterion.
+
+## Optional Cycles Pro renderer
+
+Cycles Pro requires a separately installed **Blender 5.2 LTS or newer**. Blender is deliberately not bundled in Rasterform. The desktop app probes the Blender executable in Applications (and supported command-line installation locations), verifies the version, and selects Metal when a compatible device is available or CPU otherwise. Pro is a desktop-only still renderer; the shared web application does not depend on Blender and retains every existing render and export option.
+
+Each Pro job launches a new Blender process with `--background`, `--factory-startup`, and `--disable-autoexec`, unique private configuration/data/temp directories, a validated render manifest, and a bundled scene-construction script. It never connects to Blender's UI process, reads or writes its current `.blend`, saves that project, or closes it. A user may therefore keep an unrelated Blender project open while Rasterform renders. Both processes still compete for the same physical GPU, unified memory, CPU, and thermal budget, so simultaneous heavy work can slow either application or create memory pressure.
+
+The production preset uses adaptive Cycles with an 8,192-sample maximum, a 512-sample minimum, a `0.001` noise threshold, 12 light bounces, and Blender's High-quality OpenImageDenoise pass guided by albedo and normals. Rasterform does not create a floor plane or grid. A Pro render produces a display-ready AgX RGBA PNG and a matching PIZ-compressed multipart EXR. Combined and Diffuse Color use 16-bit half-float color channels; Normal and the other data, noisy, and denoising-guide passes retain their appropriate data precision. Do not describe the whole EXR as half-float.
+
+Blender writes both files only inside the job's private directory. The Electron main process accepts success only after validating the requested dimensions, RGBA PNG, multipart EXR structure, required pass channels, and terminal renderer metadata. It then commits the PNG and EXR as one recoverable pair; cancellation or validation failure removes private output and preserves existing destinations. Cancellation signals only the exact child process owned by that job and never searches for or terminates another Blender process. There is no render-duration timeout and no timeout-driven reduction in samples, bounces, output resolution, passes, or denoising.
 
 ## Desktop protocol and security
 
@@ -112,11 +124,24 @@ The implemented architecture packages are ad-hoc signed for local development in
 ```bash
 npm run desktop:package
 npm run desktop:package:arm64
+npm run desktop:package:lab:arm64
 npm run desktop:package:x64
 npm run desktop:package:universal
 ```
 
 The unqualified command detects the physical build host's native architecture. On an Apple-silicon Mac it creates an arm64-only application—even when invoked from an x64 Node process under Rosetta; on an Intel Mac it creates an x64-only application. Cross-architecture and universal packaging must always be requested explicitly.
+
+The Pro renderer candidate is packaged as a separate native Apple-silicon application:
+
+```text
+electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app
+```
+
+It uses bundle ID `io.atil.rasterform.rendererlab` and installs as `/Applications/Rasterform Renderer Lab.app`. It must remain separate from the known-good stable checkpoint at `/Applications/Rasterform.app`. Build and exercise the actual packaged Lab app with:
+
+```bash
+npm run desktop:smoke:packaged:lab:arm64
+```
 
 Each package command verifies the restrictive App Transport Security dictionary (`NSAllowsArbitraryLoads` is false), graphics-design category, custom Rasterform icon, absence of irrelevant camera/microphone/Bluetooth usage declarations, embedded ASAR hash, and the read-back value of every Electron fuse. It also derives the required architecture set from the requested artifact (`arm64`, `x64`, or `universal`), checks the main executable against that label, discovers every nested Mach-O file by header, and requires the same architecture set and macOS 12.0 deployment target on every slice. A strict deep `codesign` verification proves that the package’s ad-hoc development seal remains internally consistent after fuse mutation. That check does **not** authenticate a Developer ID identity and does **not** assess Gatekeeper or notarization. The standard packaged gate is self-contained: it rebuilds the host-native package, then launches the actual packaged ASAR—not the staging directory—with:
 
@@ -176,7 +201,8 @@ A desktop change is not complete until evidence covers every applicable gate:
 7. **Packed resources:** smoke the packaged ASAR, not only the development server. Both entries, HDR, dynamic imports, and the generated BVH module worker must load through `rasterform://app/` with correct MIME types. Traversal and unknown-host tests must fail closed.
 8. **Architecture:** derive the expected set from the artifact label, then recursively enumerate every packaged Mach-O file, including the main executable, Electron Framework, Helpers, nested frameworks, dynamic libraries, crash handler, and updater tools. Every file must report the exact `lipo -archs` set and one macOS 12.0 `LC_BUILD_VERSION` deployment target per slice. The universal application must report both `x86_64` and `arm64`. Launch architecture-specific packages on matching Intel and Apple-silicon machines or CI runners.
 9. **Distribution:** verify the Developer ID identity, hardened runtime, Gatekeeper assessment, notarization, and stapling. Passing the ad-hoc integrity smoke does not make a package distributable.
-10. **Real full-quality Final:** the packaged, signed candidate renders the bundled deterministic scene at 2,048 × 1,536 using glossy clay and the real 2,048-sample path. It must run in the hidden PID while the visible studio remains interactive, report real progress, save through the native path, and produce a decodable 300-PPI RGBA PNG with expected transparency and nonempty image content. Allow at least 20 minutes as a hang guard; record elapsed time but never reduce quality to satisfy it.
+10. **Real full-quality Final:** the packaged, signed candidate renders the bundled deterministic scene at 2,048 × 1,536 using glossy clay and the real 8,192-sample path. It must run in the hidden PID while the visible studio remains interactive, report real progress, save through the native path, and produce a decodable 300-PPI RGBA PNG with expected transparency and nonempty image content. Do not impose a wall-clock failure threshold; record elapsed time but never reduce quality to satisfy an invented deadline.
+11. **Cycles Pro:** on real Apple-silicon hardware with Blender 5.2 LTS or newer, the separately packaged Lab app must pass its Blender compatibility probe and complete an isolated render while another Blender project remains untouched. Validate the full-resolution PNG and multipart EXR, including 16-bit Combined/Diffuse Color channels and required normal/data/guide passes; prove cancellation addresses only the owned child process and prove paired-save rollback preserves existing files.
 
 Pixel hashes are not a portable quality gate because GPU output can vary slightly. Validate structure, metadata, content, sample count, and the configured renderer instead.
 
@@ -185,7 +211,7 @@ Pixel hashes are not a portable quality gate because GPU output can vary slightl
 Use this checklist for a damaged development environment, a dependency refresh, or an Electron major upgrade:
 
 1. Preserve user work. Inspect `git status`; do not reset or discard unrelated changes.
-2. For a known-good restore, create a new branch from the last signed release tag rather than copying generated files from an old machine.
+2. For the known-good state immediately before the Pro experiment, create a new branch from `checkpoint/pre-pro-renderer-2026-08-26` rather than copying generated files from an old machine. Keep `/Applications/Rasterform.app` as the stable checkpoint; build and install Pro experiments only as `/Applications/Rasterform Renderer Lab.app`.
 3. Confirm the expected Node version, exact Electron pin, committed lockfile, and clean release checkout. Run `npm ci`.
 4. Run the web tests and browser build first. A desktop repair may not regress the web app.
 5. Run `desktop:check`, `desktop:test`, `desktop:build`, and `desktop:smoke`.

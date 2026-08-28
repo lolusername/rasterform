@@ -60,14 +60,14 @@ describe('final image export contract', () => {
 
   it('uses high-quality sampling with extra samples for reflective clay', () => {
     const appearance = createDefaultAppearanceSettings()
-    expect(finalSampleTarget('original', appearance)).toBe(1536)
-    expect(finalSampleTarget('height', appearance)).toBe(1536)
-    expect(finalSampleTarget('clay', appearance)).toBe(1536)
+    expect(finalSampleTarget('original', appearance)).toBe(6144)
+    expect(finalSampleTarget('height', appearance)).toBe(6144)
+    expect(finalSampleTarget('clay', appearance)).toBe(6144)
 
     appearance.clay.finish = 'glossy'
-    expect(finalSampleTarget('clay', appearance)).toBe(2048)
+    expect(finalSampleTarget('clay', appearance)).toBe(8192)
     appearance.clay.finish = 'metallic'
-    expect(finalSampleTarget('clay', appearance)).toBe(2048)
+    expect(finalSampleTarget('clay', appearance)).toBe(8192)
   })
 
   it('splits GPU work without reducing the sampling or denoise quality contract', () => {
@@ -94,7 +94,7 @@ describe('final image export contract', () => {
       tile: phase === 'preparing' ? 0 : 1,
       tiles: 1,
       samples,
-      targetSamples: 1536,
+      targetSamples: 6144,
     })
 
     report(progress('preparing', 0))
@@ -107,9 +107,9 @@ describe('final image export contract', () => {
     timestamp += 1
     report(progress('rendering', 0.25, 384))
     timestamp += 1
-    report(progress('rendering', 1, 1536))
+    report(progress('rendering', 1, 6144))
     timestamp += 1
-    report(progress('finishing', 1, 1536))
+    report(progress('finishing', 1, 6144))
 
     expect(updates.map(({ phase, progress: value }) => [phase, value])).toEqual([
       ['preparing', 0],

@@ -9,6 +9,8 @@ const runtimeDirectory = join(electronRoot, '.build', 'runtime')
 const renderDirectory = join(electronRoot, '.build', 'render')
 const webDirectory = join(repositoryRoot, 'dist')
 const stageDirectory = join(electronRoot, '.stage')
+const cyclesDirectory = join(electronRoot, 'cycles')
+const rendererLab = process.env.RASTERFORM_RENDERER_LAB === '1'
 const desktopBlockedFontUrls = [
   'https://use.typekit.net/mot7rkh.css',
   'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap',
@@ -20,6 +22,7 @@ const requiredInputs = [
   join(runtimeDirectory, 'render-preload.cjs'),
   join(renderDirectory, 'index.html'),
   join(webDirectory, 'index.html'),
+  join(cyclesDirectory, 'render.py'),
 ]
 
 await Promise.all(requiredInputs.map((input) => access(input)))
@@ -27,7 +30,7 @@ await Promise.all(requiredInputs.map((input) => access(input)))
 const repositoryPackage = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'))
 const runtimePackage = {
   name: 'rasterform-desktop-runtime',
-  productName: 'Rasterform',
+  productName: rendererLab ? 'Rasterform Renderer Lab' : 'Rasterform',
   version: repositoryPackage.version,
   private: true,
   type: 'commonjs',
@@ -91,6 +94,7 @@ await mkdir(stageDirectory, { recursive: true })
 await cp(runtimeDirectory, stageDirectory, { recursive: true })
 await cp(webDirectory, join(stageDirectory, 'web'), { recursive: true })
 await cp(renderDirectory, join(stageDirectory, 'render'), { recursive: true })
+await cp(cyclesDirectory, join(stageDirectory, 'cycles'), { recursive: true })
 await makeDesktopWebBundleOffline(join(stageDirectory, 'web'))
 await writeFile(
   join(stageDirectory, 'package.json'),

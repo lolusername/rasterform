@@ -205,7 +205,7 @@ describe('desktop Final quality delegation', () => {
       },
     })
 
-    expect(result).toMatchObject({ width: 1, height: 1, dpi: 300, samples: 1536, tiles: 1 })
+    expect(result).toMatchObject({ width: 1, height: 1, dpi: 300, samples: 6144, tiles: 1 })
     expect(qualityAudit.sceneBuilds).toBe(1)
     expect(qualityAudit.tracer).toMatchObject({
       bounces: 4,
@@ -221,7 +221,7 @@ describe('desktop Final quality delegation', () => {
       fadeDuration: 0,
       rasterizeScene: false,
       renderToCanvas: false,
-      samples: 1536,
+      samples: 6144,
     })
     expect(qualityAudit.denoiseSettings).toEqual({
       sigma: 2.5,
@@ -235,9 +235,9 @@ describe('desktop Final quality delegation', () => {
     expect(FINAL_DENOISE_SETTINGS).toEqual({ sigma: 2.5, kSigma: 1.5, threshold: 0.055 })
 
     appearance.clay.finish = 'glossy'
-    expect(finalSampleTarget('clay', appearance)).toBe(2048)
+    expect(finalSampleTarget('clay', appearance)).toBe(8192)
     appearance.clay.finish = 'metallic'
-    expect(finalSampleTarget('clay', appearance)).toBe(2048)
+    expect(finalSampleTarget('clay', appearance)).toBe(8192)
   })
 
   it('makes the hidden renderer delegate to the shared quality owner without a sample override', async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { readFile, readdir, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { lstat, readFile, readdir, writeFile } from 'node:fs/promises'
+import { basename, dirname, extname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   app,
@@ -39,6 +40,16 @@ import {
   type DesktopRenderEvent,
   type DesktopSavedFinalResult,
 } from '../src/desktop/contracts'
+import {
+  assertDesktopProRenderSnapshot,
+  DESKTOP_PRO_RENDER_PROTOCOL_VERSION,
+  type DesktopProCancelResult,
+  type DesktopProRenderEvent,
+  type DesktopProRendererAvailability,
+  type DesktopProRenderSubmission,
+  type DesktopProRenderSnapshot,
+  type DesktopSavedProResult,
+} from '../src/desktop/pro-contracts'
 import type { FinalExportProgress } from '../src/lib/final-image-export'
 import { finalSampleTarget, finalTileCount } from '../src/lib/final-quality'
 import {
@@ -59,13 +70,28 @@ import {
   type DesktopJobState,
 } from './main-helpers'
 import { NativeLongExportLifecycle } from './long-export-lifecycle'
+import {
+  buildBlenderInvocation,
+  cleanupCyclesProJob,
+  commitCyclesProOutputsAtomically,
+  createCyclesProJob,
+  createCyclesProOutputState,
+  findBlenderExecutable,
+  parseCyclesProOutput,
+  probeBlender,
+  type BlenderProbeResult,
+  type CyclesProJob,
+  type CyclesProOutputState,
+} from './cycles-pro'
 
 const SCHEME = 'rasterform'
 const APP_URL = `${SCHEME}://app/index.html`
 const RENDER_URL = `${SCHEME}://render/index.html`
 const CANCEL_GRACE_MS = 1_500
+const PRO_CANCEL_GRACE_MS = 5_000
 const PREPARED_JOB_TTL_MS = 2 * 60_000
 const TERMINAL_JOB_TTL_MS = 5 * 60_000
+const PRO_STDERR_TAIL_BYTES = 32 * 1024
 const PREFERENCES_FILE = 'desktop-preferences.json'
 const SMOKE_MODE = process.env.RASTERFORM_DESKTOP_SMOKE === '1'
 
@@ -98,6 +124,28 @@ interface TerminalJob {
   expiryTimer: ReturnType<typeof setTimeout>
 }
 
+interface PreparedProJob {
+  id: string
+  ownerWebContentsId: number
+  destination: string
+  snapshot: DesktopProRenderSnapshot | null
+  state: DesktopJobState
+  process: ReturnType<typeof spawn> | null
+  cyclesJob: CyclesProJob | null
+  outputState: CyclesProOutputState | null
+  sleepBlockerId: number | null
+  cancelTimer: ReturnType<typeof setTimeout> | null
+  preparedTimer: ReturnType<typeof setTimeout> | null
+  runPromise: Promise<void> | null
+  stderrTail: string
+}
+
+interface TerminalProJob {
+  ownerWebContentsId: number
+  result: Exclude<DesktopProCancelResult, { state: 'cancelling' } | { state: 'saving' }>
+  expiryTimer: ReturnType<typeof setTimeout>
+}
+
 let mainWindow: BrowserWindow | null = null
 let lastExportPath: string | null = null
 let lastExportDirectory: string | null = null
@@ -105,7 +153,11 @@ let saveDialogOpen = false
 let quitting = false
 const jobs = new Map<string, PreparedJob>()
 const terminalJobs = new Map<string, TerminalJob>()
+const proJobs = new Map<string, PreparedProJob>()
+const terminalProJobs = new Map<string, TerminalProJob>()
 const pendingWrites = new Set<Promise<void>>()
+const pendingProRuns = new Set<Promise<void>>()
+let lastProProbe: BlenderProbeResult | null = null
 const longExports = new NativeLongExportLifecycle(powerSaveBlocker, {
   setBackgroundThrottling: (allowed) => {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -145,6 +197,78 @@ function emitToEditor(event: DesktopRenderEvent): void {
   } catch {
     // The visible window can close between the liveness check and IPC send.
   }
+}
+
+function emitProToEditor(event: DesktopProRenderEvent): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.webContents.send('desktop:pro-render-event', event)
+  } catch {
+    // The visible window can close between the liveness check and IPC send.
+  }
+}
+
+function anyExportReservedOrActive(): boolean {
+  return saveDialogOpen || jobs.size > 0 || proJobs.size > 0 || Boolean(longExports.active)
+}
+
+function stopProJobResources(job: PreparedProJob, clearDockProgress = true): void {
+  if (job.preparedTimer) {
+    clearTimeout(job.preparedTimer)
+    job.preparedTimer = null
+  }
+  if (job.cancelTimer) {
+    clearTimeout(job.cancelTimer)
+    job.cancelTimer = null
+  }
+  if (job.sleepBlockerId !== null) {
+    try {
+      if (powerSaveBlocker.isStarted(job.sleepBlockerId)) powerSaveBlocker.stop(job.sleepBlockerId)
+    } catch {
+      // Cleanup is best-effort after Blender or app-process failure.
+    }
+  }
+  job.sleepBlockerId = null
+  if (clearDockProgress && mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1)
+}
+
+function rememberTerminalProJob(
+  job: PreparedProJob,
+  result: TerminalProJob['result'],
+): void {
+  const previous = terminalProJobs.get(job.id)
+  if (previous) clearTimeout(previous.expiryTimer)
+  const expiryTimer = setTimeout(() => terminalProJobs.delete(job.id), TERMINAL_JOB_TTL_MS)
+  expiryTimer.unref()
+  terminalProJobs.set(job.id, {
+    ownerWebContentsId: job.ownerWebContentsId,
+    result,
+    expiryTimer,
+  })
+}
+
+function takeProJob(jobId: string): PreparedProJob | null {
+  const job = proJobs.get(jobId)
+  if (!job) return null
+  proJobs.delete(jobId)
+  stopProJobResources(job)
+  installApplicationMenu()
+  return job
+}
+
+function failProJob(jobId: string, code: DesktopRenderErrorCode, message: string): void {
+  const job = takeProJob(jobId)
+  if (!job) return
+  rememberTerminalProJob(job, { state: 'error', error: { code, message } })
+  emitProToEditor({ type: 'error', jobId, code, message })
+  showCompletionNotification('Rasterform Cycles Pro failed', message)
+}
+
+function finishCancelledProJob(jobId: string): void {
+  const job = takeProJob(jobId)
+  if (!job) return
+  rememberTerminalProJob(job, { state: 'cancelled' })
+  emitProToEditor({ type: 'cancelled', jobId })
 }
 
 function stopJobResources(job: PreparedJob, clearDockProgress = true): void {
@@ -286,7 +410,7 @@ function createMainWindow(): BrowserWindow {
     minHeight: 680,
     show: false,
     backgroundColor: '#1f1f1f',
-    title: 'Rasterform',
+    title: app.name,
     webPreferences: {
       preload: join(appRoot(), 'preload.cjs'),
       nodeIntegration: false,
@@ -302,25 +426,52 @@ function createMainWindow(): BrowserWindow {
   configureWindowSecurity(window, `${SCHEME}://app/`)
   window.once('ready-to-show', () => window.show())
   window.on('close', (event) => {
-    const active = longExports.active
-    if (!active || active.ownerWebContentsId !== ownerWebContentsId) return
+    if (quitting) return
+    const activeLongExport = longExports.active
+    if (activeLongExport?.ownerWebContentsId === ownerWebContentsId) {
+      const choice = dialog.showMessageBoxSync(window, {
+        type: 'warning',
+        title: 'Living Loop export in progress',
+        message: 'Keep Rasterform open until the Living Loop finishes?',
+        detail: 'Closing now stops Rasterform’s active export. Any ZIP still being written will be cancelled.',
+        buttons: ['Keep Exporting', 'Stop Export and Close'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      })
+      if (choice === 0) {
+        event.preventDefault()
+        return
+      }
+      longExports.releaseActive(true)
+      return
+    }
+    const activePro = [...proJobs.values()].find((job) => (
+      job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing'
+    ))
+    const activeFinal = [...jobs.values()].find((job) => (
+      job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing'
+    ))
+    if (!activePro && !activeFinal) return
+    const label = activePro ? 'Cycles Pro' : 'Final'
     const choice = dialog.showMessageBoxSync(window, {
       type: 'warning',
-      title: 'Living Loop export in progress',
-      message: 'Keep Rasterform open until the Living Loop finishes?',
-      detail: 'Closing now stops Rasterform’s active export. Any ZIP still being written will be cancelled.',
-      buttons: ['Keep Exporting', 'Stop Export and Close'],
+      title: `${label} render in progress`,
+      message: `Keep Rasterform open until ${label} finishes?`,
+      detail: activePro
+        ? 'Closing now stops only Rasterform’s isolated background Blender process. Any other open Blender project is untouched.'
+        : 'Closing now stops Rasterform’s isolated Final renderer. Your design is safe.',
+      buttons: ['Keep Rendering', 'Stop Render and Close'],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
     })
     if (choice === 0) {
       event.preventDefault()
-      // A deferred quit may have set this while waiting for a Final atomic write.
-      quitting = false
       return
     }
-    longExports.releaseActive(true)
+    if (activePro) requestProCancellation(activePro)
+    else cancelActiveFromMenu()
   })
   window.on('closed', () => {
     longExports.releaseOwner(ownerWebContentsId)
@@ -330,12 +481,22 @@ function createMainWindow(): BrowserWindow {
       // that may successfully land on disk into a reported cancellation.
       if (shouldCancelFinalJobOnEditorClose(job.state)) cancelJob(job.id)
     }
+    for (const job of [...proJobs.values()]) {
+      if (job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing') {
+        requestProCancellation(job)
+      }
+    }
   })
   window.webContents.on('render-process-gone', () => {
     longExports.releaseOwner(ownerWebContentsId)
     for (const job of [...jobs.values()]) {
       if (shouldCancelFinalJobOnEditorClose(job.state)) {
         failJob(job.id, 'process-gone', 'The editor process stopped unexpectedly. Your design is safe.')
+      }
+    }
+    for (const job of [...proJobs.values()]) {
+      if (job.ownerWebContentsId === ownerWebContentsId && job.state !== 'writing') {
+        requestProCancellation(job)
       }
     }
   })
@@ -418,19 +579,38 @@ async function runDesktopSmokeProbe(): Promise<void> {
   configureWindowSecurity(probe, `${SCHEME}://render/`)
   try {
     await probe.loadURL(RENDER_URL)
-    const [editorCapabilities, hdr, assetNames] = await Promise.all([
+    const [editorCapabilities, hdr, assetNames, cyclesScript] = await Promise.all([
       editor.webContents.executeJavaScript(`(async () => {
         const bridge = window.rasterformDesktop;
         const result = {
           protocolVersion: bridge?.protocolVersion ?? null,
           longExportProtocolVersion: bridge?.longExportProtocolVersion ?? null,
+          proRenderProtocolVersion: bridge?.proRenderProtocolVersion ?? null,
           longExportLifecycleAvailable: (
             typeof bridge?.beginLongExport === 'function'
             && typeof bridge?.endLongExport === 'function'
           ),
           longExportLifecycleHandshake: false,
+          proRendererBridgeAvailable: (
+            typeof bridge?.probeProRenderer === 'function'
+            && typeof bridge?.prepareProSave === 'function'
+            && typeof bridge?.submitProRender === 'function'
+            && typeof bridge?.cancelProRender === 'function'
+            && typeof bridge?.onProRenderEvent === 'function'
+          ),
+          proRendererProbeHandshake: false,
           localFontApiAvailable: typeof window.queryLocalFonts === 'function',
         };
+        if (result.proRendererBridgeAvailable) {
+          try {
+            const probe = await bridge.probeProRenderer();
+            result.proRendererProbeHandshake = (
+              typeof probe?.available === 'boolean'
+              && typeof probe?.message === 'string'
+              && (probe?.device === null || probe?.device === 'METAL' || probe?.device === 'CPU')
+            );
+          } catch {}
+        }
         if (!result.longExportLifecycleAvailable) return result;
         try {
           const started = await bridge.beginLongExport({
@@ -446,6 +626,7 @@ async function runDesktopSmokeProbe(): Promise<void> {
       })()`),
       probe.webContents.executeJavaScript(`fetch('/hdri/studio_small_08_1k.hdr').then(async response => ({ ok: response.ok, bytes: (await response.arrayBuffer()).byteLength }))`),
       readdir(join(appRoot(), 'render', 'assets')),
+      readFile(join(appRoot(), 'cycles', 'render.py'), 'utf8'),
     ])
     const bvhWorker = assetNames.find((name) => /^generateMeshBVH\.worker-.*\.js$/.test(name))
     if (!bvhWorker) throw new Error('The packaged BVH worker is missing.')
@@ -543,8 +724,11 @@ async function runDesktopSmokeProbe(): Promise<void> {
     const result = {
       protocolVersion: editorCapabilities.protocolVersion,
       longExportProtocolVersion: editorCapabilities.longExportProtocolVersion,
+      proRenderProtocolVersion: editorCapabilities.proRenderProtocolVersion,
       longExportLifecycleAvailable: editorCapabilities.longExportLifecycleAvailable === true,
       longExportLifecycleHandshake: editorCapabilities.longExportLifecycleHandshake === true,
+      proRendererBridgeAvailable: editorCapabilities.proRendererBridgeAvailable === true,
+      proRendererProbeHandshake: editorCapabilities.proRendererProbeHandshake === true,
       localFontApiAvailable: editorCapabilities.localFontApiAvailable === true,
       editorPid: editor.webContents.getOSProcessId(),
       renderPid: probe.webContents.getOSProcessId(),
@@ -552,6 +736,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
       editorBoundsUnchanged: JSON.stringify(editor.getBounds()) === JSON.stringify(editorBounds),
       hdrLoaded: Boolean(hdr?.ok && hdr.bytes > 1_000),
       bvhWorkerLoaded: workerHandshake === true,
+      cyclesScriptBundled: cyclesScript.includes('emit("COMPLETE"')
+        && cyclesScript.includes('OPEN_EXR_MULTILAYER')
+        && cyclesScript.length > 10_000,
       hiddenBlockedMilliseconds: Math.round(Number(blockedFor)),
       editorHeartbeatBeats: Number(beats),
       heartbeatAttempts,
@@ -560,6 +747,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
       && result.longExportProtocolVersion === DESKTOP_LONG_EXPORT_PROTOCOL_VERSION
       && result.longExportLifecycleAvailable
       && result.longExportLifecycleHandshake
+      && result.proRenderProtocolVersion === DESKTOP_PRO_RENDER_PROTOCOL_VERSION
+      && result.proRendererBridgeAvailable
+      && result.proRendererProbeHandshake
       && result.editorPid > 0
       && result.renderPid > 0
       && result.editorPid !== result.renderPid
@@ -567,6 +757,7 @@ async function runDesktopSmokeProbe(): Promise<void> {
       && result.editorBoundsUnchanged
       && result.hdrLoaded
       && result.bvhWorkerLoaded
+      && result.cyclesScriptBundled
       && result.hiddenBlockedMilliseconds >= 900
       && result.editorHeartbeatBeats >= DESKTOP_SMOKE_HEARTBEAT_REQUIRED_BEATS
     console.log(`RASTERFORM_DESKTOP_SMOKE ${JSON.stringify({ passed, ...result })}`)
@@ -600,7 +791,7 @@ async function savePreferences(): Promise<void> {
 
 async function prepareFinalSave(event: IpcMainInvokeEvent, suggestedName: unknown) {
   if (!isTrustedAppSender(event)) throw new Error('Untrusted Final render request.')
-  if (saveDialogOpen || jobs.size > 0 || longExports.active) {
+  if (anyExportReservedOrActive()) {
     throw new Error('Another export is already active.')
   }
   const fileName = sanitizePngFileName(suggestedName)
@@ -651,6 +842,112 @@ async function prepareFinalSave(event: IpcMainInvokeEvent, suggestedName: unknow
   }
 }
 
+function exrDestinationForPng(pngPath: string): string {
+  const extension = extname(pngPath)
+  if (extension.toLowerCase() !== '.png') throw new Error('Cycles Pro requires a PNG destination.')
+  return pngPath.slice(0, -extension.length) + '.exr'
+}
+
+async function fileSystemPathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return false
+  }
+}
+
+async function inspectProRenderer(): Promise<BlenderProbeResult> {
+  const executable = await findBlenderExecutable()
+  const probe = await probeBlender(executable)
+  lastProProbe = probe
+  return probe
+}
+
+async function probeProRenderer(
+  event: IpcMainInvokeEvent,
+): Promise<DesktopProRendererAvailability> {
+  if (!isTrustedAppSender(event)) throw new Error('Untrusted Cycles Pro compatibility request.')
+  const result = await inspectProRenderer()
+  return {
+    available: result.available,
+    blenderVersion: result.blenderVersion,
+    device: result.device,
+    message: result.message,
+  }
+}
+
+async function prepareProSave(event: IpcMainInvokeEvent, suggestedName: unknown) {
+  if (!isTrustedAppSender(event)) throw new Error('Untrusted Cycles Pro render request.')
+  if (anyExportReservedOrActive()) throw new Error('Another export is already active.')
+  const fileName = sanitizePngFileName(suggestedName)
+  const defaultPath = join(lastExportDirectory ?? app.getPath('downloads'), fileName)
+  saveDialogOpen = true
+  try {
+    let result: Awaited<ReturnType<typeof dialog.showSaveDialog>>
+    try {
+      result = await dialog.showSaveDialog(mainWindow!, {
+        title: 'Save Cycles Pro PNG + EXR',
+        buttonLabel: 'Render and Save Both',
+        defaultPath,
+        filters: [{ name: 'PNG image plus matching EXR', extensions: ['png'] }],
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+        message: 'Rasterform will save a display PNG and a matching multilayer EXR with the same name.',
+      })
+    } catch {
+      throw new Error('The macOS Save dialog could not be opened.')
+    }
+    if (result.canceled || !result.filePath) return { cancelled: true as const }
+    const destination = ensurePngPath(result.filePath)
+    const exrDestination = exrDestinationForPng(destination)
+    if (await fileSystemPathExists(exrDestination)) {
+      const confirmation = await dialog.showMessageBox(mainWindow!, {
+        type: 'warning',
+        title: 'Replace the existing PNG + EXR pair?',
+        message: `${basename(exrDestination)} already exists.`,
+        detail: 'Cycles Pro saves both files as one pair. Neither existing file is changed unless the new render finishes and both outputs validate.',
+        buttons: ['Replace Both', 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      })
+      if (confirmation.response !== 0) return { cancelled: true as const }
+    }
+    const job: PreparedProJob = {
+      id: randomUUID(),
+      ownerWebContentsId: event.sender.id,
+      destination,
+      snapshot: null,
+      state: 'prepared',
+      process: null,
+      cyclesJob: null,
+      outputState: null,
+      sleepBlockerId: null,
+      cancelTimer: null,
+      preparedTimer: null,
+      runPromise: null,
+      stderrTail: '',
+    }
+    job.preparedTimer = setTimeout(() => {
+      const current = proJobs.get(job.id)
+      if (current === job && current.state === 'prepared') {
+        failProJob(
+          job.id,
+          'request-expired',
+          'The Cycles Pro save reservation expired before rendering started. Try Pro again.',
+        )
+      }
+    }, PREPARED_JOB_TTL_MS)
+    job.preparedTimer.unref()
+    proJobs.set(job.id, job)
+    installApplicationMenu()
+    return { cancelled: false as const, jobId: job.id }
+  } finally {
+    saveDialogOpen = false
+  }
+}
+
 function rejectedSubmission(
   code: DesktopRenderErrorCode,
   message: string,
@@ -672,7 +969,7 @@ function beginLongExport(
   if (!isTrustedAppSender(event) || !isDesktopLongExportStartRequest(request)) {
     return rejectedLongExport('invalid-request', 'The long export lifecycle request was invalid.')
   }
-  if (saveDialogOpen || jobs.size > 0) {
+  if (saveDialogOpen || jobs.size > 0 || proJobs.size > 0) {
     return rejectedLongExport('busy', 'Another export is already active.')
   }
   return longExports.begin(event.sender.id, request, randomUUID)
@@ -789,6 +1086,308 @@ async function submitFinalRender(
   })
   installApplicationMenu()
   return { accepted: true }
+}
+
+function rejectedProSubmission(
+  code: DesktopRenderErrorCode,
+  message: string,
+): Extract<DesktopProRenderSubmission, { accepted: false }> {
+  return { accepted: false, error: { code, message } }
+}
+
+function appendStderrTail(job: PreparedProJob, chunk: Buffer): void {
+  job.stderrTail = `${job.stderrTail}${chunk.toString('utf8')}`
+  while (Buffer.byteLength(job.stderrTail) > PRO_STDERR_TAIL_BYTES) {
+    job.stderrTail = job.stderrTail.slice(Math.max(1, Math.floor(job.stderrTail.length / 4)))
+  }
+}
+
+function proJobIsCancelling(job: PreparedProJob): boolean {
+  return job.state === 'cancelling'
+}
+
+async function runCyclesProJob(job: PreparedProJob, blenderPath: string): Promise<void> {
+  let privateJob: CyclesProJob | null = null
+  try {
+    if (!job.snapshot) throw new Error('The Cycles Pro snapshot is missing.')
+    privateJob = await createCyclesProJob(job.snapshot, {
+      scriptPath: join(appRoot(), 'cycles', 'render.py'),
+      hdrPath: join(appRoot(), 'web', 'hdri', 'studio_small_08_1k.hdr'),
+      tempRoot: app.getPath('temp'),
+    })
+    job.cyclesJob = privateJob
+    job.outputState = createCyclesProOutputState(privateJob)
+    if (proJobs.get(job.id) !== job || job.state === 'cancelling') {
+      if (proJobs.get(job.id) === job) finishCancelledProJob(job.id)
+      return
+    }
+
+    const invocation = buildBlenderInvocation(privateJob, blenderPath)
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: invocation.cwd,
+      env: invocation.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      windowsHide: true,
+    })
+    job.process = child
+    let stdoutRemainder = ''
+    let protocolFailure: Error | null = null
+    let scriptFailure: Error | null = null
+
+    const acceptLine = (line: string) => {
+      if (protocolFailure) return
+      try {
+        const parsed = parseCyclesProOutput(line, job.outputState!)
+        if (!parsed) return
+        if (parsed.type === 'progress') {
+          mainWindow?.setProgressBar(dockProgress(parsed.progress))
+          emitProToEditor({ type: 'progress', jobId: job.id, progress: parsed.progress })
+        } else if (parsed.type === 'error') {
+          scriptFailure = new Error('Blender reported that the Cycles scene could not finish.')
+        }
+      } catch (error) {
+        protocolFailure = error instanceof Error ? error : new Error('Invalid Cycles Pro output.')
+        try {
+          child.kill('SIGTERM')
+        } catch {
+          // The process may already be exiting after a malformed terminal line.
+        }
+      }
+    }
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutRemainder += chunk.toString('utf8')
+      if (Buffer.byteLength(stdoutRemainder) > 1024 * 1024) {
+        protocolFailure = new Error('Cycles Pro produced an unexpectedly long status line.')
+        child.kill('SIGTERM')
+        return
+      }
+      const lines = stdoutRemainder.split(/\r?\n/)
+      stdoutRemainder = lines.pop() ?? ''
+      for (const line of lines) acceptLine(line)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => appendStderrTail(job, chunk))
+
+    const outcome = await new Promise<{
+      code: number | null
+      signal: NodeJS.Signals | null
+      spawnError: Error | null
+    }>((resolvePromise) => {
+      let settled = false
+      const finish = (
+        code: number | null,
+        signal: NodeJS.Signals | null,
+        spawnError: Error | null,
+      ) => {
+        if (settled) return
+        settled = true
+        if (stdoutRemainder) acceptLine(stdoutRemainder)
+        resolvePromise({ code, signal, spawnError })
+      }
+      child.once('error', (error) => finish(null, null, error))
+      child.once('close', (code, signal) => finish(code, signal, null))
+    })
+    job.process = null
+    if (proJobs.get(job.id) !== job) return
+    if (proJobIsCancelling(job)) {
+      finishCancelledProJob(job.id)
+      return
+    }
+    if (outcome.spawnError || outcome.code !== 0 || outcome.signal) {
+      throw new Error('The isolated background Blender process stopped before completing the render.')
+    }
+    if (protocolFailure) throw protocolFailure
+    if (scriptFailure || job.outputState.error) throw scriptFailure ?? new Error('Cycles Pro failed.')
+    const completion = job.outputState.completion
+    if (!completion || !job.outputState.blenderVersion || !job.outputState.device) {
+      throw new Error('Cycles Pro did not return complete renderer metadata.')
+    }
+
+    // Commit performs a second, native-side contract boundary: it validates the
+    // exact RGBA PNG dimensions and every required multipart EXR pass before it
+    // can replace either user destination.
+    job.state = 'writing'
+    stopProJobResources(job, false)
+    mainWindow?.setProgressBar(1)
+    const committed = await commitCyclesProOutputsAtomically(privateJob, job.destination)
+    if (proJobs.get(job.id) !== job) return
+    const result: DesktopSavedProResult = {
+      width: job.snapshot.width,
+      height: job.snapshot.height,
+      maxSamples: job.snapshot.settings.maxSamples,
+      noiseThreshold: job.snapshot.settings.noiseThreshold,
+      pngFileName: basename(committed.pngPath),
+      exrFileName: basename(committed.exrPath),
+      blenderVersion: job.outputState.blenderVersion,
+      device: job.outputState.device,
+      elapsedSeconds: completion.elapsedSeconds,
+    }
+    rememberTerminalProJob(job, { state: 'saved', result })
+    proJobs.delete(job.id)
+    stopProJobResources(job)
+    lastExportPath = committed.pngPath
+    lastExportDirectory = dirname(committed.pngPath)
+    try {
+      app.addRecentDocument(committed.pngPath)
+      app.addRecentDocument(committed.exrPath)
+    } catch {
+      // Recent Documents is optional; both validated files remain saved.
+    }
+    void savePreferences()
+    emitProToEditor({ type: 'saved', jobId: job.id, result })
+    installApplicationMenu()
+    showCompletionNotification(
+      'Rasterform Cycles Pro saved',
+      `${result.width.toLocaleString()} × ${result.height.toLocaleString()} · PNG + multilayer EXR · ${result.device}`,
+    )
+  } catch (error) {
+    if (job.process) {
+      try {
+        job.process.kill('SIGTERM')
+      } catch {
+        // Only this job's child is ever addressed; it may already have exited.
+      }
+      job.process = null
+    }
+    if (proJobs.get(job.id) === job) {
+      if (job.state === 'cancelling') finishCancelledProJob(job.id)
+      else {
+        if (job.stderrTail) console.error(`RASTERFORM_CYCLES_PRO_STDERR\n${job.stderrTail}`)
+        console.error('RASTERFORM_CYCLES_PRO_ERROR', error)
+        failProJob(
+          job.id,
+          'render-failed',
+          'The isolated Blender Cycles renderer could not finish. Your Rasterform design and any open Blender project are safe.',
+        )
+      }
+    }
+  } finally {
+    job.process = null
+    if (privateJob) {
+      await cleanupCyclesProJob(privateJob).catch((error) => {
+        console.error('RASTERFORM_CYCLES_PRO_CLEANUP_ERROR', error)
+      })
+    }
+    job.cyclesJob = null
+    job.outputState = null
+  }
+}
+
+async function submitProRender(
+  event: IpcMainInvokeEvent,
+  jobId: unknown,
+  snapshot: unknown,
+): Promise<DesktopProRenderSubmission> {
+  const unavailable = rejectedProSubmission(
+    'request-expired',
+    'The Cycles Pro save reservation is no longer available. Open Pro and choose the destination again.',
+  )
+  if (!isTrustedAppSender(event) || typeof jobId !== 'string') return unavailable
+  const job = proJobs.get(jobId)
+  if (!job || job.ownerWebContentsId !== event.sender.id || job.state !== 'prepared') {
+    const terminal = terminalProJobs.get(jobId)
+    if (terminal?.ownerWebContentsId === event.sender.id && terminal.result.state === 'error') {
+      return { accepted: false, error: terminal.result.error }
+    }
+    return unavailable
+  }
+  try {
+    assertDesktopProRenderSnapshot(snapshot)
+  } catch {
+    const failure = rejectedProSubmission('render-failed', 'The Cycles Pro render request was invalid.')
+    failProJob(job.id, failure.error.code, failure.error.message)
+    return failure
+  }
+
+  let probe = lastProProbe
+  if (!probe?.available || !probe.executablePath) probe = await inspectProRenderer()
+  if (proJobs.get(job.id) !== job || job.state !== 'prepared') return unavailable
+  if (!probe.available || !probe.executablePath) {
+    const failure = rejectedProSubmission('render-failed', probe.message)
+    failProJob(job.id, failure.error.code, failure.error.message)
+    return failure
+  }
+
+  job.snapshot = snapshot
+  job.state = 'rendering'
+  if (job.preparedTimer) {
+    clearTimeout(job.preparedTimer)
+    job.preparedTimer = null
+  }
+  try {
+    job.sleepBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    if (!powerSaveBlocker.isStarted(job.sleepBlockerId)) throw new Error('Sleep blocker did not start.')
+  } catch {
+    const failure = rejectedProSubmission(
+      'render-failed',
+      'Rasterform could not protect Cycles Pro from system sleep. Your design is safe.',
+    )
+    failProJob(job.id, failure.error.code, failure.error.message)
+    return failure
+  }
+  mainWindow?.setProgressBar(0)
+  const run = runCyclesProJob(job, probe.executablePath)
+  job.runPromise = run
+  pendingProRuns.add(run)
+  void run.finally(() => {
+    pendingProRuns.delete(run)
+    job.runPromise = null
+  })
+  installApplicationMenu()
+  return { accepted: true }
+}
+
+function requestProCancellation(job: PreparedProJob): DesktopProCancelResult {
+  const action = finalRenderCancellationAction(job.state)
+  if (action === 'cancel-now') {
+    finishCancelledProJob(job.id)
+    return { state: 'cancelled' }
+  }
+  if (action === 'finish-save') return { state: 'saving' }
+  if (action === 'await-cancel') return { state: 'cancelling' }
+  job.state = 'cancelling'
+  try {
+    job.process?.kill('SIGTERM')
+  } catch {
+    // The background child may already be closing; its close event settles.
+  }
+  job.cancelTimer = setTimeout(() => {
+    if (proJobs.get(job.id) !== job || job.state !== 'cancelling') return
+    if (!job.process) {
+      finishCancelledProJob(job.id)
+      return
+    }
+    try {
+      // Kill only the ChildProcess object created for this job. Never search
+      // for Blender PIDs, process names, windows, or the user's open project.
+      job.process.kill('SIGKILL')
+    } catch {
+      finishCancelledProJob(job.id)
+    }
+  }, PRO_CANCEL_GRACE_MS)
+  job.cancelTimer.unref()
+  installApplicationMenu()
+  return { state: 'cancelling' }
+}
+
+function requestProCancel(
+  event: IpcMainInvokeEvent,
+  jobId: unknown,
+): DesktopProCancelResult {
+  const unavailable: DesktopProCancelResult = {
+    state: 'error',
+    error: {
+      code: 'request-expired',
+      message: 'The Cycles Pro render is no longer active. Open Pro to start another render.',
+    },
+  }
+  if (!isTrustedAppSender(event) || typeof jobId !== 'string') return unavailable
+  const job = proJobs.get(jobId)
+  if (!job || job.ownerWebContentsId !== event.sender.id) {
+    const terminal = terminalProJobs.get(jobId)
+    return terminal?.ownerWebContentsId === event.sender.id ? terminal.result : unavailable
+  }
+  return requestProCancellation(job)
 }
 
 function cancellationError(message: string): DesktopFinalCancelResult {
@@ -960,6 +1559,11 @@ function handleRenderComplete(
 }
 
 function cancelActiveFromMenu(): void {
+  const proJob = [...proJobs.values()].find((candidate) => candidate.state === 'rendering')
+  if (proJob) {
+    requestProCancellation(proJob)
+    return
+  }
   const job = [...jobs.values()].find((candidate) => candidate.state === 'rendering')
   if (!job) return
   job.state = 'cancelling'
@@ -975,6 +1579,7 @@ function cancelActiveFromMenu(): void {
 
 function installApplicationMenu(): void {
   const active = [...jobs.values()].some((job) => job.state === 'rendering' || job.state === 'cancelling')
+    || [...proJobs.values()].some((job) => job.state === 'rendering' || job.state === 'cancelling')
   const template: MenuItemConstructorOptions[] = [
     {
       label: app.name,
@@ -999,7 +1604,7 @@ function installApplicationMenu(): void {
           click: () => { if (lastExportPath) shell.showItemInFolder(lastExportPath) },
         },
         {
-          label: 'Cancel Final Render',
+          label: 'Cancel Active Render',
           accelerator: 'CommandOrControl+.',
           enabled: active,
           click: cancelActiveFromMenu,
@@ -1068,6 +1673,10 @@ function installIpc(): void {
   ipcMain.handle('desktop:cancel-final-render', requestCancel)
   ipcMain.handle('desktop:begin-long-export', beginLongExport)
   ipcMain.handle('desktop:end-long-export', endLongExport)
+  ipcMain.handle('desktop:probe-pro-renderer', probeProRenderer)
+  ipcMain.handle('desktop:prepare-pro-save', prepareProSave)
+  ipcMain.handle('desktop:submit-pro-render', submitProRender)
+  ipcMain.handle('desktop:cancel-pro-render', requestProCancel)
   ipcMain.on('desktop:render-progress', handleRenderProgress)
   ipcMain.on('desktop:render-cancelled', handleRenderCancelled)
   ipcMain.on('desktop:render-failed', handleRenderFailed)
@@ -1145,7 +1754,6 @@ function installLongExportDownloadLifecycle(): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.setName('Rasterform')
   app.on('second-instance', () => {
     if (!mainWindow) return
     if (mainWindow.isMinimized()) mainWindow.restore()
@@ -1154,10 +1762,13 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('before-quit', (event) => {
-    if (quitting || pendingWrites.size === 0) return
+    if (quitting || (pendingWrites.size === 0 && pendingProRuns.size === 0)) return
     event.preventDefault()
     quitting = true
-    void Promise.allSettled([...pendingWrites]).then(() => app.quit())
+    for (const job of [...proJobs.values()]) {
+      if (job.state !== 'writing') requestProCancellation(job)
+    }
+    void Promise.allSettled([...pendingWrites, ...pendingProRuns]).then(() => app.quit())
   })
 
   app.whenReady().then(async () => {
@@ -1203,3 +1814,4 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 export const desktopProtocolVersion = DESKTOP_PROTOCOL_VERSION
+export const desktopProRenderProtocolVersion = DESKTOP_PRO_RENDER_PROTOCOL_VERSION

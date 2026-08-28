@@ -6,10 +6,15 @@ import {
   type DesktopLongExportOutcome,
   type DesktopLongExportStartRequest,
   type DesktopRenderEvent,
-  type RasterformDesktopLongExportBridge,
 } from '../src/desktop/contracts'
+import {
+  DESKTOP_PRO_RENDER_PROTOCOL_VERSION,
+  type DesktopProRenderEvent,
+  type DesktopProRenderSnapshot,
+  type RasterformDesktopProBridge,
+} from '../src/desktop/pro-contracts'
 
-const bridge: RasterformDesktopLongExportBridge = Object.freeze({
+const bridge: RasterformDesktopProBridge = Object.freeze({
   protocolVersion: DESKTOP_PROTOCOL_VERSION,
   longExportProtocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
   prepareFinalSave: (suggestedName: string) => ipcRenderer.invoke('desktop:prepare-final-save', suggestedName),
@@ -28,6 +33,20 @@ const bridge: RasterformDesktopLongExportBridge = Object.freeze({
   endLongExport: (jobId: string, outcome: DesktopLongExportOutcome) => (
     ipcRenderer.invoke('desktop:end-long-export', jobId, outcome)
   ),
+  proRenderProtocolVersion: DESKTOP_PRO_RENDER_PROTOCOL_VERSION,
+  probeProRenderer: () => ipcRenderer.invoke('desktop:probe-pro-renderer'),
+  prepareProSave: (suggestedName: string) => (
+    ipcRenderer.invoke('desktop:prepare-pro-save', suggestedName)
+  ),
+  submitProRender: (jobId: string, snapshot: DesktopProRenderSnapshot) => (
+    ipcRenderer.invoke('desktop:submit-pro-render', jobId, snapshot)
+  ),
+  cancelProRender: (jobId: string) => ipcRenderer.invoke('desktop:cancel-pro-render', jobId),
+  onProRenderEvent: (listener: (event: DesktopProRenderEvent) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: DesktopProRenderEvent) => listener(payload)
+    ipcRenderer.on('desktop:pro-render-event', wrapped)
+    return () => ipcRenderer.removeListener('desktop:pro-render-event', wrapped)
+  },
 })
 
 contextBridge.exposeInMainWorld('rasterformDesktop', bridge)

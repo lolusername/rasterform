@@ -49,6 +49,9 @@ describe('desktop packaging invariants', () => {
     expect(packageJson.scripts['smoke:packaged']).toContain('smoke-packaged.mjs')
     expect(packageJson.scripts['smoke:packaged']).not.toContain('universal')
     expect(packageJson.scripts['smoke:packaged:arm64']).toContain('package:arm64')
+    expect(packageJson.scripts['package:lab:arm64']).toContain('RASTERFORM_RENDERER_LAB=1')
+    expect(packageJson.scripts['smoke:packaged:lab:arm64']).toContain('RASTERFORM_RENDERER_LAB=1')
+    expect(packageJson.scripts['verify:packaged:lab:arm64']).toContain('RASTERFORM_RENDERER_LAB=1')
     expect(packageJson.scripts['smoke:packaged:existing:universal'])
       .toContain('smoke-packaged.mjs universal')
     expect(packageJson.scripts['verify:packaged:universal']).toContain('verify-package.mjs')
@@ -164,7 +167,8 @@ describe('desktop packaging invariants', () => {
     expect(contract).toContain('strictlyRequireAllFuses: true')
     expect(contract).toContain("['arm64', 'x64', 'universal'].includes(architecture)")
     expect(packageScript).toContain('flipFuses(')
-    expect(packageScript).toContain('verifyPackagedApplication(applicationPath, architecture)')
+    expect(packageScript).toContain('verifyPackagedApplication(applicationPath, architecture, {')
+    expect(packageScript).toContain("bundleId = rendererLab ? 'io.atil.rasterform.rendererlab'")
     expect(packageScript).toContain("CFBundleIconFile: 'Rasterform.icns'")
 
     expect(smokeScript).toContain('delete childEnvironment.ELECTRON_RUN_AS_NODE')
@@ -172,7 +176,7 @@ describe('desktop packaging invariants', () => {
     expect(smokeScript).toContain('SMOKE_TIMEOUT_MS = 90_000')
     expect(smokeScript).toContain("child.kill('SIGKILL')")
     expect(smokeScript).not.toMatch(/--remote-debugging-port|--inspect(?:-brk)?/)
-    expect(packagedSmoke).toContain('verifyPackagedApplication(applicationPath, architecture)')
+    expect(packagedSmoke).toContain('verifyPackagedApplication(applicationPath, architecture, {')
     expect(packagedSmoke).toContain("join(scriptsDirectory, 'smoke.mjs')")
     expect(packagedSmoke).toContain('resolvePackagedSmokeArchitecture(process.argv[2])')
     expect(packageScript).toContain('resolvePackageArchitectures(process.argv.slice(2))')
@@ -225,6 +229,7 @@ describe('desktop packaging invariants', () => {
       await writeFixture(join(fixtureElectron, '.build/runtime/main.cjs'), 'main runtime')
       await writeFixture(join(fixtureElectron, '.build/runtime/preload.cjs'), 'editor preload')
       await writeFixture(join(fixtureElectron, '.build/runtime/render-preload.cjs'), 'render preload')
+      await writeFixture(join(fixtureElectron, 'cycles/render.py'), 'cycles renderer')
       await writeFixture(join(fixtureElectron, '.stage/stale.txt'), 'must be deleted')
 
       await execFileAsync(process.execPath, [fixtureScript], { cwd: fixtureElectron })
@@ -251,6 +256,7 @@ describe('desktop packaging invariants', () => {
       await expect(
         readFile(join(stage, 'render/hdri/studio_small_08_1k.hdr'), 'utf8'),
       ).resolves.toBe('render hdr')
+      await expect(readFile(join(stage, 'cycles/render.py'), 'utf8')).resolves.toBe('cycles renderer')
 
       const runtimePackage = JSON.parse(await readFile(join(stage, 'package.json'), 'utf8'))
       expect(runtimePackage).toMatchObject({
