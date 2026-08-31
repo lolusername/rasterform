@@ -21,7 +21,7 @@ beforeAll(() => {
 })
 
 const field: ScalarField = { width: 2, height: 2, values: new Float32Array([0, .4, .7, 1]) }
-const image: PixelImage = { width: 2, height: 2, name: 'test', data: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]) }
+const image: PixelImage = { width: 2, height: 2, sourceWidth: 2, sourceHeight: 2, name: 'test', data: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]) }
 const mesh = buildMesh(field, image, { mode: 'solid', resolution: 8, depth: .4, midpoint: .5, baseThickness: .4 })
 
 describe('portable mesh exports', () => {

@@ -5,6 +5,8 @@ import type { ChannelLayer, PixelImage } from '../types'
 const image: PixelImage = {
   width: 2,
   height: 1,
+  sourceWidth: 2,
+  sourceHeight: 1,
   name: 'two-pixels',
   data: new Uint8ClampedArray([
     255, 0, 0, 255,

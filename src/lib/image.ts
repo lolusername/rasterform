@@ -48,7 +48,7 @@ export function createDemoImage(width = 360, height = 270): PixelImage {
       data[offset + 3] = 255
     }
   }
-  return { width, height, data, name: 'Demo image' }
+  return { width, height, sourceWidth: width, sourceHeight: height, data, name: 'Demo image' }
 }
 
 export async function fileToPixelImage(file: File, maxLongSide = 1280): Promise<PixelImage> {
@@ -56,18 +56,30 @@ export async function fileToPixelImage(file: File, maxLongSide = 1280): Promise<
     throw new Error('Choose a PNG, JPEG, or WebP image.')
   }
   const bitmap = await createImageBitmap(file)
-  const scale = Math.min(1, maxLongSide / Math.max(bitmap.width, bitmap.height))
-  const width = Math.max(2, Math.round(bitmap.width * scale))
-  const height = Math.max(2, Math.round(bitmap.height * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const context = canvas.getContext('2d', { willReadFrequently: true })
-  if (!context) throw new Error('Canvas image processing is unavailable.')
-  context.drawImage(bitmap, 0, 0, width, height)
-  bitmap.close()
-  const pixels = context.getImageData(0, 0, width, height)
-  return { width, height, data: pixels.data, name: file.name }
+  const sourceWidth = bitmap.width
+  const sourceHeight = bitmap.height
+  try {
+    const scale = Math.min(1, maxLongSide / Math.max(sourceWidth, sourceHeight))
+    const width = Math.max(2, Math.round(sourceWidth * scale))
+    const height = Math.max(2, Math.round(sourceHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) throw new Error('Canvas image processing is unavailable.')
+    context.drawImage(bitmap, 0, 0, width, height)
+    const pixels = context.getImageData(0, 0, width, height)
+    return {
+      width,
+      height,
+      sourceWidth,
+      sourceHeight,
+      data: pixels.data,
+      name: file.name,
+    }
+  } finally {
+    bitmap.close()
+  }
 }
 
 export function drawPixelImage(canvas: HTMLCanvasElement, image: PixelImage): void {

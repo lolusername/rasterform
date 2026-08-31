@@ -39,6 +39,7 @@ import type {
 } from '../desktop/pro-contracts'
 import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
+import { createStillExportCamera } from '../lib/straight-on-camera'
 import {
   DEFAULT_LIVING_FORM_SETTINGS,
   createLivingFormEngine,
@@ -49,6 +50,7 @@ import type {
   AppearanceSettings,
   ColorMode,
   ImageExportBackground,
+  ImageExportView,
   LivingFormSettings,
   MeshData,
   ViewportBackground,
@@ -229,6 +231,7 @@ async function captureHighPng(
   dimensions: { width: number; height: number },
   background: ImageExportBackground,
   livingPhase = props.livingPhase,
+  view: ImageExportView = 'current',
 ): Promise<ViewportPngResult> {
   const loopSnapshot = livingFormLoopSnapshot
   if (!canvas.value || !renderer || !camera || (!props.mesh && !loopSnapshot)) {
@@ -242,10 +245,11 @@ async function captureHighPng(
     controls?.update()
     camera.updateMatrixWorld(true)
   }
-  const exportCamera = loopSnapshot?.camera.clone() ?? camera.clone()
   const exportMesh = loopSnapshot
     ? loopSnapshot.engine.sampleMesh(livingPhase, loopSnapshot.settings)
     : snapshotLivingFormMesh(livingPhase)
+  const cameraTemplate = loopSnapshot?.camera ?? camera
+  const exportCamera = createStillExportCamera(exportMesh, dimensions, cameraTemplate, view)
   const exportColorMode = loopSnapshot?.colorMode ?? props.colorMode
   const exportAppearance: AppearanceSettings = loopSnapshot
     ? {
@@ -353,6 +357,7 @@ async function captureFinalPng(
   background: ImageExportBackground,
   suggestedName = 'rasterform-final.png',
   livingPhase = props.livingPhase,
+  view: ImageExportView = 'current',
 ): Promise<FinalImagePngResult | DesktopFinalCaptureResult> {
   if (!canvas.value || !camera || !props.mesh) throw new Error('There is no model to export.')
   if (Math.max(dimensions.width, dimensions.height) > 4096) {
@@ -364,8 +369,8 @@ async function captureFinalPng(
   exportActive.value = true
   controls?.update()
   camera.updateMatrixWorld(true)
-  const exportCamera = camera.clone()
   const exportMesh = snapshotLivingFormMesh(livingPhase)
+  const exportCamera = createStillExportCamera(exportMesh, dimensions, camera, view)
   const exportColorMode = props.colorMode
   const exportAppearance: AppearanceSettings = {
     heightGradient: { ...props.appearance.heightGradient },
@@ -428,6 +433,7 @@ async function captureProRender(
   settings: DesktopProRenderSettings,
   suggestedName = 'rasterform-pro.png',
   livingPhase = props.livingPhase,
+  view: ImageExportView = 'current',
 ): Promise<DesktopProCaptureResult> {
   if (!camera || !props.mesh) throw new Error('There is no model to export.')
   if (Math.max(dimensions.width, dimensions.height) > 4096) {
@@ -443,8 +449,8 @@ async function captureProRender(
   exportActive.value = true
   controls?.update()
   camera.updateMatrixWorld(true)
-  const exportCamera = camera.clone()
   const exportMesh = snapshotLivingFormMesh(livingPhase)
+  const exportCamera = createStillExportCamera(exportMesh, dimensions, camera, view)
   const exportColorMode = props.colorMode
   const exportAppearance: AppearanceSettings = {
     heightGradient: { ...props.appearance.heightGradient },

@@ -17,6 +17,7 @@ export type ClayFinish = 'matte' | 'glossy' | 'metallic'
 export type ViewportBackground = 'white' | 'dark-gray' | 'black'
 export type ImageExportQuality = 'high' | 'final' | 'pro'
 export type ImageExportBackground = 'transparent' | 'studio'
+export type ImageExportView = 'current' | 'straight-on'
 export type ImageExportLongEdge = 2048 | 4096 | 8192
 export type ViewportSupersample = 1 | 2
 export type WorkspaceMode = 'image' | 'text'
@@ -25,8 +26,12 @@ export type FontSource = 'default' | 'detected' | 'local'
 export type LivingFormBehavior = 'breathe' | 'ripple' | 'flow' | 'melt'
 
 export interface PixelImage {
+  /** Working raster dimensions used to build the mesh. */
   width: number
   height: number
+  /** Original decoded file dimensions, retained without keeping the full source bitmap. */
+  sourceWidth: number
+  sourceHeight: number
   data: Uint8ClampedArray
   name: string
 }

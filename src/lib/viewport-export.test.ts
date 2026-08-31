@@ -5,6 +5,7 @@ import {
   assertCanvasHasTransparentBackground,
   assertPngContract,
   calculateRenderTiles,
+  calculateStillImageDimensions,
   calculateViewportDimensions,
   inspectPngHeader,
   padRenderTile,
@@ -51,6 +52,15 @@ describe('transparent viewport export', () => {
     expect(calculateViewportDimensions(1600, 1000, 4096)).toEqual({ width: 4096, height: 2560 })
     expect(calculateViewportDimensions(1000, 1600, 4096)).toEqual({ width: 2560, height: 4096 })
     expect(calculateViewportDimensions(800, 800, 8192)).toEqual({ width: 8192, height: 8192 })
+  })
+
+  it('uses exact original dimensions only for the straight-on still view', () => {
+    expect(calculateStillImageDimensions(1280, 853, 6000, 4000, 4096, 'straight-on'))
+      .toEqual({ width: 6000, height: 4000 })
+    expect(calculateStillImageDimensions(1280, 853, 6000, 4000, 4096, 'current'))
+      .toEqual({ width: 4096, height: 2730 })
+    expect(() => calculateStillImageDimensions(1280, 853, 0, 4000, 4096, 'straight-on'))
+      .toThrow('positive whole pixels')
   })
 
   it('tiles non-divisible output dimensions without gaps or overlaps', () => {

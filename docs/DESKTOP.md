@@ -35,6 +35,12 @@ The packaged Electron executable is hardened after ASAR creation and before any 
 
 The regular browser path remains available when the desktop bridge is absent. Electron main/preload code must never be imported into the web bundle.
 
+## Image Still framing and dimensions
+
+The Image workspace's Still export has two framing modes. **Current view** snapshots the existing editor camera and uses the selected 2K or 4K long edge, with 8K available through High. **Straight on** constructs a fresh, front-aligned camera for that export and uses the uploaded source image's exact original width and height. The export-only camera must not mutate or replace the editor camera.
+
+Framing and output dimensions are independent of rendering quality. Straight on must not rebuild the mesh, alter its material, or lower any renderer setting. High remains the existing 2× tiled path. Final and Cycles Pro keep their full current quality contracts and remain capped at 4K; therefore a source original above 4K can be exported at its exact pixel dimensions only through High. This feature applies only to Image Still exports. Living Loop retains the current camera, 2K/4K dimensions, and High 2× renderer unchanged.
+
 ## Non-negotiable Final quality
 
 Desktop Final calls the same implementation in [`src/lib/final-image-export.ts`](../src/lib/final-image-export.ts). There is no desktop copy of the renderer and no desktop-specific sample target. An IPC caller cannot supply or lower the sample count.
@@ -49,7 +55,7 @@ The quality invariant is:
 - Path-tracer work split into a 3 × 3 schedule, with `renderScale = 1`, `dynamicLowRes = false`, and no rasterized-scene fallback.
 - Output tiles no larger than 1,024 pixels, with the existing eight-pixel denoise overlap.
 - Denoising remains `{ sigma: 2.5, kSigma: 1.5, threshold: 0.055 }`.
-- PNG output preserves the requested 2K or 4K dimensions, transparency or selected flat studio background, RGBA content, and 300 PPI metadata.
+- PNG output preserves the requested 2K or 4K dimensions, or Straight on's exact source dimensions within the 4K maximum, together with transparency or the selected flat studio background, RGBA content, and 300 PPI metadata.
 
 Progress scheduling, process isolation, direct-to-disk saving, and a long runtime are allowed. Reducing samples, bounces, resolution, denoising, material behavior, or lighting to satisfy an arbitrary time limit is not allowed. Elapsed time is diagnostic data, not a pass/fail quality criterion.
 

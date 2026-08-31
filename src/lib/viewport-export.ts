@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { ImageExportLongEdge, ViewportSupersample } from '../types'
+import type { ImageExportLongEdge, ImageExportView, ViewportSupersample } from '../types'
 
 export const GUIDE_LAYER = 31
 export const PNG_DPI = 300
@@ -71,6 +71,22 @@ export function calculateViewportDimensions(
     width: Math.max(1, Math.round(longEdge * sourceWidth / sourceHeight)),
     height: longEdge,
   }
+}
+
+export function calculateStillImageDimensions(
+  workingWidth: number,
+  workingHeight: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  longEdge: ImageExportLongEdge,
+  view: ImageExportView,
+): ViewportDimensions {
+  if (view === 'current') return calculateViewportDimensions(workingWidth, workingHeight, longEdge)
+  if (!Number.isSafeInteger(sourceWidth) || sourceWidth <= 0
+    || !Number.isSafeInteger(sourceHeight) || sourceHeight <= 0) {
+    throw new RangeError('Original image dimensions must be positive whole pixels.')
+  }
+  return { width: sourceWidth, height: sourceHeight }
 }
 
 export function calculateRenderTiles(width: number, height: number, tileEdge: number): RenderTile[] {

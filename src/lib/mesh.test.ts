@@ -12,6 +12,8 @@ const field: ScalarField = {
 const image: PixelImage = {
   width: 3,
   height: 3,
+  sourceWidth: 3,
+  sourceHeight: 3,
   name: 'test',
   data: new Uint8ClampedArray(Array.from({ length: 9 }, (_, index) => [index * 25, 80, 220 - index * 20, 255]).flat()),
 }
