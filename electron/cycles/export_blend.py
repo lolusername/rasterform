@@ -24,19 +24,23 @@ import re
 import sys
 import time
 import traceback
+import zlib
 from typing import Any, NoReturn
 
 import bpy
 
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 MAX_VERTICES = 2_000_000
 MAX_INDICES = 12_000_000
 MAX_MESH_BYTES = 256 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
+MAX_TEXTURE_BYTES = 512 * 1024 * 1024
+MAX_TEXTURE_PIXELS = 100_000_000
 STATUS_PREFIX = "RASTERFORM_"
 COLOR_ATTRIBUTE_NAME = "RasterformColor"
 UV_LAYER_NAME = "UVMap"
+SOURCE_UV_LAYER_NAME = "SourceUV"
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 ROOT_KEYS = {
@@ -47,6 +51,7 @@ ROOT_KEYS = {
     "appearance",
     "settings",
     "output",
+    "texture",
 }
 MESH_KEYS = {
     "positions",
@@ -210,6 +215,29 @@ def parse_manifest(path: Path) -> dict[str, Any]:
             fail(f"mesh.{key} has the wrong byte length.")
     mesh["resolvedPaths"] = paths
 
+    texture = manifest["texture"]
+    if texture is not None:
+        texture = expect_object(texture, "texture", {
+            "path", "mimeType", "width", "height", "name", "bytes", "sha256",
+        })
+        expect_string(texture["mimeType"], "texture.mimeType", {"image/png"})
+        texture_width = expect_integer(texture["width"], "texture.width", 1, 16_384)
+        texture_height = expect_integer(texture["height"], "texture.height", 1, 16_384)
+        if texture_width * texture_height > MAX_TEXTURE_PIXELS:
+            fail("The source bitmap exceeds the native texture pixel boundary.")
+        texture_name = expect_string(texture["name"], "texture.name")
+        if len(texture_name) > 255 or re.search(r"[\x00-\x1f\x7f:/\\]", texture_name):
+            fail("texture.name must be a display filename, not a path.")
+        texture_bytes = expect_integer(texture["bytes"], "texture.bytes", 57, MAX_TEXTURE_BYTES)
+        digest = expect_string(texture["sha256"], "texture.sha256")
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail("texture.sha256 must be a SHA-256 digest.")
+        texture_path = resolve_inside(root, texture["path"], "texture.path", must_exist=True)
+        if texture_path.stat().st_size != texture_bytes:
+            fail("The source bitmap has the wrong byte length.")
+        texture["resolvedPath"] = texture_path
+        validate_png(texture)
+
     appearance = expect_object(manifest["appearance"], "appearance", {"heightGradient", "clay"})
     gradient = expect_object(
         appearance["heightGradient"],
@@ -235,11 +263,74 @@ def parse_manifest(path: Path) -> dict[str, Any]:
     output = resolve_inside(root, manifest["output"], "output", must_exist=False)
     if output.suffix.lower() != ".blend":
         fail("output must use the .blend extension.")
-    if output == resolved_manifest or output in paths.values():
+    if (output == resolved_manifest or output in paths.values()
+            or (texture is not None and output == texture["resolvedPath"])):
         fail("output must be separate from the manifest and mesh inputs.")
     manifest["root"] = root
     manifest["resolvedOutput"] = output
     return manifest
+
+
+def validate_png(texture: dict[str, Any]) -> None:
+    """Validate the entire bounded PNG before handing it to Blender's decoder."""
+    path = texture["resolvedPath"]
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        signature = handle.read(8)
+        digest.update(signature)
+        if signature != b"\x89PNG\r\n\x1a\n":
+            fail("The source bitmap is not a PNG image.")
+        seen_header = False
+        seen_data = False
+        seen_end = False
+        while not seen_end:
+            header = handle.read(8)
+            if len(header) != 8:
+                fail("The source bitmap contains a truncated PNG chunk.")
+            length = int.from_bytes(header[:4], "big")
+            kind = header[4:]
+            if length > MAX_TEXTURE_BYTES or handle.tell() + length + 4 > texture["bytes"]:
+                fail("The source bitmap contains an invalid PNG chunk length.")
+            if not seen_header and (kind != b"IHDR" or length != 13):
+                fail("The source bitmap is missing its PNG header.")
+            if seen_header and kind == b"IHDR":
+                fail("The source bitmap has multiple PNG headers.")
+            digest.update(header)
+            checksum = zlib.crc32(kind)
+            remaining = length
+            header_data = b""
+            while remaining:
+                data = handle.read(min(1024 * 1024, remaining))
+                if not data:
+                    fail("The source bitmap contains truncated PNG data.")
+                remaining -= len(data)
+                checksum = zlib.crc32(data, checksum)
+                digest.update(data)
+                if kind == b"IHDR":
+                    header_data += data
+            crc = handle.read(4)
+            digest.update(crc)
+            if len(crc) != 4 or int.from_bytes(crc, "big") != checksum:
+                fail("The source bitmap failed PNG checksum validation.")
+            if kind == b"IHDR":
+                width = int.from_bytes(header_data[:4], "big")
+                height = int.from_bytes(header_data[4:8], "big")
+                legal_depths = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8},
+                                4: {8, 16}, 6: {8, 16}}
+                if ((width, height) != (texture["width"], texture["height"])
+                        or header_data[8] not in legal_depths.get(header_data[9], set())
+                        or header_data[10] != 0 or header_data[11] != 0
+                        or header_data[12] not in {0, 1}):
+                    fail("The source bitmap PNG format or dimensions do not match the manifest.")
+                seen_header = True
+            if kind == b"IDAT":
+                seen_data = True
+            if kind == b"IEND":
+                if length != 0 or not seen_data or handle.read(1):
+                    fail("The source bitmap has an invalid PNG ending.")
+                seen_end = True
+    if digest.hexdigest() != texture["sha256"]:
+        fail("The source bitmap failed SHA-256 validation.")
 
 
 def load_array(path: Path, typecode: str, expected_items: int) -> array.array:
@@ -616,8 +707,14 @@ def create_mesh_object(
     return object_
 
 
-def create_material(manifest: dict[str, Any]) -> bpy.types.Material:
-    material = bpy.data.materials.new("Rasterform_Material")
+def create_material(
+    manifest: dict[str, Any],
+    *,
+    image: bpy.types.Image | None = None,
+    neutral: bool = False,
+) -> bpy.types.Material:
+    name = "Rasterform_Sides" if neutral else "Rasterform_Material"
+    material = bpy.data.materials.new(name)
     material.use_nodes = True
     material.use_backface_culling = False
     nodes = material.node_tree.nodes
@@ -631,26 +728,85 @@ def create_material(manifest: dict[str, Any]) -> bpy.types.Material:
 
     clay = manifest["appearance"]["clay"]
     if manifest["colorMode"] == "clay":
-        base_color = hex_to_linear(clay["color"])
-        shader.inputs["Base Color"].default_value = base_color
-        material.diffuse_color = base_color
         roughness, metallic = {
             "matte": (0.88, 0.0),
             "glossy": (0.16, 0.02),
             "metallic": (0.26, 1.0),
         }[clay["finish"]]
     else:
+        roughness, metallic = 0.66, 0.04
+
+    if image is not None:
+        source_uv = nodes.new("ShaderNodeUVMap")
+        source_uv.name = "Rasterform Source Image UV"
+        source_uv.uv_map = SOURCE_UV_LAYER_NAME
+        image_node = nodes.new("ShaderNodeTexImage")
+        image_node.name = "Rasterform Source Bitmap"
+        image_node.label = "Original-resolution source image"
+        image_node.image = image
+        image_node.extension = "EXTEND"
+        image_node.interpolation = "Linear"
+        links.new(source_uv.outputs["UV"], image_node.inputs["Vector"])
+        links.new(image_node.outputs["Color"], shader.inputs["Base Color"])
+        shader.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+        material.diffuse_color = (1.0, 1.0, 1.0, 1.0)
+    elif neutral or manifest["colorMode"] == "clay":
+        base_color = hex_to_linear("#b8b8b8" if neutral else clay["color"])
+        shader.inputs["Base Color"].default_value = base_color
+        material.diffuse_color = base_color
+    else:
         vertex_color = nodes.new("ShaderNodeVertexColor")
         vertex_color.name = "Rasterform Vertex Color"
         vertex_color.layer_name = COLOR_ATTRIBUTE_NAME
         links.new(vertex_color.outputs["Color"], shader.inputs["Base Color"])
         material.diffuse_color = (1.0, 1.0, 1.0, 1.0)
-        roughness, metallic = 0.66, 0.04
     shader.inputs["Roughness"].default_value = roughness
     shader.inputs["Metallic"].default_value = metallic
     shader.inputs["IOR"].default_value = 1.45
     material["rasterform_color_mode"] = manifest["colorMode"]
     return material
+
+
+def preserve_source_uv(object_: bpy.types.Object) -> None:
+    mesh = object_.data
+    original = mesh.uv_layers.get(UV_LAYER_NAME)
+    if original is None:
+        raise RuntimeError("The source image UV coordinates are missing.")
+    values = array.array("f", [0.0]) * (len(original.uv) * 2)
+    original.uv.foreach_get("vector", values)
+    source = mesh.uv_layers.new(name=SOURCE_UV_LAYER_NAME, do_init=False)
+    source.uv.foreach_set("vector", values)
+    mesh.uv_layers.active = original
+    mesh.uv_layers.active_render = original
+
+
+def apply_source_bitmap(
+    manifest: dict[str, Any],
+    model: bpy.types.Object,
+    grid_dimensions: tuple[int, int],
+) -> None:
+    texture = manifest["texture"]
+    image = bpy.data.images.load(str(texture["resolvedPath"]), check_existing=False)
+    image.name = texture["name"]
+    image.colorspace_settings.name = "sRGB"
+    if tuple(image.size) != (texture["width"], texture["height"]) or not image.has_data:
+        raise RuntimeError("Blender could not decode the original bitmap at its full dimensions.")
+    image.pack()
+    if image.packed_file is None or image.packed_file.size != texture["bytes"]:
+        raise RuntimeError("Blender did not pack the complete source bitmap.")
+    # A portable relative display path is safe even after the private job is
+    # removed; Blender reads the packed bytes rather than this fallback path.
+    image.filepath = "//source.png"
+    model.data.materials.append(create_material(manifest, image=image))
+    model.data.materials.append(create_material(manifest, neutral=True))
+    columns, rows = grid_dimensions
+    front_vertex_count = (columns + 1) * (rows + 1)
+    for polygon in model.data.polygons:
+        polygon.material_index = 0 if all(
+            vertex < front_vertex_count for vertex in polygon.vertices
+        ) else 1
+    model["rasterform_source_image"] = image.name
+    model["rasterform_source_uv"] = SOURCE_UV_LAYER_NAME
 
 
 def shade_smooth_by_angle(object_: bpy.types.Object) -> None:
@@ -707,8 +863,9 @@ def retopologize(object_: bpy.types.Object, topology: str, source_faces: int) ->
 def unwrap_smart_uv(object_: bpy.types.Object) -> None:
     set_active_object(object_)
     mesh = object_.data
-    while len(mesh.uv_layers):
-        mesh.uv_layers.remove(mesh.uv_layers[0])
+    for layer in list(mesh.uv_layers):
+        if layer.name != SOURCE_UV_LAYER_NAME:
+            mesh.uv_layers.remove(layer)
     uv_layer = mesh.uv_layers.new(name=UV_LAYER_NAME, do_init=False)
     mesh.uv_layers.active = uv_layer
     mesh.uv_layers.active_render = uv_layer
@@ -832,6 +989,16 @@ def save_compressed(manifest: dict[str, Any]) -> tuple[int, str]:
         reopened_uv = reopened_model.data.uv_layers.get(UV_LAYER_NAME)
         if reopened_uv is None or len(reopened_uv.uv) != len(reopened_model.data.loops):
             raise RuntimeError("The reopened Blender project did not retain its UV map.")
+        if manifest["texture"] is not None:
+            source_uv = reopened_model.data.uv_layers.get(SOURCE_UV_LAYER_NAME)
+            if source_uv is None or len(source_uv.uv) != len(reopened_model.data.loops):
+                raise RuntimeError("The reopened Blender project did not retain its source image UVs.")
+            packed_images = [image for image in bpy.data.images if image.packed_file is not None]
+            texture = manifest["texture"]
+            if (len(packed_images) != 1
+                    or tuple(packed_images[0].size) != (texture["width"], texture["height"])
+                    or hashlib.sha256(packed_images[0].packed_file.data).hexdigest() != texture["sha256"]):
+                raise RuntimeError("The reopened Blender project did not retain the full packed bitmap.")
         os.replace(temporary, output)
         os.chmod(output, 0o600)
         digest = hashlib.sha256()
@@ -858,6 +1025,9 @@ def export_blend(manifest_path: Path) -> None:
     source_vertices = manifest["mesh"]["vertexCount"]
     source_faces = manifest["mesh"]["indexCount"] // 3
     structured_layout = structured_grid_layout(manifest, values["indices"])
+    if manifest["texture"] is not None and structured_layout is None:
+        fail("Source bitmap export requires an image relief with its original grid topology.")
+    grid_dimensions = structured_layout[:2] if structured_layout is not None else None
 
     # Defense in depth: even if the caller omitted --factory-startup, discard
     # startup objects and preferences before creating the private scene.
@@ -868,6 +1038,8 @@ def export_blend(manifest_path: Path) -> None:
     if topology == "exact":
         model = create_mesh_object(manifest, values)
         model["rasterform_retopology_method"] = "exact"
+        if manifest["texture"] is not None:
+            preserve_source_uv(model)
     else:
         emit("PROGRESS", {"jobId": job_id, "phase": "retopologizing"})
         if structured_layout is not None:
@@ -878,6 +1050,9 @@ def export_blend(manifest_path: Path) -> None:
             model["rasterform_retopology_method"] = "structured_grid"
             model["rasterform_grid_width"] = target_grid[0]
             model["rasterform_grid_height"] = target_grid[1]
+            grid_dimensions = target_grid
+            if manifest["texture"] is not None:
+                preserve_source_uv(model)
         else:
             model = create_mesh_object(manifest, values)
             retopologize(model, topology, source_faces)
@@ -886,7 +1061,10 @@ def export_blend(manifest_path: Path) -> None:
         unwrap_smart_uv(model)
     shade_smooth_by_angle(model)
     model.data.materials.clear()
-    model.data.materials.append(create_material(manifest))
+    if manifest["texture"] is not None:
+        apply_source_bitmap(manifest, model, grid_dimensions)
+    else:
+        model.data.materials.append(create_material(manifest))
     model.data.update(calc_edges=True)
     disable_viewport_grids()
     verify_clean_scene(model)

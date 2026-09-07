@@ -24,6 +24,9 @@ import {
 } from './lib/local-fonts'
 import { inspectTopology } from './lib/topology'
 import { downloadBlob, exportGlb, exportHeightPng, exportRecipe, exportStl } from './lib/export'
+import { encodeSourceTexture } from './lib/source-texture'
+import { exportProfile, imageDimensionsForEdition } from './lib/export-profile'
+import { isRasterformDesktopBridge } from './desktop/contracts'
 import {
   finalSampleTarget,
   type FinalExportProgress,
@@ -182,8 +185,15 @@ const colorMode = computed<ColorMode>({
 })
 const imageExportOpen = ref(false)
 const exportingImage = ref(false)
+const isDesktop = isRasterformDesktopBridge(window.rasterformDesktop)
+const editionExports = exportProfile(isDesktop)
+const modelSurfaceColor = ref<'source' | 'current'>('source')
+const useSourceTexture = computed(() => (
+  isDesktop && workspace.value === 'image' && modelSurfaceColor.value === 'source'
+  && colorMode.value !== 'wireframe'
+))
 const imageExportQuality = ref<ImageExportQuality>('high')
-const imageExportLongEdge = ref<ImageExportLongEdge>(4096)
+const imageExportLongEdge = ref<ImageExportLongEdge>(editionExports.defaultStillEdge)
 const imageExportView = ref<ImageExportView>('current')
 const imageExportBackground = ref<ImageExportBackground>('transparent')
 const imageExportKind = ref<'still' | 'loop'>('still')
@@ -504,23 +514,27 @@ const activeFrameSize = computed(() => workspace.value === 'image'
 const effectiveImageExportView = computed<ImageExportView>(() => (
   workspace.value === 'image' ? imageExportView.value : 'current'
 ))
-const imageExportDimensions = computed(() => calculateStillImageDimensions(
+const imageExportDimensions = computed(() => imageDimensionsForEdition(calculateStillImageDimensions(
   activeFrameSize.value.width,
   activeFrameSize.value.height,
   image.value.sourceWidth,
   image.value.sourceHeight,
   imageExportLongEdge.value,
   effectiveImageExportView.value,
+), isDesktop))
+const straightOnIsLimited = computed(() => (
+  !isDesktop && effectiveImageExportView.value === 'straight-on'
+  && Math.max(image.value.sourceWidth, image.value.sourceHeight) > 2048
 ))
 const straightOnExceedsFourK = computed(() => (
   effectiveImageExportView.value === 'straight-on'
   && Math.max(imageExportDimensions.value.width, imageExportDimensions.value.height) > 4096
 ))
-const livingLoopDimensions = computed(() => calculateViewportDimensions(
+const livingLoopDimensions = computed(() => imageDimensionsForEdition(calculateViewportDimensions(
   activeFrameSize.value.width,
   activeFrameSize.value.height,
   livingLoopLongEdge.value,
-))
+), isDesktop))
 const livingLoopFrameCount = computed(() => calculateLivingFormFrameCount(
   livingForm.value.duration,
   livingLoopFps.value,
@@ -567,7 +581,7 @@ const blenderExportProgressLabel = computed(() => {
 })
 const blenderExportHelp = computed(() => {
   if (!desktopBlenderBridgeAvailable) {
-    return 'Blender-ready retopology requires Rasterform desktop and Blender 5.2 or newer. Exact GLB remains available in the browser.'
+    return 'Blender project export requires an updated Rasterform desktop app and Blender 5.2 or newer.'
   }
   if (!desktopProReady.value) return desktopProStatus.value
   if (colorMode.value === 'wireframe') {
@@ -667,7 +681,9 @@ const imageExportHelp = computed(() => {
   const request = displayImageExportRequest.value
   const pose = request.livingEnabled ? ' The visible Living Form phase is baked into this still.' : ''
   const straightOn = request.view === 'straight-on'
-    ? ' Renders the complete relief head-on at the uploaded image’s original dimensions; your orbit and zoom stay unchanged.'
+    ? straightOnIsLimited.value
+      ? ' Renders the complete relief head-on within the web edition’s 2K limit, preserving the image’s proportions. Desktop supports original dimensions. Your orbit and zoom stay unchanged.'
+      : ' Renders the complete relief head-on at the uploaded image’s original dimensions; your orbit and zoom stay unchanged.'
     : ''
   if (request.colorMode === 'wireframe') return `Wireframe exports use High quality.${straightOn}${pose}`
   if (request.quality === 'high') return `Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.${straightOn}${pose}`
@@ -1144,7 +1160,7 @@ function selectImageExportView(view: ImageExportView) {
   imageExportView.value = view
   imageExportError.value = ''
   if (view === 'straight-on' && imageExportQuality.value !== 'high'
-    && Math.max(image.value.sourceWidth, image.value.sourceHeight) > 4096) {
+    && straightOnExceedsFourK.value) {
     const renderer = imageExportQuality.value === 'pro' ? 'Cycles Pro' : 'Final'
     imageExportNotice.value = `${renderer} supports up to 4K. Choose High to keep the exact ${image.value.sourceWidth.toLocaleString()} × ${image.value.sourceHeight.toLocaleString()} original dimensions.`
   } else {
@@ -1354,13 +1370,23 @@ function currentBlenderMeshSnapshot(): { mesh: MeshData; owned: boolean } | null
 }
 
 async function downloadGlb() {
+  if (!editionExports.modelFiles || exporting.value) return
   const exportMesh = currentMeshSnapshot()
   if (!exportMesh) return
+  const exportMode = colorMode.value
+  const exportAppearance: AppearanceSettings = {
+    clay: { ...appearance.value.clay },
+    heightGradient: { ...appearance.value.heightGradient },
+  }
+  const sourceImage = useSourceTexture.value ? image.value : null
   exporting.value = true
   status.value = 'Exporting GLB…'
   try {
-    await exportGlb(exportMesh, colorMode.value, appearance.value)
-    status.value = 'GLB exported for Blender / Cycles'
+    const texture = sourceImage ? await encodeSourceTexture(sourceImage) : undefined
+    await exportGlb(exportMesh, exportMode, exportAppearance, texture)
+    status.value = texture
+      ? `GLB exported · embedded ${texture.width.toLocaleString()} × ${texture.height.toLocaleString()} source image`
+      : 'GLB exported for Blender / Cycles'
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'GLB export failed.'
   } finally {
@@ -1386,6 +1412,7 @@ function friendlyBlenderExportError(error: unknown): string {
 }
 
 async function downloadBlenderProject() {
+  if (!editionExports.modelFiles) return
   if (exportingBlenderProject.value) {
     blenderExportController?.abort()
     blenderExportNotice.value = 'Cancelling Blender project export…'
@@ -1393,6 +1420,15 @@ async function downloadBlenderProject() {
   }
   const sourceMesh = mesh.value
   if (!sourceMesh || colorMode.value === 'wireframe' || !desktopProReady.value) return
+  const prepared = currentBlenderMeshSnapshot()
+  if (!prepared) return
+  const sourceImage = useSourceTexture.value ? image.value : null
+  const exportMode = colorMode.value
+  const exportAppearance: AppearanceSettings = {
+    clay: { ...appearance.value.clay },
+    heightGradient: { ...appearance.value.heightGradient },
+  }
+  const exportTopology = blenderExportTopology.value
   const controller = new AbortController()
   blenderExportController = controller
   exportingBlenderProject.value = true
@@ -1401,17 +1437,16 @@ async function downloadBlenderProject() {
   blenderExportNotice.value = ''
   status.value = `Preparing ${activeBlenderTopology.value.label.toLowerCase()} Blender project…`
   try {
+    const texture = sourceImage ? await encodeSourceTexture(sourceImage) : undefined
+    if (controller.signal.aborted) throw new DOMException('Blender export cancelled.', 'AbortError')
     const result = await exportBlenderProjectInDesktop({
-      mesh: sourceMesh,
-      prepareMesh: () => {
-        const prepared = currentBlenderMeshSnapshot()
-        if (!prepared) throw new Error('The model is no longer available.')
-        return { mesh: prepared.mesh, ownedMeshSnapshot: prepared.owned }
-      },
-      colorMode: colorMode.value,
-      appearance: appearance.value,
-      topology: blenderExportTopology.value,
-      suggestedName: `rasterform-${blenderExportTopology.value}.blend`,
+      mesh: prepared.mesh,
+      ownedMeshSnapshot: prepared.owned,
+      colorMode: exportMode,
+      appearance: exportAppearance,
+      topology: exportTopology,
+      texture,
+      suggestedName: `rasterform-${exportTopology}.blend`,
       signal: controller.signal,
       onProgress: (phase) => {
         blenderExportPhase.value = phase
@@ -1445,6 +1480,7 @@ function keepBlenderExportAccordionOpen(event: Event) {
 }
 
 function downloadStl() {
+  if (!editionExports.modelFiles) return
   const exportMesh = currentMeshSnapshot()
   if (!exportMesh || !topology.value?.watertight) return
   exportStl(exportMesh)
@@ -2093,21 +2129,21 @@ async function downloadLivingFormLoop() {
               <div><span>Boundary edges</span><strong>{{ topology.boundaryEdges }}</strong></div>
               <div><span>Non-manifold</span><strong>{{ topology.nonManifoldEdges }}</strong></div>
               <div><span>Degenerate</span><strong>{{ topology.degenerateFaces }}</strong></div>
-              <p>{{ topology.watertight ? 'Closed geometry, ready for STL.' : 'STL needs closed geometry. GLB and PNG remain available.' }}</p>
+              <p>{{ isDesktop ? (topology.watertight ? 'Closed geometry, ready for STL.' : 'STL needs closed geometry. GLB and PNG remain available.') : (topology.watertight ? 'Closed geometry, ready to render.' : 'Open surface, ready to render.') }}</p>
             </div>
           </details>
         </template>
 
         <section v-else id="export-inspector" class="export-inspector" :aria-busy="exportingImage || exportingBlenderProject">
-          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>Export model</h2></div><button type="button" class="icon-control" :disabled="exportingImage || exportingBlenderProject" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
+          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>{{ isDesktop ? 'Export' : 'Export images' }}</h2></div><button type="button" class="icon-control" :disabled="exportingImage || exportingBlenderProject" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
           <fieldset class="export-group"><legend>Output</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportKind === 'still'" :disabled="exportingImage" @click="imageExportKind = 'still'; imageExportError = ''; imageExportNotice = ''"><strong>Still</strong><small>PNG image</small></button><button type="button" :aria-pressed="imageExportKind === 'loop'" :disabled="exportingImage" @click="imageExportKind = 'loop'; imageExportError = ''; imageExportNotice = ''"><strong>Living loop</strong><small>PNG sequence</small></button></div></fieldset>
 
           <template v-if="imageExportKind === 'still'">
             <div class="export-summary">{{ imageExportSummary }}</div>
-            <fieldset v-if="workspace === 'image'" class="export-group"><legend>View</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportView === 'current'" :disabled="exportingImage" @click="selectImageExportView('current')"><strong>Current view</strong><small>Orbit &amp; zoom</small></button><button type="button" :aria-pressed="imageExportView === 'straight-on'" :disabled="exportingImage" @click="selectImageExportView('straight-on')"><strong>Straight on</strong><small>Front face · original size</small></button></div></fieldset>
+            <fieldset v-if="workspace === 'image'" class="export-group"><legend>View</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportView === 'current'" :disabled="exportingImage" @click="selectImageExportView('current')"><strong>Current view</strong><small>Orbit &amp; zoom</small></button><button type="button" :aria-pressed="imageExportView === 'straight-on'" :disabled="exportingImage" @click="selectImageExportView('straight-on')"><strong>Straight on</strong><small>{{ isDesktop ? 'Front face · original size' : 'Front face · up to 2K' }}</small></button></div></fieldset>
             <fieldset class="export-group"><legend>Render quality</legend><div :class="['segmented', 'cards', 'render-quality-cards', { 'has-pro': desktopProBridgeAvailable }]"><button type="button" :aria-pressed="imageExportQuality === 'high'" :disabled="exportingImage" @click="selectImageExportQuality('high')"><strong>High</strong><small>Clean and quick</small></button><button type="button" :aria-pressed="imageExportQuality === 'final'" :disabled="exportingImage || colorMode === 'wireframe' || straightOnExceedsFourK" :title="straightOnExceedsFourK ? 'Final supports up to 4K. Choose High for exact original dimensions.' : 'Path-traced Final render'" @click="selectImageExportQuality('final')"><strong>Final</strong><small>Refined light</small></button><button v-if="desktopProBridgeAvailable" type="button" :aria-pressed="imageExportQuality === 'pro'" :disabled="exportingImage || colorMode === 'wireframe' || !desktopProReady || straightOnExceedsFourK" :title="straightOnExceedsFourK ? 'Cycles Pro supports up to 4K. Choose High for exact original dimensions.' : desktopProReady ? 'Blender Cycles Pro' : desktopProStatus" @click="selectImageExportQuality('pro')"><strong>Pro</strong><small>{{ desktopProProbePending ? 'Checking Blender' : desktopProReady ? 'Cycles · PNG + EXR' : 'Unavailable' }}</small></button></div></fieldset>
-            <fieldset v-if="effectiveImageExportView === 'straight-on'" class="export-group"><legend>Dimensions</legend><output class="source-dimensions"><span>Original image</span><strong>{{ imageExportDimensions.width.toLocaleString() }} × {{ imageExportDimensions.height.toLocaleString() }} px</strong></output></fieldset>
-            <fieldset v-else class="export-group"><legend>Long edge</legend><div class="segmented"><button type="button" :aria-pressed="imageExportLongEdge === 2048" :disabled="exportingImage" @click="imageExportLongEdge = 2048">2K</button><button type="button" :aria-pressed="imageExportLongEdge === 4096" :disabled="exportingImage" @click="imageExportLongEdge = 4096">4K</button><button type="button" :aria-pressed="imageExportLongEdge === 8192" :disabled="exportingImage || imageExportQuality !== 'high'" @click="imageExportLongEdge = 8192">8K</button></div></fieldset>
+            <fieldset v-if="effectiveImageExportView === 'straight-on'" class="export-group"><legend>Dimensions</legend><output class="source-dimensions"><span>{{ straightOnIsLimited ? 'Web image · 2K maximum' : 'Original image' }}</span><strong>{{ imageExportDimensions.width.toLocaleString() }} × {{ imageExportDimensions.height.toLocaleString() }} px</strong></output></fieldset>
+            <fieldset v-else class="export-group"><legend>Long edge</legend><div class="segmented"><button v-for="edge in editionExports.stillEdges" :key="edge" type="button" :aria-pressed="imageExportLongEdge === edge" :disabled="exportingImage || (edge === 8192 && imageExportQuality !== 'high')" @click="imageExportLongEdge = edge">{{ edge / 1024 }}K</button></div></fieldset>
             <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ activeBackground.label }}</small></button></div></fieldset>
             <details v-if="imageExportQuality === 'pro'" class="pro-render-controls">
               <summary><span>Advanced Cycles controls</span><small>{{ proRenderSettingsAreProduction ? 'Production' : 'Custom' }}</small></summary>
@@ -2127,7 +2163,7 @@ async function downloadLivingFormLoop() {
           <template v-else>
             <div class="export-summary">{{ livingLoopSummary }}</div>
             <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" aria-pressed="true" disabled><strong>High 2×</strong><small>Lossless frames</small></button><button type="button" aria-pressed="false" disabled><strong>Final</strong><small>Still images only</small></button></div></fieldset>
-            <fieldset class="export-group"><legend>Long edge</legend><div class="segmented cards"><button type="button" :aria-pressed="livingLoopLongEdge === 2048" :disabled="exportingImage" @click="livingLoopLongEdge = 2048">2K</button><button type="button" :aria-pressed="livingLoopLongEdge === 4096" :disabled="exportingImage" @click="livingLoopLongEdge = 4096">4K</button></div></fieldset>
+            <fieldset class="export-group"><legend>Long edge</legend><div class="segmented cards"><button v-for="edge in editionExports.loopEdges" :key="edge" type="button" :aria-pressed="livingLoopLongEdge === edge" :disabled="exportingImage" @click="livingLoopLongEdge = edge">{{ edge / 1024 }}K</button></div></fieldset>
             <fieldset class="export-group"><legend>Frame rate</legend><div class="segmented"><button v-for="fps in LIVING_FORM_FRAME_RATES" :key="fps" type="button" :aria-pressed="livingLoopFps === fps" :disabled="exportingImage" @click="livingLoopFps = fps">{{ fps }} fps</button></div></fieldset>
             <fieldset class="export-group"><legend>Timing</legend><label class="slider-control"><span>Duration <output>{{ displayLivingLoopRequest.settings.duration.toFixed(1) }}s · {{ displayLivingLoopRequest.frameCount }} frames</output></span><input v-model.number="livingForm.duration" aria-label="Living Loop duration" :aria-valuetext="`${displayLivingLoopRequest.settings.duration.toFixed(1)} seconds, ${displayLivingLoopRequest.frameCount} frames`" type="range" min="1" max="12" step="0.5" :disabled="exportingImage" /></label></fieldset>
             <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ viewportBackgroundPreset(displayLivingLoopRequest.studioBackground).label }}</small></button></div></fieldset>
@@ -2142,9 +2178,16 @@ async function downloadLivingFormLoop() {
           <button v-if="imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel || exportingBlenderProject" @click="downloadImagePng">{{ imageExportActionLabel }}</button>
           <button v-else type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled || exportingBlenderProject" @click="downloadLivingFormLoop">{{ livingLoopNativeSaving ? 'Saving ZIP…' : exportingImage ? 'Cancel sequence' : 'Export lossless loop ZIP' }}</button>
 
-          <div class="file-export-section">
+          <div v-if="editionExports.modelFiles" class="file-export-section">
             <h3>3D &amp; project files</h3>
-            <button type="button" :disabled="exporting || exportingImage || exportingBlenderProject || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing exact GLB…' : 'Exact GLB · portable mesh' }}</button>
+            <fieldset v-if="workspace === 'image'" class="export-group">
+              <legend>Surface color</legend>
+              <div class="segmented cards">
+                <button type="button" :aria-pressed="useSourceTexture" :disabled="exporting || exportingBlenderProject || colorMode === 'wireframe'" @click="modelSurfaceColor = 'source'"><strong>Source image</strong><small>Embedded bitmap</small></button>
+                <button type="button" :aria-pressed="!useSourceTexture" :disabled="exporting || exportingBlenderProject" @click="modelSurfaceColor = 'current'"><strong>Current appearance</strong><small>Visible colors</small></button>
+              </div>
+              <p class="inline-note">{{ useSourceTexture ? `Embeds the original ${image.sourceWidth.toLocaleString()} × ${image.sourceHeight.toLocaleString()} image on the surface. Solid relief sides and back stay neutral. The active material finish is preserved.` : 'Keeps the current color mode and material finish.' }}</p>
+            </fieldset>
 
             <details v-if="desktopBlenderBridgeAvailable" ref="blenderExportDetails" class="blender-export-controls" @toggle="keepBlenderExportAccordionOpen">
               <summary><span>Blender project</span><small>{{ activeBlenderTopology.label }} · .blend</small></summary>
@@ -2164,9 +2207,13 @@ async function downloadLivingFormLoop() {
             </details>
             <p v-else class="blender-export-help blender-export-help--web">{{ blenderExportHelp }}</p>
 
+            <button type="button" :disabled="exporting || exportingImage || exportingBlenderProject || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing portable model…' : 'Portable model (.glb)' }}</button>
             <button type="button" :disabled="exportingImage || exportingBlenderProject || !topology?.watertight" @click="downloadStl">STL geometry</button>
             <button v-if="workspace === 'image'" type="button" :disabled="exportingImage || exportingBlenderProject" @click="exportHeightPng(heightField)">Height PNG</button>
             <button type="button" :disabled="exportingImage || exportingBlenderProject" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
+          </div>
+          <div v-else-if="workspace === 'image'" class="file-export-section">
+            <button type="button" :disabled="exportingImage" @click="exportHeightPng(heightField)">Height PNG</button>
           </div>
         </section>
       </aside>

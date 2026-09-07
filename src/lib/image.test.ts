@@ -35,10 +35,11 @@ describe('image source dimensions', () => {
       }),
     })
 
-    const image = await fileToPixelImage({
+    const file = {
       name: 'source.png',
       type: 'image/png',
-    } as File)
+    } as File
+    const image = await fileToPixelImage(file)
 
     expect(image).toMatchObject({
       name: 'source.png',
@@ -48,6 +49,7 @@ describe('image source dimensions', () => {
       sourceHeight: 4000,
     })
     expect(context.drawImage).toHaveBeenCalledWith(bitmap, 0, 0, 1280, 853)
+    expect(image.sourceBlob).toBe(file)
     expect(close).toHaveBeenCalledOnce()
   })
 })

@@ -1,4 +1,4 @@
-import type { AppearanceSettings, ColorMode, MeshData } from '../types'
+import type { AppearanceSettings, ColorMode, MeshData, SourceTexture } from '../types'
 import type { DesktopRenderFailure, DesktopSavePreparation } from './contracts'
 import {
   DESKTOP_MAX_MESH_BYTES,
@@ -12,7 +12,9 @@ import {
   type RasterformDesktopProBridge,
 } from './pro-contracts'
 
-export const DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION = 1 as const
+export const DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION = 2 as const
+export const DESKTOP_MAX_TEXTURE_BYTES = 512 * 1024 * 1024
+export const DESKTOP_MAX_TEXTURE_PIXELS = 100_000_000
 
 export type DesktopBlenderTopology = 'exact' | 'balanced' | 'lightweight'
 export type DesktopBlenderExportPhase = 'preparing' | 'retopologizing' | 'unwrapping' | 'saving'
@@ -31,6 +33,7 @@ export interface DesktopBlenderExportSnapshot {
   colorMode: DesktopBlenderColorMode
   appearance: AppearanceSettings
   settings: DesktopBlenderExportSettings
+  texture: SourceTexture | null
 }
 
 export interface DesktopSavedBlenderExportResult {
@@ -136,6 +139,32 @@ function everyInUnitInterval(values: Float32Array): boolean {
 
 function isHexColor(value: unknown): value is string {
   return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
+}
+
+export function isDesktopSourceTexture(value: unknown): value is SourceTexture {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['data', 'mimeType', 'width', 'height', 'name'])
+    || value.mimeType !== 'image/png'
+    || !isIntegerInRange(value.width, 1, 16_384)
+    || !isIntegerInRange(value.height, 1, 16_384)
+    || Number(value.width) * Number(value.height) > DESKTOP_MAX_TEXTURE_PIXELS
+    || typeof value.name !== 'string' || value.name.length < 1 || value.name.length > 255
+    || /[\u0000-\u001f\u007f:/\\]/.test(value.name)
+    || !ArrayBuffer.isView(value.data)
+    || Object.prototype.toString.call(value.data) !== '[object Uint8Array]'
+    || value.data.byteOffset !== 0 || value.data.byteLength !== value.data.buffer.byteLength
+    || value.data.byteLength < 57 || value.data.byteLength > DESKTOP_MAX_TEXTURE_BYTES) return false
+  const bytes = value.data as Uint8Array
+  if (![137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte)) return false
+  const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const depth = bytes[24]!
+  const colorType = bytes[25]!
+  const legalDepths: Record<number, readonly number[]> = {
+    0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16],
+  }
+  return header.getUint32(8) === 13 && header.getUint32(12) === 0x49484452
+    && header.getUint32(16) === value.width && header.getUint32(20) === value.height
+    && Boolean(legalDepths[colorType]?.includes(depth))
+    && bytes[26] === 0 && bytes[27] === 0 && (bytes[28] === 0 || bytes[28] === 1)
 }
 
 function isBlenderMeshData(value: unknown): value is DesktopBlenderMeshData {
@@ -245,11 +274,13 @@ export function isDesktopBlenderExportSnapshot(
     'colorMode',
     'appearance',
     'settings',
+    'texture',
   ])) return false
   if (value.protocolVersion !== DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION
     || (value.colorMode !== 'original' && value.colorMode !== 'height' && value.colorMode !== 'clay')
     || !isDesktopBlenderExportSettings(value.settings)) return false
   return isBlenderMeshData(value.mesh) && isAppearance(value.appearance)
+    && (value.texture === null || isDesktopSourceTexture(value.texture))
 }
 
 export function isDesktopSavedBlenderExportResult(

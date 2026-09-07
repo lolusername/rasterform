@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { sourceBitmapFixture } from './test-fixtures/source-bitmap'
 import { heightGradientColors } from '../lib/three'
 import type { MeshData } from '../types'
 import { DESKTOP_LONG_EXPORT_PROTOCOL_VERSION, DESKTOP_PROTOCOL_VERSION } from './contracts'
@@ -91,6 +92,18 @@ function bridgeWith(overrides: Partial<RasterformDesktopBlenderExportBridge> = {
 }
 
 describe('desktop Blender project export client', () => {
+  it('copies the original bitmap bytes into an immutable optional texture snapshot', () => {
+    const texture = sourceBitmapFixture()
+    const snapshot = createDesktopBlenderExportSnapshot({
+      mesh: mesh(), colorMode: 'clay', appearance, topology: 'exact', texture,
+    })
+    expect(snapshot.texture).toEqual(texture)
+    expect(snapshot.texture?.data).not.toBe(texture.data)
+    texture.data.fill(0)
+    expect(snapshot.texture?.data[0]).toBe(137)
+    expect(snapshot.appearance.clay).toEqual(appearance.clay)
+  })
+
   it('snapshots typed arrays and resolves Height colors without mutating the model', () => {
     const source = mesh()
     const originalColors = source.colors.slice()
@@ -101,7 +114,8 @@ describe('desktop Blender project export client', () => {
       topology: 'balanced',
     })
 
-    expect(snapshot.protocolVersion).toBe(1)
+    expect(snapshot.protocolVersion).toBe(2)
+    expect(snapshot.texture).toBeNull()
     expect(snapshot.mesh).not.toBe(source)
     expect(snapshot.mesh.positions).not.toBe(source.positions)
     expect(snapshot.mesh).not.toHaveProperty('heights')

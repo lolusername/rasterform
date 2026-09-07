@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { sourceBitmapFixture } from './test-fixtures/source-bitmap'
 import {
   DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,
   type DesktopBlenderExportSnapshot,
@@ -101,6 +102,7 @@ function snapshotFixture(
       clay: { color: '#d7d0bf', finish: 'glossy' },
     },
     settings: { topology },
+    texture: null,
   }
 }
 
@@ -113,6 +115,7 @@ interface JobFixture {
 
 async function createJobFixture(
   topology: DesktopBlenderTopology = 'balanced',
+  texture = false,
 ): Promise<JobFixture> {
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'rasterform-export-helper-test-'))
   temporaryDirectories.push(fixtureRoot)
@@ -122,6 +125,7 @@ async function createJobFixture(
   const scriptSource = 'print("isolated Blender export fixture")\n'
   await writeFile(scriptPath, scriptSource)
   const snapshot = snapshotFixture(topology)
+  if (texture) snapshot.texture = sourceBitmapFixture()
   const job = await createBlenderExportJob(snapshot, {
     scriptPath,
     tempRoot: join(fixtureRoot, 'jobs'),
@@ -200,7 +204,7 @@ describe('Blender project export native boundary', () => {
 
     expect(manifestText.endsWith('\n')).toBe(true)
     expect(manifest).toEqual({
-      version: 1,
+      version: 2,
       jobId: job.id,
       mesh: {
         positions: 'mesh/positions.f32',
@@ -217,6 +221,7 @@ describe('Blender project export native boundary', () => {
       colorMode: 'clay',
       appearance: snapshot.appearance,
       settings: { topology: 'balanced' },
+      texture: null,
       output: 'outputs/rasterform.blend',
     })
     expect(manifestText).not.toContain(job.root)
@@ -238,6 +243,20 @@ describe('Blender project export native boundary', () => {
       expect(resolve(directory).startsWith(`${resolve(job.root)}/`)).toBe(true)
       expect((await stat(directory)).mode & 0o777).toBe(0o700)
     }
+  })
+
+  it('writes exact PNG bytes to a private file and binds their dimensions and checksum in the manifest', async () => {
+    const { job, snapshot } = await createJobFixture('exact', true)
+    const texture = snapshot.texture!
+    const manifest = JSON.parse(await readFile(job.manifestPath, 'utf8'))
+    expect(manifest.texture).toEqual({
+      path: 'texture/source.png', mimeType: 'image/png', width: texture.width,
+      height: texture.height, name: texture.name, bytes: texture.data.byteLength,
+      sha256: createHash('sha256').update(texture.data).digest('hex'),
+    })
+    expect(new Uint8Array(await readFile(join(job.root, manifest.texture.path)))).toEqual(texture.data)
+    expect((await stat(join(job.root, 'texture'))).mode & 0o777).toBe(0o700)
+    expect((await stat(join(job.root, manifest.texture.path))).mode & 0o777).toBe(0o600)
   })
 
   it('invokes only the copied script under factory startup and private Blender state', async () => {

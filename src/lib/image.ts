@@ -74,6 +74,7 @@ export async function fileToPixelImage(file: File, maxLongSide = 1280): Promise<
       height,
       sourceWidth,
       sourceHeight,
+      sourceBlob: file,
       data: pixels.data,
       name: file.name,
     }

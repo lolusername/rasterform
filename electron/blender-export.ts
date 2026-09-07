@@ -142,10 +142,12 @@ export async function createBlenderExportJob(
     const meshDirectory = join(root, 'mesh')
     const rendererDirectory = join(root, 'renderer')
     const outputDirectory = join(root, 'outputs')
+    const textureDirectory = join(root, 'texture')
     await Promise.all([
       mkdir(meshDirectory, { mode: 0o700 }),
       mkdir(rendererDirectory, { mode: 0o700 }),
       mkdir(outputDirectory, { mode: 0o700 }),
+      mkdir(textureDirectory, { mode: 0o700 }),
     ])
     const isolation = await createBlenderIsolationDirectories(root)
     const positionsPath = join(meshDirectory, 'positions.f32')
@@ -162,10 +164,13 @@ export async function createBlenderExportJob(
       writeFile(colorsPath, littleEndianFloat32(snapshot.mesh.colors), { mode: 0o600 }),
       writeFile(uvsPath, littleEndianFloat32(snapshot.mesh.uvs), { mode: 0o600 }),
       copyFile(assets.scriptPath, scriptPath),
+      ...(snapshot.texture ? [writeFile(join(textureDirectory, 'source.png'), snapshot.texture.data, {
+        mode: 0o600,
+      })] : []),
     ])
     await chmod(scriptPath, 0o600)
     const manifest = {
-      version: 1,
+      version: 2,
       jobId: id,
       mesh: {
         positions: 'mesh/positions.f32',
@@ -185,6 +190,15 @@ export async function createBlenderExportJob(
         clay: { ...snapshot.appearance.clay },
       },
       settings: { ...snapshot.settings },
+      texture: snapshot.texture ? {
+        path: 'texture/source.png',
+        mimeType: snapshot.texture.mimeType,
+        width: snapshot.texture.width,
+        height: snapshot.texture.height,
+        name: snapshot.texture.name,
+        bytes: snapshot.texture.data.byteLength,
+        sha256: createHash('sha256').update(snapshot.texture.data).digest('hex'),
+      } : null,
       output: 'outputs/rasterform.blend',
     }
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, { encoding: 'utf8', mode: 0o600 })

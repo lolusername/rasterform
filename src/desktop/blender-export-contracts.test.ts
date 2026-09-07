@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { sourceBitmapFixture } from './test-fixtures/source-bitmap'
 import { DESKTOP_LONG_EXPORT_PROTOCOL_VERSION, DESKTOP_PROTOCOL_VERSION } from './contracts'
 import { DESKTOP_PRO_RENDER_PROTOCOL_VERSION } from './pro-contracts'
 import {
@@ -40,6 +41,7 @@ function validSnapshot(): DesktopBlenderExportSnapshot {
       clay: { color: '#d7d0bf', finish: 'matte' },
     },
     settings: { topology: 'balanced' },
+    texture: null,
   }
 }
 
@@ -114,7 +116,7 @@ function validBridge(): RasterformDesktopBlenderExportBridge {
 
 describe('desktop Blender project export contracts', () => {
   it('pins an independent protocol and three explicit topology choices', () => {
-    expect(DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION).toBe(1)
+    expect(DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION).toBe(2)
     expect(isDesktopBlenderExportSettings({ topology: 'exact' })).toBe(true)
     expect(isDesktopBlenderExportSettings({ topology: 'balanced' })).toBe(true)
     expect(isDesktopBlenderExportSettings({ topology: 'lightweight' })).toBe(true)
@@ -127,7 +129,7 @@ describe('desktop Blender project export contracts', () => {
     expect(isDesktopBlenderExportSnapshot(snapshot)).toBe(true)
     expect(() => assertDesktopBlenderExportSnapshot(snapshot)).not.toThrow()
     expect(isDesktopBlenderExportSnapshot({ ...snapshot, debug: true })).toBe(false)
-    expect(isDesktopBlenderExportSnapshot({ ...snapshot, protocolVersion: 2 })).toBe(false)
+    expect(isDesktopBlenderExportSnapshot({ ...snapshot, protocolVersion: 1 })).toBe(false)
     expect(isDesktopBlenderExportSnapshot({ ...snapshot, colorMode: 'wireframe' })).toBe(false)
     expect(isDesktopBlenderExportSnapshot({
       ...snapshot,
@@ -141,6 +143,22 @@ describe('desktop Blender project export contracts', () => {
       ...snapshot,
       appearance: { ...snapshot.appearance, clay: { color: 'red', finish: 'matte' } },
     })).toBe(false)
+  })
+
+  it('validates a bounded original PNG payload and rejects forged dimensions or filesystem names', () => {
+    const snapshot = { ...validSnapshot(), texture: sourceBitmapFixture() }
+    expect(isDesktopBlenderExportSnapshot(snapshot)).toBe(true)
+    for (const texture of [
+      { ...snapshot.texture, width: 9 },
+      { ...snapshot.texture, mimeType: 'image/jpeg' },
+      { ...snapshot.texture, name: '../photo.png' },
+      { ...snapshot.texture, data: snapshot.texture.data.subarray(1) },
+      { ...snapshot.texture, data: new Uint8Array(80) },
+      { ...snapshot.texture, extra: true },
+      { ...snapshot.texture, width: 16384, height: 16384 },
+    ]) expect(isDesktopBlenderExportSnapshot({ ...snapshot, texture })).toBe(false)
+    const { texture: _texture, ...oldSnapshot } = snapshot
+    expect(isDesktopBlenderExportSnapshot(oldSnapshot)).toBe(false)
   })
 
   it('accepts only safe .blend basenames', () => {
@@ -190,7 +208,7 @@ describe('desktop Blender project export contracts', () => {
     expect(isRasterformDesktopBlenderExportBridge(bridge)).toBe(true)
     expect(isRasterformDesktopBlenderExportBridge({
       ...bridge,
-      blenderExportProtocolVersion: 2,
+      blenderExportProtocolVersion: 1,
     })).toBe(false)
     expect(isRasterformDesktopBlenderExportBridge({
       ...bridge,

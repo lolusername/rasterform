@@ -1,5 +1,5 @@
 import { heightGradientColors } from '../lib/three'
-import type { AppearanceSettings, MeshData } from '../types'
+import type { AppearanceSettings, MeshData, SourceTexture } from '../types'
 import type { DesktopRenderErrorCode } from './contracts'
 import {
   DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,
@@ -30,6 +30,7 @@ export interface CreateDesktopBlenderExportSnapshotOptions {
   colorMode: DesktopBlenderColorMode
   appearance: AppearanceSettings
   topology: DesktopBlenderTopology
+  texture?: SourceTexture
   /** The caller already owns these arrays and will never mutate them again. */
   ownedMeshSnapshot?: boolean
 }
@@ -109,6 +110,7 @@ export function createDesktopBlenderExportSnapshot(
       clay: { ...options.appearance.clay },
     },
     settings: { topology: options.topology },
+    texture: options.texture ? { ...options.texture, data: options.texture.data.slice() } : null,
   }
   assertDesktopBlenderExportSnapshot(snapshot)
   return snapshot

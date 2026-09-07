@@ -29,10 +29,21 @@ export interface PixelImage {
   /** Working raster dimensions used to build the mesh. */
   width: number
   height: number
-  /** Original decoded file dimensions, retained without keeping the full source bitmap. */
+  /** Original decoded file dimensions; the full bitmap is decoded only during export. */
   sourceWidth: number
   sourceHeight: number
+  /** Compressed original upload, retained for lossless full-resolution texture export. */
+  sourceBlob?: Blob
   data: Uint8ClampedArray
+  name: string
+}
+
+/** An orientation-normalized, full-resolution sRGB source image for portable exports. */
+export interface SourceTexture {
+  data: Uint8Array
+  mimeType: 'image/png'
+  width: number
+  height: number
   name: string
 }
 

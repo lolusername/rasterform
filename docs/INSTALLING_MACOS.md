@@ -84,7 +84,7 @@ node --version
 
 ### Blender prerequisite for Cycles Pro and editable projects
 
-Cycles Pro and editable `.blend` project preparation are optional and desktop-only. They require a separate **Blender 5.2 LTS or newer** installation; Blender is not included inside either Rasterform app. Put `Blender.app` in `/Applications` as with any normal Mac app. Rasterform also recognizes supported version-named Blender apps there and common Homebrew command-line locations. Exact GLB remains available without Blender and in the browser edition.
+Cycles Pro and editable `.blend` project preparation are optional and desktop-only. They require a separate **Blender 5.2 LTS or newer** installation; Blender is not included inside either Rasterform app. Put `Blender.app` in `/Applications` as with any normal Mac app. Rasterform also recognizes supported version-named Blender apps there and common Homebrew command-line locations. Portable GLB remains available in the desktop app without Blender installed. The web edition exports images only, up to 2K, with optional transparency; the desktop app keeps the larger image sizes and 3D/project formats.
 
 You may keep Blender open on another project while Rasterform renders. Rasterform launches a new isolated background process and does not open, save, close, or otherwise touch the `.blend` file in Blender's UI. The two processes still share the Mac's GPU, unified memory, CPU, and cooling, so running two heavy renders together can make both slower or use substantial memory.
 
