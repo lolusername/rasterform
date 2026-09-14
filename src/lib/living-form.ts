@@ -1,11 +1,12 @@
 import type { LivingFormBehavior, LivingFormSettings, MeshData } from '../types'
+import { cloneStrataData } from './strata'
 
 export type { LivingFormBehavior, LivingFormSettings } from '../types'
 
 const TAU = Math.PI * 2
 const MIN_EXTENT = 1e-6
 
-export const LIVING_FORM_BEHAVIORS = ['breathe', 'ripple', 'flow', 'melt'] as const
+export const LIVING_FORM_BEHAVIORS = ['breathe', 'ripple', 'flow', 'melt', 'expand'] as const
 
 export interface LivingFormBounds {
   readonly min: readonly [number, number, number]
@@ -54,6 +55,7 @@ interface PreparedGeometry {
   readonly width: number
   readonly height: number
   readonly mode: MeshData['mode']
+  readonly strata?: MeshData['strata']
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -238,6 +240,7 @@ function prepareGeometry(mesh: MeshData): PreparedGeometry {
     width: mesh.width,
     height: mesh.height,
     mode: mesh.mode,
+    ...(mesh.strata ? { strata: cloneStrataData(mesh.strata) } : {}),
   }
 }
 
@@ -383,6 +386,19 @@ function writeFrame(
 
   const loopPhase = normalizeLivingFormPhase(phase)
   const resolved = resolveSettings(settings)
+  if (resolved.behavior === 'expand') {
+    target.set(source.positions)
+    if (source.strata) {
+      const closing = (0.5 - 0.5 * Math.cos(TAU * loopPhase)) * resolved.amount
+      for (const part of source.strata.parts) {
+        const offsetZ = -part.layer * source.strata.separation * closing
+        for (let vertex = part.vertexStart; vertex < part.vertexStart + part.vertexCount; vertex += 1) {
+          target[vertex * 3 + 2] = source.positions[vertex * 3 + 2]! + offsetZ
+        }
+      }
+    }
+    return target
+  }
   for (let offset = 0; offset < source.positions.length; offset += 3) {
     switch (resolved.behavior) {
       case 'breathe':
@@ -438,6 +454,7 @@ export function createLivingFormEngine(mesh: MeshData): LivingFormEngine {
         width: source.width,
         height: source.height,
         mode: source.mode,
+        ...(source.strata ? { strata: cloneStrataData(source.strata) } : {}),
       }
     },
   })

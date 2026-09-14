@@ -100,6 +100,7 @@ export function createDesktopBlenderExportSnapshot(
     width: options.mesh.width,
     height: options.mesh.height,
     mode: options.mesh.mode,
+    ...(options.mesh.strata ? { strata: { ...options.mesh.strata, parts: options.mesh.strata.parts.map((part) => ({ ...part })) } } : {}),
   }
   const snapshot: DesktopBlenderExportSnapshot = {
     protocolVersion: DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,

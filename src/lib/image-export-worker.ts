@@ -176,6 +176,7 @@ export function snapshotMesh(mesh: MeshData): MeshData {
     colors: mesh.colors.slice(),
     uvs: mesh.uvs.slice(),
     heights: mesh.heights.slice(),
+    ...(mesh.strata ? { strata: { ...mesh.strata, parts: mesh.strata.parts.map((part) => ({ ...part })) } } : {}),
   }
 }
 

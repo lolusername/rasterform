@@ -416,11 +416,13 @@ body { background: var(--editor-bg); }
 .segmented.stacked span, .segmented.stacked small, .segmented.cards strong, .segmented.cards small { display: block; }
 .segmented.stacked small, .segmented.cards small { margin-top: 2px; color: #858585; font-size: 9px; }
 .segmented button[aria-pressed="true"] small { color: #3e4c1b; }
+.segmented button[aria-pressed="true"]:hover:not(:disabled) { color: #172007; background: var(--editor-accent); }
 .segmented button[aria-pressed="true"]:disabled { opacity: 1; }
 .segmented.motion-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .segmented.motion-presets button { border-bottom: 1px solid #464646; }
 .segmented.motion-presets button:nth-child(even) { border-right: 0; }
 .segmented.motion-presets button:nth-last-child(-n + 2) { border-bottom: 0; }
+.segmented.motion-presets button:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
 .living-transport { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .living-transport button { min-height: 32px; color: #ddd; background: #2b2b2b; border: 1px solid #464646; border-radius: 5px; }
 .living-transport button:hover:not(:disabled) { border-color: #686868; background: #343434; }

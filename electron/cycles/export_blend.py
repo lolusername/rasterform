@@ -33,6 +33,8 @@ import bpy
 MANIFEST_VERSION = 2
 MAX_VERTICES = 2_000_000
 MAX_INDICES = 12_000_000
+MAX_STRATA_VERTICES = 4_000_000
+MAX_STRATA_INDICES = 24_000_000
 MAX_MESH_BYTES = 256 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_TEXTURE_BYTES = 512 * 1024 * 1024
@@ -179,22 +181,28 @@ def parse_manifest(path: Path) -> dict[str, Any]:
         manifest["colorMode"], "colorMode", {"original", "height", "clay"}
     )
 
-    mesh = expect_object(manifest["mesh"], "mesh", MESH_KEYS)
-    vertex_count = expect_integer(mesh["vertexCount"], "mesh.vertexCount", 3, MAX_VERTICES)
-    index_count = expect_integer(mesh["indexCount"], "mesh.indexCount", 3, MAX_INDICES)
-    uv_count = expect_integer(mesh["uvCount"], "mesh.uvCount", 3, MAX_VERTICES)
+    raw_mesh = manifest["mesh"]
+    strata_mode = isinstance(raw_mesh, dict) and raw_mesh.get("mode") == "strata"
+    mesh = expect_object(raw_mesh, "mesh", MESH_KEYS | ({"strata"} if strata_mode else set()))
+    vertex_limit = MAX_STRATA_VERTICES if strata_mode else MAX_VERTICES
+    index_limit = MAX_STRATA_INDICES if strata_mode else MAX_INDICES
+    vertex_count = expect_integer(mesh["vertexCount"], "mesh.vertexCount", 3, vertex_limit)
+    index_count = expect_integer(mesh["indexCount"], "mesh.indexCount", 3, index_limit)
+    uv_count = expect_integer(mesh["uvCount"], "mesh.uvCount", 3, vertex_limit)
     width = expect_integer(mesh["width"], "mesh.width", 1, 16_384)
     height = expect_integer(mesh["height"], "mesh.height", 1, 16_384)
     if index_count % 3 != 0:
         fail("mesh.indexCount must describe complete triangles.")
     if uv_count != vertex_count:
         fail("mesh.uvCount must equal mesh.vertexCount for Rasterform's vertex UVs.")
-    mesh["mode"] = expect_string(mesh["mode"], "mesh.mode", {"plane", "centered", "solid"})
+    mesh["mode"] = expect_string(mesh["mode"], "mesh.mode", {"plane", "centered", "solid", "strata"})
     mesh["vertexCount"] = vertex_count
     mesh["indexCount"] = index_count
     mesh["uvCount"] = uv_count
     mesh["width"] = width
     mesh["height"] = height
+    if strata_mode:
+        validate_strata_parts(mesh)
 
     paths = {
         "positions": resolve_inside(root, mesh["positions"], "mesh.positions", must_exist=True),
@@ -391,6 +399,46 @@ def load_mesh_data(manifest: dict[str, Any]) -> dict[str, array.array]:
     return {"positions": positions, "indices": indices, "colors": colors, "uvs": uvs}
 
 
+def validate_strata_parts(mesh: dict[str, Any], indices: array.array | None = None) -> None:
+    strata = expect_object(mesh["strata"], "mesh.strata", {"layers", "thickness", "separation", "parts"})
+    layers = expect_integer(strata["layers"], "strata.layers", 2, 24)
+    expect_number(strata["thickness"], "strata.thickness", 0.005, 0.12)
+    expect_number(strata["separation"], "strata.separation", 0.0, 0.18)
+    parts = strata["parts"]
+    if not isinstance(parts, list) or not 1 <= len(parts) <= layers:
+        fail("Strata must contain one through the requested number of contour layers.")
+    vertex_end, index_end, previous_threshold = 0, 0, -1.0
+    for layer, raw_part in enumerate(parts):
+        part = expect_object(raw_part, "strata.part", {
+            "layer", "threshold", "vertexStart", "vertexCount", "indexStart", "indexCount", "surfaceIndexCount",
+        })
+        expect_integer(part["layer"], "part.layer", layer, layer)
+        threshold = expect_number(part["threshold"], "part.threshold", 0, 1)
+        if threshold < previous_threshold:
+            fail("Strata height thresholds must be ordered.")
+        expect_integer(part["vertexStart"], "part.vertexStart", vertex_end, vertex_end)
+        expect_integer(part["indexStart"], "part.indexStart", index_end, index_end)
+        vertices = expect_integer(part["vertexCount"], "part.vertexCount", 6, MAX_VERTICES)
+        count = expect_integer(part["indexCount"], "part.indexCount", 12, MAX_INDICES)
+        cap = expect_integer(part["surfaceIndexCount"], "part.surfaceIndexCount", 3, MAX_INDICES)
+        if vertices % 2 or count % 3 or cap % 3 or cap * 2 >= count:
+            fail("Strata cap and solid index counts are invalid.")
+        vertex_end += vertices
+        index_end += count
+        if vertex_end > mesh["vertexCount"] or index_end > mesh["indexCount"]:
+            fail("Strata layers exceed the mesh buffers.")
+        if indices is not None:
+            for offset in range(part["indexStart"], index_end):
+                vertex = indices[offset]
+                if not part["vertexStart"] <= vertex < vertex_end:
+                    fail("Strata indices cross into a different layer.")
+                if offset < part["indexStart"] + cap and vertex >= part["vertexStart"] + vertices // 2:
+                    fail("Strata source-image indices must identify top-cap vertices.")
+        previous_threshold = threshold
+    if vertex_end != mesh["vertexCount"] or index_end != mesh["indexCount"]:
+        fail("Strata layers must cover the complete mesh exactly once.")
+
+
 def set_active_object(object_: bpy.types.Object) -> None:
     if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
         bpy.ops.object.mode_set(mode="OBJECT")
@@ -405,6 +453,8 @@ def structured_grid_layout(
 ) -> tuple[int, int, int] | None:
     """Recognize Rasterform's image-grid index contract, never by counts alone."""
     mesh_spec = manifest["mesh"]
+    if mesh_spec["mode"] == "strata":
+        return None
     columns = mesh_spec["width"]
     rows = mesh_spec["height"]
     layer_count = 2 if mesh_spec["mode"] == "solid" else 1
@@ -780,11 +830,7 @@ def preserve_source_uv(object_: bpy.types.Object) -> None:
     mesh.uv_layers.active_render = original
 
 
-def apply_source_bitmap(
-    manifest: dict[str, Any],
-    model: bpy.types.Object,
-    grid_dimensions: tuple[int, int],
-) -> None:
+def load_source_bitmap(manifest: dict[str, Any]) -> bpy.types.Image:
     texture = manifest["texture"]
     image = bpy.data.images.load(str(texture["resolvedPath"]), check_existing=False)
     image.name = texture["name"]
@@ -797,6 +843,15 @@ def apply_source_bitmap(
     # A portable relative display path is safe even after the private job is
     # removed; Blender reads the packed bytes rather than this fallback path.
     image.filepath = "//source.png"
+    return image
+
+
+def apply_source_bitmap(
+    manifest: dict[str, Any],
+    model: bpy.types.Object,
+    grid_dimensions: tuple[int, int],
+) -> None:
+    image = load_source_bitmap(manifest)
     model.data.materials.append(create_material(manifest, image=image))
     model.data.materials.append(create_material(manifest, neutral=True))
     columns, rows = grid_dimensions
@@ -928,10 +983,11 @@ def disable_viewport_grids() -> None:
                 space.shading.type = "MATERIAL"
 
 
-def verify_clean_scene(object_: bpy.types.Object) -> None:
+def verify_clean_scene(object_: bpy.types.Object | list[bpy.types.Object]) -> None:
+    expected = object_ if isinstance(object_, list) else [object_]
     scene_objects = list(bpy.context.scene.objects)
-    if scene_objects != [object_] or object_.type != "MESH":
-        raise RuntimeError("The Blender export scene must contain exactly one mesh object.")
+    if set(scene_objects) != set(expected) or any(item.type != "MESH" for item in expected):
+        raise RuntimeError("The Blender export scene must contain exactly the exported mesh objects.")
     if any(item.type in {"CAMERA", "LIGHT"} for item in bpy.data.objects):
         raise RuntimeError("The Blender export unexpectedly contains a camera or light.")
     bpy.context.scene.camera = None
@@ -982,17 +1038,23 @@ def save_compressed(manifest: dict[str, Any]) -> tuple[int, str]:
         if "FINISHED" not in reopened:
             raise RuntimeError("Blender could not reopen the saved private project.")
         mesh_objects = [item for item in bpy.context.scene.objects if item.type == "MESH"]
-        if len(mesh_objects) != 1:
-            raise RuntimeError("The reopened Blender project did not contain exactly one mesh.")
-        reopened_model = mesh_objects[0]
-        verify_clean_scene(reopened_model)
-        reopened_uv = reopened_model.data.uv_layers.get(UV_LAYER_NAME)
-        if reopened_uv is None or len(reopened_uv.uv) != len(reopened_model.data.loops):
-            raise RuntimeError("The reopened Blender project did not retain its UV map.")
+        strata = manifest["mesh"].get("strata")
+        expected_count = len(strata["parts"]) if strata else 1
+        if len(mesh_objects) != expected_count:
+            raise RuntimeError("The reopened Blender project did not retain every exported mesh.")
+        verify_clean_scene(mesh_objects)
+        if strata and sorted(item.name for item in mesh_objects) != [
+                f"Rasterform_Strata_{index + 1:02d}" for index in range(expected_count)]:
+            raise RuntimeError("The reopened Blender project lost its named contour layers.")
+        for reopened_model in mesh_objects:
+            reopened_uv = reopened_model.data.uv_layers.get(UV_LAYER_NAME)
+            if reopened_uv is None or len(reopened_uv.uv) != len(reopened_model.data.loops):
+                raise RuntimeError("The reopened Blender project did not retain its UV map.")
+            if manifest["texture"] is not None:
+                source_uv = reopened_model.data.uv_layers.get(SOURCE_UV_LAYER_NAME)
+                if source_uv is None or len(source_uv.uv) != len(reopened_model.data.loops):
+                    raise RuntimeError("The reopened Blender project did not retain its source image UVs.")
         if manifest["texture"] is not None:
-            source_uv = reopened_model.data.uv_layers.get(SOURCE_UV_LAYER_NAME)
-            if source_uv is None or len(source_uv.uv) != len(reopened_model.data.loops):
-                raise RuntimeError("The reopened Blender project did not retain its source image UVs.")
             packed_images = [image for image in bpy.data.images if image.packed_file is not None]
             texture = manifest["texture"]
             if (len(packed_images) != 1
@@ -1013,6 +1075,104 @@ def save_compressed(manifest: dict[str, Any]) -> tuple[int, str]:
             pass
 
 
+def export_strata_project(manifest: dict[str, Any], values: dict[str, array.array], started: float) -> None:
+    """Keep every iso-layer independently editable; never remesh across air gaps."""
+    validate_strata_parts(manifest["mesh"], values["indices"])
+    topology = manifest["settings"]["topology"]
+    job_id = manifest["jobId"]
+    image = load_source_bitmap(manifest) if manifest["texture"] is not None else None
+    surface = create_material(manifest, image=image)
+    backing = create_material(manifest, neutral=True) if image else None
+    models = []
+    for part in manifest["mesh"]["strata"]["parts"]:
+        vertex_start = part["vertexStart"]
+        vertex_end = vertex_start + part["vertexCount"]
+        index_start = part["indexStart"]
+        index_end = index_start + part["indexCount"]
+        piece = {
+            "positions": values["positions"][vertex_start * 3:vertex_end * 3],
+            "colors": values["colors"][vertex_start * 3:vertex_end * 3],
+            "uvs": values["uvs"][vertex_start * 2:vertex_end * 2],
+            "indices": array.array("I", (index - vertex_start for index in values["indices"][index_start:index_end])),
+        }
+        model = create_mesh_object(manifest, piece)
+        model.name = f"Rasterform_Strata_{part['layer'] + 1:02d}"
+        model.data.name = f"{model.name}_Mesh"
+        model["rasterform_layer"] = part["layer"] + 1
+        model["rasterform_threshold"] = part["threshold"]
+        model.data.materials.append(surface)
+        preserve_source_uv(model)
+        if image is not None:
+            model.data.materials.append(backing)
+            for polygon in model.data.polygons:
+                polygon.material_index = 0 if polygon.index < part["surfaceIndexCount"] // 3 else 1
+            model["rasterform_source_image"] = image.name
+            model["rasterform_source_uv"] = SOURCE_UV_LAYER_NAME
+
+        if topology != "exact":
+            emit("PROGRESS", {"jobId": job_id, "phase": "retopologizing"})
+            set_active_object(model)
+            bpy.ops.object.mode_set(mode="EDIT")
+            try:
+                bpy.ops.mesh.select_all(action="SELECT")
+                # Only planar simplification is permitted. SourceUV is affine
+                # on each cap and stays valid after removing interior edges.
+                # Photo vertex colors need those interior samples, so retain
+                # them and only join compatible triangles into quads.
+                if topology == "lightweight" and (image is not None or manifest["colorMode"] != "original"):
+                    result = bpy.ops.mesh.dissolve_limited(
+                        angle_limit=0.000001, use_dissolve_boundaries=False,
+                        delimit={"NORMAL", "MATERIAL", "UV"},
+                    )
+                    method = "strata_planar"
+                else:
+                    result = bpy.ops.mesh.tris_convert_to_quads(
+                        face_threshold=0.000001, shape_threshold=math.radians(40),
+                        uvs=True, vcols=True, seam=True, sharp=True, materials=True,
+                    )
+                    method = "strata_quads"
+                if "FINISHED" not in result:
+                    raise RuntimeError("Blender could not prepare editable contour layers.")
+            finally:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            model["rasterform_retopology_method"] = method
+            emit("PROGRESS", {"jobId": job_id, "phase": "unwrapping"})
+            unwrap_smart_uv(model)
+        else:
+            model["rasterform_retopology_method"] = "exact"
+        shade_smooth_by_angle(model)
+        model.data.update(calc_edges=True)
+        models.append(model)
+
+    disable_viewport_grids()
+    verify_clean_scene(models)
+    output_vertices = sum(len(model.data.vertices) for model in models)
+    output_faces = sum(len(model.data.polygons) for model in models)
+    uv_loops = 0
+    for model in models:
+        uv = model.data.uv_layers.get(UV_LAYER_NAME)
+        source_uv = model.data.uv_layers.get(SOURCE_UV_LAYER_NAME)
+        if uv is None or source_uv is None or len(uv.uv) != len(model.data.loops) or len(source_uv.uv) != len(model.data.loops):
+            raise RuntimeError("A Strata layer lost its editable or source-image UVs.")
+        uv_loops += len(uv.uv)
+    counts = [topology_counts(model.data) for model in models]
+    quads, triangles, ngons, output_triangles = (sum(items) for items in zip(*counts))
+    # Select the exported asset, not a startup object, when the project opens.
+    for model in models:
+        model.select_set(True)
+    emit("PROGRESS", {"jobId": job_id, "phase": "saving"})
+    output_bytes, output_sha256 = save_compressed(manifest)
+    emit("COMPLETE", {
+        "jobId": job_id, "file": manifest["output"], "topology": topology,
+        "sourceVertices": manifest["mesh"]["vertexCount"], "sourceFaces": manifest["mesh"]["indexCount"] // 3,
+        "outputVertices": output_vertices, "outputFaces": output_faces,
+        "outputTriangleCount": output_triangles, "quads": quads, "triangles": triangles, "ngons": ngons,
+        "uvLayerName": UV_LAYER_NAME, "uvLoops": uv_loops, "colorAttributeName": COLOR_ATTRIBUTE_NAME,
+        "blenderVersion": bpy.app.version_string, "elapsedSeconds": round(time.monotonic() - started, 3),
+        "outputBytes": output_bytes, "outputSha256": output_sha256,
+    })
+
+
 def export_blend(manifest_path: Path) -> None:
     started = time.monotonic()
     if bpy.app.version < (5, 2, 0):
@@ -1025,7 +1185,7 @@ def export_blend(manifest_path: Path) -> None:
     source_vertices = manifest["mesh"]["vertexCount"]
     source_faces = manifest["mesh"]["indexCount"] // 3
     structured_layout = structured_grid_layout(manifest, values["indices"])
-    if manifest["texture"] is not None and structured_layout is None:
+    if manifest["texture"] is not None and structured_layout is None and manifest["mesh"]["mode"] != "strata":
         fail("Source bitmap export requires an image relief with its original grid topology.")
     grid_dimensions = structured_layout[:2] if structured_layout is not None else None
 
@@ -1034,6 +1194,10 @@ def export_blend(manifest_path: Path) -> None:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     for object_ in list(bpy.data.objects):
         bpy.data.objects.remove(object_, do_unlink=True)
+
+    if manifest["mesh"]["mode"] == "strata":
+        export_strata_project(manifest, values, started)
+        return
 
     if topology == "exact":
         model = create_mesh_object(manifest, values)

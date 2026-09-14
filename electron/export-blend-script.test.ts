@@ -7,6 +7,7 @@ import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
 import { sourceBitmapFixture } from './test-fixtures/source-bitmap'
+import { buildStrataMesh } from '../src/lib/strata'
 
 const execFileAsync = promisify(execFile)
 const blenderPath = process.env.RASTERFORM_BLENDER_PATH
@@ -251,6 +252,29 @@ async function addBitmap(fixture: Fixture, finish: 'matte' | 'glossy' | 'metalli
   return { texture, imagePath, manifest }
 }
 
+async function createStrataFixture(topology: 'exact' | 'balanced' | 'lightweight') {
+  const fixture = await createFixture(topology, 'structured-grid')
+  const { texture, imagePath, manifest } = await addBitmap(fixture)
+  const size = 17
+  const field = { width: size, height: size, values: Float32Array.from({ length: size * size }, (_, index) => {
+    const radius = Math.hypot((index % size) / (size - 1) - 0.5, Math.floor(index / size) / (size - 1) - 0.5)
+    return Math.max(0, 1 - Math.abs(radius - 0.3) * 8)
+  }) }
+  const image = { width: size, height: size, sourceWidth: size, sourceHeight: size, name: 'contour-fixture',
+    data: new Uint8ClampedArray(size * size * 4).fill(200) }
+  const mesh = buildStrataMesh(field, image, 16, { layers: 5, thickness: 0.03, separation: 0.08 })
+  await Promise.all([
+    writeFile(join(fixture.root, 'mesh/positions.f32'), encodeFloat32(Array.from(mesh.positions))),
+    writeFile(join(fixture.root, 'mesh/indices.u32'), encodeUint32(Array.from(mesh.indices))),
+    writeFile(join(fixture.root, 'mesh/colors.f32'), encodeFloat32(Array.from(mesh.colors))),
+    writeFile(join(fixture.root, 'mesh/uvs.f32'), encodeFloat32(Array.from(mesh.uvs))),
+  ])
+  Object.assign(manifest.mesh, { width: mesh.width, height: mesh.height, mode: 'strata', strata: mesh.strata,
+    vertexCount: mesh.positions.length / 3, indexCount: mesh.indices.length, uvCount: mesh.uvs.length / 2 })
+  await writeFile(fixture.manifestPath, JSON.stringify(manifest))
+  return { fixture, texture, imagePath, mesh, manifest }
+}
+
 async function inspectBlend(fixture: Fixture, inspectTexture = false): Promise<Record<string, unknown>> {
   const expression = [
     'import bpy,json',
@@ -303,6 +327,42 @@ afterAll(async () => {
 })
 
 describe.skipIf(!realBlenderAvailable)('isolated Blender project exporter', () => {
+  it.each(['exact', 'balanced', 'lightweight'] as const)('reopens separate, closed Strata layers with packed bitmap and preserved source UVs (%s)', async (topology) => {
+    const { fixture, texture, imagePath } = await createStrataFixture(topology)
+    const { stdout } = await runExporter(fixture)
+    const complete = statusLines(stdout).find((status) => status.kind === 'COMPLETE')!
+    expect(complete).toBeDefined()
+    await rm(imagePath)
+    const expression = [
+      'import bpy,json,hashlib,bmesh',
+      'objects=sorted([o for o in bpy.context.scene.objects if o.type=="MESH"],key=lambda o:o.name)',
+      'images=[i for i in bpy.data.images if i.packed_file]',
+      'reports=[]',
+      'for obj in objects:\n mesh=obj.data\n uv=mesh.uv_layers["SourceUV"]\n bm=bmesh.new()\n bm.from_mesh(mesh)\n shader=mesh.materials[0].node_tree.nodes["Rasterform Surface"]\n reports.append({"name":obj.name,"vertices":len(mesh.vertices),"faces":len(mesh.polygons),"watertight":all(e.is_manifold for e in bm.edges),"uvError":max(max(abs(uv.uv[l.index].vector[0]-(mesh.vertices[l.vertex_index].co.x/2+0.5)),abs(uv.uv[l.index].vector[1]-(mesh.vertices[l.vertex_index].co.z/2+0.5))) for l in mesh.loops),"frontFaces":sum(p.material_index==0 for p in mesh.polygons),"backFaces":sum(p.material_index==1 for p in mesh.polygons),"roughness":shader.inputs["Roughness"].default_value,"metallic":shader.inputs["Metallic"].default_value,"depthMin":min(-v.co.y for v in mesh.vertices),"depthMax":max(-v.co.y for v in mesh.vertices)})\n bm.free()',
+      'print("STRATA_REOPEN "+json.dumps({"reports":reports,"objects":len(bpy.context.scene.objects),"images":len(images),"sha256":hashlib.sha256(images[0].packed_file.data).hexdigest()}))',
+    ].join('\n')
+    const reopened = await execFileAsync(blenderPath, ['--background', '--factory-startup', '--disable-autoexec', fixture.outputPath, '--python-exit-code', '1', '--python-expr', expression], {
+      cwd: fixture.root, env: isolatedEnvironment(fixture.root), timeout: 120_000, maxBuffer: 8 * 1024 * 1024,
+    })
+    const data = JSON.parse(reopened.stdout.split('\n').find((line) => line.startsWith('STRATA_REOPEN '))!.slice('STRATA_REOPEN '.length))
+    expect(data.objects).toBe(5)
+    expect(data.images).toBe(1)
+    expect(data.sha256).toBe(createHash('sha256').update(texture.data).digest('hex'))
+    expect(data.reports).toHaveLength(5)
+    data.reports.forEach((report: Record<string, any>, layer: number) => {
+      expect(report.name).toBe(`Rasterform_Strata_${String(layer + 1).padStart(2, '0')}`)
+      expect(report.watertight).toBe(true)
+      expect(report.uvError).toBeLessThan(1e-6)
+      expect(report.frontFaces).toBeGreaterThan(0)
+      expect(report.backFaces).toBeGreaterThan(0)
+      expect(report.roughness).toBeCloseTo(0.26)
+      expect(report.metallic).toBeCloseTo(1)
+      expect(report.depthMin).toBeCloseTo(layer * 0.11)
+      expect(report.depthMax).toBeCloseTo(layer * 0.11 + 0.03)
+    })
+    expect(data.reports.reduce((sum: number, report: { faces: number }) => sum + report.faces, 0)).toBe(complete.payload.outputFaces)
+  }, 120_000)
+
   it.each([
     ['exact', 'matte', 0.88, 0],
     ['balanced', 'glossy', 0.16, 0.02],

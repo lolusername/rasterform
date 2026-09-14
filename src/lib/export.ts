@@ -1,6 +1,7 @@
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
-import { BufferAttribute, Color, type Mesh, type MeshStandardMaterial } from 'three'
+import { BufferAttribute, Color, Group, type Mesh, type MeshStandardMaterial } from 'three'
+import { isStrataData, splitStrataMesh } from './strata'
 import { createThreeMesh } from './three'
 import { scalarFieldPng } from './image'
 import { assertSourceTexture } from './source-texture'
@@ -33,19 +34,39 @@ export async function encodeGlb(
   appearance?: AppearanceSettings,
   texture?: SourceTexture,
 ): Promise<ArrayBuffer> {
-  const mesh = createThreeMesh(meshData, colorMode, appearance)
+  if (meshData.mode === 'strata' && !isStrataData(meshData.strata, meshData.positions.length / 3, meshData.indices)) {
+    throw new Error('The Strata layer boundaries are invalid; rebuild the form before exporting.')
+  }
+  const pieces = splitStrataMesh(meshData)
+  const meshes = pieces.map((piece) => createThreeMesh(piece, colorMode, appearance))
+  const group = new Group()
+  group.name = 'Rasterform_Strata'
   try {
-    if (texture) {
-      assertSourceTexture(texture)
-      prepareTexturedMesh(mesh, meshData)
+    if (texture) assertSourceTexture(texture)
+    for (let index = 0; index < meshes.length; index += 1) {
+      const mesh = meshes[index]!
+      const piece = pieces[index]!
+      if (texture) prepareTexturedMesh(mesh, piece)
+      if (meshData.mode === 'strata') {
+        mesh.name = `Rasterform_Strata_${String(index + 1).padStart(2, '0')}`
+        mesh.userData = { layer: index + 1, threshold: piece.strata!.parts[0]!.threshold }
+        // glTF has no flatShading flag. Bake face normals into export-only vertices.
+        const flat = mesh.geometry.toNonIndexed()
+        mesh.geometry.dispose()
+        mesh.geometry = flat
+        flat.computeVertexNormals()
+      }
+      group.add(mesh)
     }
-    const result = await new GLTFExporter().parseAsync(mesh, { binary: true, onlyVisible: true })
+    const result = await new GLTFExporter().parseAsync(meshData.mode === 'strata' ? group : meshes[0]!, { binary: true, onlyVisible: true })
     if (!(result instanceof ArrayBuffer)) throw new Error('The GLB exporter returned an unexpected payload.')
     return texture ? embedSourceTexture(result, texture) : result
   } finally {
-    mesh.geometry.dispose()
-    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-    materials.forEach((material) => material.dispose())
+    for (const mesh of meshes) {
+      mesh.geometry.dispose()
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      materials.forEach((material) => material.dispose())
+    }
   }
 }
 
@@ -56,8 +77,9 @@ function prepareTexturedMesh(mesh: Mesh, meshData: MeshData): void {
   const gridVertices = (meshData.width + 1) * (meshData.height + 1)
   const vertexCount = meshData.positions.length / 3
   const layers = meshData.mode === 'solid' ? 2 : 1
-  if (!Number.isInteger(meshData.width) || !Number.isInteger(meshData.height) ||
-      meshData.width < 1 || meshData.height < 1 || gridVertices * layers !== vertexCount) {
+  const strataPart = meshData.strata?.parts[0]
+  if (!strataPart && (!Number.isInteger(meshData.width) || !Number.isInteger(meshData.height) ||
+      meshData.width < 1 || meshData.height < 1 || gridVertices * layers !== vertexCount)) {
     throw new Error('Source bitmap GLB export requires an image relief with its original image UVs.')
   }
   const front: number[] = []
@@ -66,10 +88,12 @@ function prepareTexturedMesh(mesh: Mesh, meshData: MeshData): void {
     const a = meshData.indices[offset]!
     const b = meshData.indices[offset + 1]!
     const c = meshData.indices[offset + 2]!
-    const target = a < gridVertices && b < gridVertices && c < gridVertices ? front : sidesBack
+    const isFront = strataPart ? offset < strataPart.surfaceIndexCount
+      : a < gridVertices && b < gridVertices && c < gridVertices
+    const target = isFront ? front : sidesBack
     target.push(a, b, c)
   }
-  if (front.length !== meshData.width * meshData.height * 6) {
+  if (!strataPart && front.length !== meshData.width * meshData.height * 6) {
     throw new Error('The mesh no longer has its original source-image topology. Export Current appearance instead.')
   }
   const geometry = mesh.geometry
@@ -116,8 +140,8 @@ function embedSourceTexture(glb: ArrayBuffer, texture: SourceTexture): ArrayBuff
     throw new Error('The GLB exporter did not provide the required JSON and geometry buffers.')
   }
   const document = JSON.parse(new TextDecoder().decode(new Uint8Array(glb, 20, jsonLength))) as TexturedGlb
-  const front = document.materials.find((material) => material.name === SOURCE_MATERIAL_NAME)
-  if (!front) throw new Error('The source-image material is missing from the exported GLB.')
+  const fronts = document.materials.filter((material) => material.name === SOURCE_MATERIAL_NAME)
+  if (!fronts.length) throw new Error('The source-image material is missing from the exported GLB.')
   const binaryLength = header.getUint32(binaryHeader, true)
   const textureOffset = Math.ceil(binaryLength / 4) * 4
   const nextBinaryLength = Math.ceil((textureOffset + texture.data.byteLength) / 4) * 4
@@ -130,7 +154,7 @@ function embedSourceTexture(glb: ArrayBuffer, texture: SourceTexture): ArrayBuff
   const sampler = (document.samplers ??= []).push({ magFilter: 9729, minFilter: 9987, wrapS: 33071, wrapT: 33071 }) - 1
   const index = (document.textures ??= []).push({ name: texture.name, source, sampler }) - 1
   // glTF baseColorTexture is sRGB by specification; metallic/roughness stay unchanged.
-  front.pbrMetallicRoughness.baseColorTexture = { index, texCoord: 0 }
+  for (const front of fronts) front.pbrMetallicRoughness.baseColorTexture = { index, texCoord: 0 }
   document.buffers[0]!.byteLength = nextBinaryLength
   const json = new TextEncoder().encode(JSON.stringify(document))
   const nextJsonLength = Math.ceil(json.byteLength / 4) * 4

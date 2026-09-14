@@ -11,6 +11,7 @@ import { composeChannelStack } from './lib/channel-stack'
 import { processScalarField } from './lib/filters'
 import { createDemoImage, drawPixelImage, drawScalarField, fileToPixelImage } from './lib/image'
 import { buildMesh } from './lib/mesh'
+import { buildStrataMesh, DEFAULT_STRATA_SETTINGS, spaceStrataMesh } from './lib/strata'
 import { createTextMesh } from './lib/text-mesh'
 import {
   SYSTEM_SANS_FONT,
@@ -98,6 +99,7 @@ import type {
   LivingFormSettings,
   MeshSettings,
   MeshData,
+  StrataSettings,
   Recipe,
   TextRecipe,
   TextShapeSettings,
@@ -320,6 +322,8 @@ const meshSettings = reactive<MeshSettings>({
   midpoint: 0.5,
   baseThickness: 0.26,
 })
+const strataSettings = reactive<StrataSettings>({ ...DEFAULT_STRATA_SETTINGS })
+const isStrata = computed(() => workspace.value === 'image' && meshSettings.mode === 'strata')
 
 const textSettings = reactive<TextShapeSettings>({
   text: 'Rasterform',
@@ -465,6 +469,7 @@ const geometryModes: Array<{ value: GeometryMode; label: string; note: string }>
   { value: 'plane', label: 'Raised relief', note: 'Open surface · zero at base' },
   { value: 'centered', label: 'Centered relief', note: 'Open surface · midpoint at zero' },
   { value: 'solid', label: 'Solid relief', note: 'Closed back and sides' },
+  { value: 'strata', label: 'Strata', note: 'Separate, contour-cut layers' },
 ]
 
 const previewModes: Array<{ value: ColorMode; label: string }> = [
@@ -490,7 +495,9 @@ const livingFormBehaviors: Array<{ value: LivingFormBehavior; label: string; not
   { value: 'ripple', label: 'Ripple', note: 'Concentric waves travel through the surface.' },
   { value: 'flow', label: 'Flow', note: 'Multiple fields drift through one another.' },
   { value: 'melt', label: 'Melt', note: 'The form slumps and organically reforms.' },
+  { value: 'expand', label: 'Expand', note: 'Contour layers close together and open again without bending. At full intensity the gaps close completely.' },
 ]
+const availableLivingBehaviors = computed(() => livingFormBehaviors.filter((item) => item.value !== 'expand' || isStrata.value))
 const activeLivingBehavior = computed(() => livingFormBehaviors.find((item) => item.value === livingForm.value.behavior)!)
 const livingFormStatus = computed(() => !livingForm.value.enabled
   ? 'Off'
@@ -586,6 +593,11 @@ const blenderExportHelp = computed(() => {
   if (!desktopProReady.value) return desktopProStatus.value
   if (colorMode.value === 'wireframe') {
     return 'Choose Original, Height, or Clay before preparing an editable Blender surface.'
+  }
+  if (isStrata.value) {
+    return blenderExportTopology.value === 'exact'
+      ? 'Saves each contour layer as a separately named Blender object, with the visible gaps, source UVs, and material intact. The visible Living Form phase is baked in.'
+      : 'Keeps layers separate and simplifies only coplanar faces within each layer. Contour boundaries, holes, source-image UVs, and gaps are preserved; no remeshing across layers. Your open Blender project is untouched.'
   }
   const method = workspace.value === 'image'
     ? 'Regular image reliefs are rebuilt as an efficient quad grid.'
@@ -728,9 +740,16 @@ const imageExportProgressBarValue = computed(() => {
 
 const rawField = computed(() => composeChannelStack(image.value, channelLayers))
 const heightField = computed(() => processScalarField(rawField.value, fieldSettings))
-const imageMesh = computed(() => buildMesh(heightField.value, image.value, meshSettings))
+// Gap and thickness edits reuse the contour topology, replacing only positions.
+const strataContours = computed(() => buildStrataMesh(heightField.value, image.value, meshSettings.resolution, {
+  ...DEFAULT_STRATA_SETTINGS, layers: strataSettings.layers,
+}))
+const imageMesh = computed(() => meshSettings.mode === 'strata'
+  ? spaceStrataMesh(strataContours.value, strataSettings)
+  : buildMesh(heightField.value, image.value, meshSettings))
 const mesh = computed<MeshData | null>(() => workspace.value === 'image' ? imageMesh.value : textMesh.value)
-const topology = computed(() => mesh.value ? inspectTopology(mesh.value) : null)
+const strataTopology = computed(() => isStrata.value ? inspectTopology(strataContours.value) : null)
+const topology = computed(() => isStrata.value ? strataTopology.value : mesh.value ? inspectTopology(mesh.value) : null)
 const activeGeometry = computed(() => workspace.value === 'text'
   ? { value: 'solid' as const, label: 'Extruded text', note: 'Closed beveled geometry' }
   : geometryModes.find((mode) => mode.value === meshSettings.mode)!)
@@ -1143,6 +1162,10 @@ watch(() => livingForm.value.enabled, (enabled) => {
   if (!enabled) livingPlaying.value = false
 })
 
+watch(() => meshSettings.mode, (mode) => {
+  if (mode !== 'strata' && imageLivingForm.behavior === 'expand') imageLivingForm.behavior = 'breathe'
+})
+
 watch(() => proRenderSettings.maxSamples, (maximum) => {
   if (proRenderSettings.minSamples > maximum) proRenderSettings.minSamples = maximum
 })
@@ -1303,7 +1326,7 @@ function recipe(): Recipe {
     image: { name: image.value.name, width: image.value.sourceWidth, height: image.value.sourceHeight },
     channels: channelLayers.map((layer) => ({ ...layer })),
     field: { ...fieldSettings },
-    mesh: { ...meshSettings },
+    mesh: { ...meshSettings, ...(meshSettings.mode === 'strata' ? { strata: { ...strataSettings } } : {}) },
     appearance: {
       heightGradient: { ...imageAppearance.heightGradient },
       clay: { ...imageAppearance.clay },
@@ -2025,8 +2048,17 @@ async function downloadLivingFormLoop() {
               <div class="segmented stacked" role="group" aria-label="Geometry mode">
                 <button v-for="mode in geometryModes" :key="mode.value" type="button" :aria-pressed="meshSettings.mode === mode.value" @click="meshSettings.mode = mode.value"><span>{{ mode.label }}</span><small>{{ mode.note }}</small></button>
               </div>
-              <label class="slider-control"><span>Depth <output>{{ meshSettings.depth.toFixed(2) }}</output></span><input v-model.number="meshSettings.depth" type="range" min="0.02" max="1.4" step="0.02" /></label>
-              <label class="slider-control"><span>Midpoint <output>{{ meshSettings.midpoint.toFixed(2) }}</output></span><input v-model.number="meshSettings.midpoint" type="range" min="0" max="1" step="0.01" /></label>
+              <template v-if="isStrata">
+                <p class="inline-note">The whole image becomes stacked height contours—not horizontal strips. Gaps reveal the layers; nothing is painted or selected by hand.</p>
+                <label class="slider-control"><span>Layers <output>{{ strataSettings.layers }}</output></span><input v-model.number="strataSettings.layers" aria-label="Strata layers" type="range" min="2" max="24" step="1" /></label>
+                <label class="slider-control"><span>Thickness <output>{{ strataSettings.thickness.toFixed(3) }}</output></span><input v-model.number="strataSettings.thickness" aria-label="Strata thickness" type="range" min="0.005" max="0.12" step="0.005" /></label>
+                <label class="slider-control"><span>Separation <output>{{ strataSettings.separation.toFixed(3) }}</output></span><input v-model.number="strataSettings.separation" aria-label="Strata separation" type="range" min="0" max="0.18" step="0.005" /></label>
+                <p class="inline-note">{{ imageMesh.strata?.parts.length }} contour layers · closed tops, undersides, and edges. Flat images produce a single layer. Use Surface smoothing for broader contours, or Living Form → Expand to animate the gaps.</p>
+              </template>
+              <template v-else>
+                <label class="slider-control"><span>Depth <output>{{ meshSettings.depth.toFixed(2) }}</output></span><input v-model.number="meshSettings.depth" type="range" min="0.02" max="1.4" step="0.02" /></label>
+                <label class="slider-control"><span>Midpoint <output>{{ meshSettings.midpoint.toFixed(2) }}</output></span><input v-model.number="meshSettings.midpoint" type="range" min="0" max="1" step="0.01" /></label>
+              </template>
               <label v-if="meshSettings.mode === 'solid'" class="slider-control"><span>Base thickness <output>{{ meshSettings.baseThickness.toFixed(2) }}</output></span><input v-model.number="meshSettings.baseThickness" type="range" min="0.06" max="0.8" step="0.02" /></label>
               <label class="slider-control"><span>Mesh detail <output>{{ meshSettings.resolution }}</output></span><input v-model.number="meshSettings.resolution" type="range" min="16" max="180" step="4" /></label>
             </div>
@@ -2073,7 +2105,7 @@ async function downloadLivingFormLoop() {
               <label class="check-control"><input v-model="livingForm.enabled" type="checkbox" />Enable kinetic form</label>
               <div class="segmented motion-presets" role="group" aria-label="Living Form behavior">
                 <button
-                  v-for="behavior in livingFormBehaviors"
+                  v-for="behavior in availableLivingBehaviors"
                   :key="behavior.value"
                   type="button"
                   :title="behavior.note"
@@ -2083,8 +2115,8 @@ async function downloadLivingFormLoop() {
               </div>
               <p class="inline-note">{{ activeLivingBehavior.note }} Motion is procedural, deterministic, and closes on an exact seamless loop.</p>
               <label class="slider-control"><span>Intensity <output>{{ Math.round(livingForm.amount * 100) }}%</output></span><input v-model.number="livingForm.amount" aria-label="Living Form intensity" :aria-valuetext="`${Math.round(livingForm.amount * 100)}%`" type="range" min="0" max="1" step="0.01" /></label>
-              <label class="slider-control"><span>Complexity <output>{{ livingForm.frequency.toFixed(2) }}</output></span><input v-model.number="livingForm.frequency" aria-label="Living Form complexity" :aria-valuetext="livingForm.frequency.toFixed(2)" type="range" min="0.25" max="5" step="0.05" /></label>
-              <label class="slider-control"><span>Variation <output>{{ Math.round(livingForm.seed) }}</output></span><input v-model.number="livingForm.seed" aria-label="Living Form variation" :aria-valuetext="`${Math.round(livingForm.seed)}`" type="range" min="0" max="100" step="1" /></label>
+              <label v-if="livingForm.behavior !== 'expand'" class="slider-control"><span>Complexity <output>{{ livingForm.frequency.toFixed(2) }}</output></span><input v-model.number="livingForm.frequency" aria-label="Living Form complexity" :aria-valuetext="livingForm.frequency.toFixed(2)" type="range" min="0.25" max="5" step="0.05" /></label>
+              <label v-if="livingForm.behavior !== 'expand'" class="slider-control"><span>Variation <output>{{ Math.round(livingForm.seed) }}</output></span><input v-model.number="livingForm.seed" aria-label="Living Form variation" :aria-valuetext="`${Math.round(livingForm.seed)}`" type="range" min="0" max="100" step="1" /></label>
               <label class="slider-control"><span>Loop duration <output>{{ livingForm.duration.toFixed(1) }}s</output></span><input v-model.number="livingForm.duration" aria-label="Living Form loop duration" :aria-valuetext="`${livingForm.duration.toFixed(1)} seconds`" type="range" min="1" max="12" step="0.5" /></label>
               <div class="living-transport">
                 <button type="button" class="primary-control" :aria-pressed="livingPlaying" :disabled="!hasModel" @click="toggleLivingFormPlayback">{{ livingPlaying ? 'Pause' : 'Play' }}</button>
@@ -2186,7 +2218,7 @@ async function downloadLivingFormLoop() {
                 <button type="button" :aria-pressed="useSourceTexture" :disabled="exporting || exportingBlenderProject || colorMode === 'wireframe'" @click="modelSurfaceColor = 'source'"><strong>Source image</strong><small>Embedded bitmap</small></button>
                 <button type="button" :aria-pressed="!useSourceTexture" :disabled="exporting || exportingBlenderProject" @click="modelSurfaceColor = 'current'"><strong>Current appearance</strong><small>Visible colors</small></button>
               </div>
-              <p class="inline-note">{{ useSourceTexture ? `Embeds the original ${image.sourceWidth.toLocaleString()} × ${image.sourceHeight.toLocaleString()} image on the surface. Solid relief sides and back stay neutral. The active material finish is preserved.` : 'Keeps the current color mode and material finish.' }}</p>
+              <p class="inline-note">{{ useSourceTexture ? `Embeds the original ${image.sourceWidth.toLocaleString()} × ${image.sourceHeight.toLocaleString()} image on ${isStrata ? 'each contour layer' : 'the surface'}. Sides and undersides stay neutral. The active material finish is preserved.` : 'Keeps the current color mode and material finish.' }}</p>
             </fieldset>
 
             <details v-if="desktopBlenderBridgeAvailable" ref="blenderExportDetails" class="blender-export-controls" @toggle="keepBlenderExportAccordionOpen">

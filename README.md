@@ -34,6 +34,12 @@ Exact `.blend` keeps the source triangles and UVs. Balanced and Lightweight crea
 
 The web export panel contains still PNGs, lossless Living Form PNG-sequence ZIPs, and height PNGs only, with optional alpha on rendered images and a 2K maximum. Desktop keeps the larger image sizes plus textured GLB, editable `.blend`, reusable recipes, and watertight STL files when the topology is ready to fabricate.
 
+## Strata
+
+Choose **Image → Properties → Geometry → Strata** to turn the whole height field into separately closed contour layers. Layers, Thickness, and Separation control the stack; **Living Form → Expand** closes and reopens its gaps without bending the sheets. Existing relief modes and render quality settings are unchanged.
+
+Desktop GLB and Blender exports keep each contour layer as a separately named object. The original bitmap can be embedded on every top cap, with source UVs and material finish retained. Strata is the exception to the one-object `.blend` behavior described above: it exports one object per height layer and no other scene objects. See [the Strata guide](docs/STRATA.md) for controls, topology choices, limitations, and verification.
+
 ## Text workspace
 
 Text generates automatically as you type. On supported desktop Chromium browsers, **Browse installed fonts** uses the permission-gated Local Font Access API to load the exact face you select. Other browsers passively verify a curated set of common installed faces and always retain a system-font default. Font bytes stay in memory for the current session and are never uploaded or written into recipes.

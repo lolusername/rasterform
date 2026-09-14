@@ -7,6 +7,7 @@ import type {
 } from '../types'
 import type { FinalExportProgress } from '../lib/final-image-export'
 import type { ImageExportCameraSnapshot } from '../lib/image-export-worker'
+import { isStrataData } from '../lib/strata'
 
 export const DESKTOP_PROTOCOL_VERSION = 1 as const
 /** Independent protocol for native lifecycle protection around shared long exports. */
@@ -14,6 +15,10 @@ export const DESKTOP_LONG_EXPORT_PROTOCOL_VERSION = 1 as const
 export const DESKTOP_MAX_IMAGE_EDGE = 4096
 export const DESKTOP_MAX_MESH_VERTICES = 2_000_000
 export const DESKTOP_MAX_MESH_INDICES = 12_000_000
+// A 24-layer contour stack has repeated caps. Keep the same total-byte budget,
+// while admitting the vertex/index balance of every UI detail/layer setting.
+export const DESKTOP_MAX_STRATA_VERTICES = 4_000_000
+export const DESKTOP_MAX_STRATA_INDICES = 24_000_000
 export const DESKTOP_MAX_MESH_BYTES = 256 * 1024 * 1024
 export const DESKTOP_MAX_PNG_BYTES = 128 * 1024 * 1024
 export const DESKTOP_MAX_LONG_EXPORT_FRAMES = 360
@@ -194,6 +199,7 @@ function isMeshData(value: unknown): value is MeshData {
     'width',
     'height',
     'mode',
+    ...(value.mode === 'strata' ? ['strata'] : []),
   ])) return false
   if (!isFloat32Array(value.positions)
     || !isUint32Array(value.indices)
@@ -203,8 +209,8 @@ function isMeshData(value: unknown): value is MeshData {
   if (value.positions.length === 0 || value.positions.length % 3 !== 0) return false
   if (value.indices.length === 0 || value.indices.length % 3 !== 0) return false
   const vertices = value.positions.length / 3
-  if (vertices > DESKTOP_MAX_MESH_VERTICES
-    || value.indices.length > DESKTOP_MAX_MESH_INDICES) return false
+  if (vertices > (value.mode === 'strata' ? DESKTOP_MAX_STRATA_VERTICES : DESKTOP_MAX_MESH_VERTICES)
+    || value.indices.length > (value.mode === 'strata' ? DESKTOP_MAX_STRATA_INDICES : DESKTOP_MAX_MESH_INDICES)) return false
   const totalBytes = value.positions.byteLength
     + value.indices.byteLength
     + value.colors.byteLength
@@ -223,7 +229,9 @@ function isMeshData(value: unknown): value is MeshData {
   }
   return isIntegerInRange(value.width, 1, 1_000_000)
     && isIntegerInRange(value.height, 1, 1_000_000)
-    && (value.mode === 'plane' || value.mode === 'centered' || value.mode === 'solid')
+    && (value.mode === 'strata'
+      ? isStrataData(value.strata, vertices, value.indices)
+      : value.mode === 'plane' || value.mode === 'centered' || value.mode === 'solid')
 }
 
 function isCameraSnapshot(value: unknown): value is ImageExportCameraSnapshot {

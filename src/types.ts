@@ -9,7 +9,7 @@ export type HeightSource =
   | 'alpha'
   | 'edges'
 
-export type GeometryMode = 'plane' | 'centered' | 'solid'
+export type GeometryMode = 'plane' | 'centered' | 'solid' | 'strata'
 export type ColorMode = 'original' | 'height' | 'clay' | 'wireframe'
 export type ChannelBlendMode = 'normal' | 'add' | 'subtract' | 'multiply' | 'screen' | 'max' | 'min'
 export type CompositeFinish = 'detail' | 'blob'
@@ -23,7 +23,7 @@ export type ViewportSupersample = 1 | 2
 export type WorkspaceMode = 'image' | 'text'
 export type TextAlignment = 'left' | 'center' | 'right'
 export type FontSource = 'default' | 'detected' | 'local'
-export type LivingFormBehavior = 'breathe' | 'ripple' | 'flow' | 'melt'
+export type LivingFormBehavior = 'breathe' | 'ripple' | 'flow' | 'melt' | 'expand'
 
 export interface PixelImage {
   /** Working raster dimensions used to build the mesh. */
@@ -109,6 +109,29 @@ export interface MeshSettings {
   depth: number
   midpoint: number
   baseThickness: number
+  strata?: StrataSettings
+}
+
+export interface StrataSettings {
+  layers: number
+  thickness: number
+  separation: number
+}
+
+/** Contiguous, independently editable height slices in the combined render mesh. */
+export interface StrataPart {
+  layer: number
+  threshold: number
+  vertexStart: number
+  vertexCount: number
+  indexStart: number
+  indexCount: number
+  /** Top-cap triangles come first; sides and undersides follow. */
+  surfaceIndexCount: number
+}
+
+export interface StrataData extends StrataSettings {
+  parts: StrataPart[]
 }
 
 export interface TextShapeSettings {
@@ -145,6 +168,7 @@ export interface MeshData {
   width: number
   height: number
   mode: GeometryMode
+  strata?: StrataData
 }
 
 export interface TopologyReport {

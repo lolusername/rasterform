@@ -183,6 +183,7 @@ export async function createBlenderExportJob(
         width: snapshot.mesh.width,
         height: snapshot.mesh.height,
         mode: snapshot.mesh.mode,
+        ...(snapshot.mesh.strata ? { strata: snapshot.mesh.strata } : {}),
       },
       colorMode: snapshot.colorMode,
       appearance: {

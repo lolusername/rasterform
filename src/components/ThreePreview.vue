@@ -40,6 +40,7 @@ import type {
 import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
 import { createStillExportCamera } from '../lib/straight-on-camera'
+import { fitStrataCamera } from '../lib/strata-frame'
 import {
   DEFAULT_LIVING_FORM_SETTINGS,
   createLivingFormEngine,
@@ -98,6 +99,7 @@ let activeExport: AbortController | null = null
 const mainThreadExport = ref(false)
 let animationFrame = 0
 let mounted = false
+let framedMesh: MeshData | null = null
 
 interface LivingFormLoopSnapshot {
   engine: LivingFormEngine
@@ -219,6 +221,15 @@ function updateObject() {
   if (normal instanceof THREE.BufferAttribute) normal.setUsage(THREE.DynamicDrawUsage)
   livingFormEngine = createLivingFormEngine(props.mesh)
   scene.add(object)
+  if (camera && controls && framedMesh !== props.mesh
+    && (props.mesh.mode === 'strata' || framedMesh?.mode === 'strata')) {
+    // Match the actual screen aspect before fitting; never enlarge the canvas.
+    if (canvas.value) camera.aspect = Math.max(1, canvas.value.clientWidth) / Math.max(1, canvas.value.clientHeight)
+    const distance = fitStrataCamera(camera, controls.target, object.geometry.boundingBox!)
+    controls.maxDistance = Math.max(8, distance * 2)
+    controls.update()
+  }
+  framedMesh = props.mesh
   applyLivingFormFrame(true)
 }
 

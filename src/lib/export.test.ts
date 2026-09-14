@@ -3,6 +3,7 @@ import { BufferGeometry, Material } from 'three'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { encodeGlb, encodeStl } from './export'
 import { buildMesh } from './mesh'
+import { buildStrataMesh } from './strata'
 import { createDefaultAppearanceSettings } from './three'
 import type { PixelImage, ScalarField, SourceTexture } from '../types'
 
@@ -31,6 +32,7 @@ const sourceTexture: SourceTexture = {
 }
 
 interface GlbDocument {
+  nodes: Array<{ name: string; mesh?: number; children?: number[] }>
   buffers: Array<{ byteLength: number }>
   bufferViews: Array<{ byteOffset: number; byteLength: number }>
   accessors: Array<{ bufferView: number; byteOffset?: number; count: number; componentType: number }>
@@ -61,6 +63,34 @@ function readGlb(glb: ArrayBuffer) {
 }
 
 describe('portable mesh exports', () => {
+  it('exports each contour layer as a named object with shared embedded bitmap and correct UVs', async () => {
+    const strata = buildStrataMesh(field, image, 8, { layers: 5 })
+    const appearance = createDefaultAppearanceSettings()
+    appearance.clay.finish = 'metallic'
+    const glb = await encodeGlb(strata, 'clay', appearance, sourceTexture)
+    const { document, values } = readGlb(glb)
+    expect(document.nodes.filter((node) => node.mesh !== undefined).map((node) => node.name)).toEqual([
+      'Rasterform_Strata_01', 'Rasterform_Strata_02', 'Rasterform_Strata_03', 'Rasterform_Strata_04', 'Rasterform_Strata_05',
+    ])
+    expect(document.images).toHaveLength(1)
+    expect(document.meshes).toHaveLength(5)
+    for (const exported of document.meshes) {
+      expect(exported.primitives).toHaveLength(2)
+      const front = exported.primitives.find((primitive) => document.materials[primitive.material]!.name === 'Rasterform_Source_Image')!
+      const material = document.materials[front.material]!.pbrMetallicRoughness
+      expect(material.baseColorTexture).toEqual({ index: 0, texCoord: 0 })
+      expect(material.metallicFactor).toBe(1)
+      expect(material.roughnessFactor).toBe(0.26)
+      expect(front.attributes.COLOR_0).toBeUndefined()
+      const coordinates = values(front.attributes.POSITION!, 3)
+      const uv = values(front.attributes.TEXCOORD_0!, 2)
+      for (let vertex = 0; vertex < uv.length / 2; vertex += 1) {
+        expect(uv[vertex * 2]).toBeCloseTo(coordinates[vertex * 3]! / 2 + 0.5)
+        expect(uv[vertex * 2 + 1]).toBeCloseTo(0.5 - coordinates[vertex * 3 + 1]! / 2)
+      }
+    }
+  })
+
   it('encodes a nonempty GLB 2.0 container', async () => {
     const glb = await encodeGlb(mesh, 'original')
     const header = new DataView(glb, 0, 12)

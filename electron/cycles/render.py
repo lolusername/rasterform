@@ -31,6 +31,8 @@ MANIFEST_VERSION = 1
 MAX_IMAGE_EDGE = 4096
 MAX_VERTICES = 2_000_000
 MAX_INDICES = 12_000_000
+MAX_STRATA_VERTICES = 4_000_000
+MAX_STRATA_INDICES = 24_000_000
 MAX_MESH_BYTES = 256 * 1024 * 1024
 STATUS_PREFIX = "RASTERFORM_"
 SAMPLE_PATTERN = re.compile(r"\bSample\s+(\d+)\s*/\s*(\d+)(?:\s+samples?)?", re.I)
@@ -205,11 +207,12 @@ def parse_manifest(path: Path) -> dict[str, Any]:
     )
 
     mesh = expect_object(manifest["mesh"], "mesh", MESH_KEYS)
-    vertex_count = expect_integer(mesh["vertexCount"], "mesh.vertexCount", 3, MAX_VERTICES)
-    index_count = expect_integer(mesh["indexCount"], "mesh.indexCount", 3, MAX_INDICES)
+    strata_mode = mesh.get("mode") == "strata"
+    vertex_count = expect_integer(mesh["vertexCount"], "mesh.vertexCount", 3, MAX_STRATA_VERTICES if strata_mode else MAX_VERTICES)
+    index_count = expect_integer(mesh["indexCount"], "mesh.indexCount", 3, MAX_STRATA_INDICES if strata_mode else MAX_INDICES)
     if index_count % 3 != 0:
         fail("mesh.indexCount must describe complete triangles.")
-    mesh["mode"] = expect_string(mesh["mode"], "mesh.mode", {"plane", "centered", "solid"})
+    mesh["mode"] = expect_string(mesh["mode"], "mesh.mode", {"plane", "centered", "solid", "strata"})
     mesh["vertexCount"] = vertex_count
     mesh["indexCount"] = index_count
 
@@ -370,7 +373,7 @@ def create_mesh(manifest: dict[str, Any]) -> bpy.types.Object:
     mesh.polygons.add(face_count)
     mesh.polygons.foreach_set("loop_start", array.array("i", range(0, index_count, 3)))
     mesh.polygons.foreach_set("loop_total", array.array("i", [3]) * face_count)
-    mesh.polygons.foreach_set("use_smooth", array.array("b", [True]) * face_count)
+    mesh.polygons.foreach_set("use_smooth", array.array("b", [mesh_spec["mode"] != "strata"]) * face_count)
     mesh.validate(clean_customdata=False)
     mesh.update(calc_edges=True)
 

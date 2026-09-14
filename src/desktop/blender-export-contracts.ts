@@ -1,9 +1,12 @@
 import type { AppearanceSettings, ColorMode, MeshData, SourceTexture } from '../types'
+import { isStrataData } from '../lib/strata'
 import type { DesktopRenderFailure, DesktopSavePreparation } from './contracts'
 import {
   DESKTOP_MAX_MESH_BYTES,
   DESKTOP_MAX_MESH_INDICES,
   DESKTOP_MAX_MESH_VERTICES,
+  DESKTOP_MAX_STRATA_VERTICES,
+  DESKTOP_MAX_STRATA_INDICES,
   isDesktopJobId,
   isDesktopSavePreparation,
 } from './contracts'
@@ -176,6 +179,7 @@ function isBlenderMeshData(value: unknown): value is DesktopBlenderMeshData {
     'width',
     'height',
     'mode',
+    ...(value.mode === 'strata' ? ['strata'] : []),
   ])) return false
   if (!isFloat32Array(value.positions)
     || !isUint32Array(value.indices)
@@ -190,8 +194,8 @@ function isBlenderMeshData(value: unknown): value is DesktopBlenderMeshData {
     + value.indices.byteLength
     + value.colors.byteLength
     + value.uvs.byteLength
-  if (vertices > DESKTOP_MAX_MESH_VERTICES
-    || value.indices.length > DESKTOP_MAX_MESH_INDICES
+  if (vertices > (value.mode === 'strata' ? DESKTOP_MAX_STRATA_VERTICES : DESKTOP_MAX_MESH_VERTICES)
+    || value.indices.length > (value.mode === 'strata' ? DESKTOP_MAX_STRATA_INDICES : DESKTOP_MAX_MESH_INDICES)
     || !Number.isSafeInteger(totalBytes)
     || totalBytes > DESKTOP_MAX_MESH_BYTES
     || value.colors.length !== value.positions.length
@@ -204,7 +208,9 @@ function isBlenderMeshData(value: unknown): value is DesktopBlenderMeshData {
   }
   return isIntegerInRange(value.width, 1, 16_384)
     && isIntegerInRange(value.height, 1, 16_384)
-    && (value.mode === 'plane' || value.mode === 'centered' || value.mode === 'solid')
+    && (value.mode === 'strata'
+      ? isStrataData(value.strata, vertices, value.indices)
+      : value.mode === 'plane' || value.mode === 'centered' || value.mode === 'solid')
 }
 
 function isAppearance(value: unknown): value is AppearanceSettings {

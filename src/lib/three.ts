@@ -127,9 +127,12 @@ export function createThreeMesh(
   colorMode: ColorMode,
   appearance: AppearanceSettings = createDefaultAppearanceSettings(),
 ): THREE.Mesh {
+  const material = createMaterial(colorMode, appearance)
+  // Contour sheets have crisp, planar caps and cut edges in High and Final.
+  if (mesh.mode === 'strata') material.flatShading = true
   const object = new THREE.Mesh(
     createGeometry(mesh, colorMode, appearance),
-    createMaterial(colorMode, appearance),
+    material,
   )
   object.name = `Rasterform_${mesh.mode}`
   object.castShadow = true
