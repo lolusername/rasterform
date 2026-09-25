@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { normalizeNumberControlValue } from '../lib/number-control'
+
 const props = defineProps<{
   modelValue: number
   label: string
@@ -13,9 +15,12 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:modelValue': [value: number] }>()
 function update(event: Event) {
   const input = event.target as HTMLInputElement
-  const value = input.valueAsNumber
-  if (!Number.isFinite(value)) { input.value = String(props.modelValue); return }
-  emit('update:modelValue', Math.min(props.max, Math.max(props.min, value)))
+  const value = normalizeNumberControlValue(input.valueAsNumber, props)
+  if (value === null) { input.value = String(props.modelValue); return }
+  // Vue need not rerender when normalization returns the current model value.
+  // Still replace the typed text so both controls visibly match authored state.
+  input.value = String(value)
+  emit('update:modelValue', value)
 }
 </script>
 

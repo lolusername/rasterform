@@ -14,7 +14,7 @@ Use **Fit** or `F` to frame the model while editing. Straight-on output fits aut
 
 ## Undo, kept versions, and recovery
 
-- **Undo / Redo** recover authored changes, including preset replacement and imported images. A slider gesture is one action. `Cmd/Ctrl+Z` and `Cmd/Ctrl+Shift+Z` work outside text-entry controls, where normal text editing keeps its own shortcuts.
+- **Undo / Redo** recover authored changes, including preset replacement, imported images, and the very first camera adjustment. A slider gesture is one action. `Cmd/Ctrl+Z` and `Cmd/Ctrl+Shift+Z` work outside text-entry controls, where normal text editing keeps its own shortcuts.
 - **Keep version** captures a design and thumbnail for this session. **Compare** switches between it and current work with one camera and lighting setup. **Back to current** discards the comparison; **Use version** adopts it as an undoable action. Comparisons are read-only.
 - Up to eight kept alternatives and 100 undo actions are retained in memory. Image pixel/Blob assets are immutable and shared between history entries, not recopied on every slider movement.
 - The latest design is saved locally through IndexedDB after edits. Reloading offers **Recover session**; it never silently replaces the current design. This is device/browser-local recovery, not cloud backup. Storage failures are reported and do not block editing.
@@ -25,7 +25,7 @@ Use **Fit** or `F` to frame the model while editing. Straight-on output fits aut
 
 **Inspect transformation** shows the source image, selected raw channel signal, actual composite before and after that channel, and final processed height field. White is high; black is low. The first enabled channel establishes the base, and later operations can be nonlinear. These are real intermediate fields, not percentages of attribution.
 
-**Compare one setting**, in Surface, shows real height-field variations of smoothing, contrast, or Blob dilation. All other settings stay fixed. The form changes only after **Apply**, and that change is undoable. Numeric controls accept exact values and expose individual resets without changing their original ranges.
+**Compare one setting**, in Surface, shows real height-field variations of smoothing, contrast, or Blob dilation. All other settings stay fixed. The form changes only after **Apply**, and that change is undoable. Numeric controls accept typed values and expose individual resets without changing their original ranges or steps. Typed values snap to the same supported steps as the slider; out-of-range entries clamp visibly and blank entries restore the current value.
 
 Presets replace Channels and Surface settings; they do not change the selected geometry mode, material, camera, or render quality. Blob remains optional; rough or spiky forms are not treated as errors.
 
@@ -50,8 +50,21 @@ With a development server running and Playwright installed or provided through `
 ```sh
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-viewport-layout.mjs
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-recovery.mjs
+TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-controls.mjs
 ```
 
 The viewport sweep checks actual DOM/canvas bounds and independent scrolling through editing, export, straight-on, and return-to-edit at 13 window sizes. Recovery checks use an isolated browser context. Offscreen export buffers are allowed to be larger than the display; the visible viewport is not.
+
+The controls regression uses Vue's development metadata to read the preview camera, so run it against the development server rather than a production preview.
+
+For real native project-file checks after building the desktop staging directory:
+
+```sh
+npm run desktop:build
+node scripts/verify-desktop-projects.mjs
+node electron/scripts/smoke-texture-exports.mjs
+```
+
+The native project harness uses the actual staged main process, preload, and UI with an isolated profile. Only dialog destinations and Finder reveal are substituted with temporary fixtures; it never opens or overwrites the user's projects. The texture smoke produces actual image exports and checks source-textured model handoff through Blender.
 
 For release verification, also inspect actual downloaded PNG dimensions, alpha, and composition and run the staged/packaged Electron smoke tests. Unit tests alone do not establish that a real render or native save completed.

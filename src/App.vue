@@ -1427,6 +1427,11 @@ async function refreshDesktopProRenderer(): Promise<void> {
 
 onMounted(() => {
   appDisposed = false
+  // ThreePreview mounts before its parent, so its real startup pose is now
+  // available. Setup ran before that camera existed; use this as the initial
+  // history baseline so the very first orbit/Fit action can be undone.
+  documentCamera = threePreview.value?.getCameraSnapshot() ?? undefined
+  editorHistory.synchronize(captureDocument())
   void cleanupStaleStoredZipArchives()
   void refreshDesktopProRenderer()
   jobClockTimer = window.setInterval(() => { jobClock.value = Date.now() }, 1000)
@@ -1435,9 +1440,18 @@ onMounted(() => {
   window.addEventListener('pointerup', endEditorGesture)
   window.addEventListener('pointercancel', endEditorGesture)
   void sessionPersistence.load().then(saved => {
+    if (appDisposed) return
     recoverableSession.value = saved
     sessionReady = true
-  }).catch(error => { sessionReady = true; editorMessage.value = String(error) })
+    // An edit can arrive while IndexedDB opens. Its first save was deliberately
+    // deferred so it could not overwrite an undiscovered recoverable session.
+    if (!saved && editorHistory.canUndo) scheduleSessionSave()
+  }).catch(error => {
+    if (appDisposed) return
+    sessionReady = true
+    editorMessage.value = String(error)
+    if (editorHistory.canUndo) scheduleSessionSave()
+  })
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   document.addEventListener('focusin', handleDocumentFocusIn)
   livingAnimationTime = performance.now()
