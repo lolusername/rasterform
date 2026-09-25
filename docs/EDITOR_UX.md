@@ -68,7 +68,7 @@ The viewport sweep checks actual DOM/canvas bounds and independent scrolling thr
 
 The additional viewport sweep covers Text and Image Living Loop inspectors, frame-rate/duration/background options, and DPR 2 displays in representative narrow and short windows. Device-pixel scaling of the visible canvas is intentional; export-resolution scaling is not.
 
-The controls regression uses Vue's development metadata to read the preview camera, so run it against the development server rather than a production preview.
+The controls and comparison regressions use Vue's development metadata to read the preview camera and authored state, so run them against the development server rather than a production preview. Finish desktop builds/packaging before starting these checks: generated Electron HTML files can trigger a Vite page reload and invalidate an in-progress interaction sequence. The layout sweeps can also run against a frozen production preview.
 
 For real native project-file checks after building the desktop staging directory:
 
