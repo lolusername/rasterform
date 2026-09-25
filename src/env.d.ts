@@ -18,6 +18,7 @@ interface Window {
     | import('./desktop/contracts').RasterformDesktopLongExportBridge
     | import('./desktop/pro-contracts').RasterformDesktopProBridge
     | import('./desktop/blender-export-contracts').RasterformDesktopBlenderExportBridge
+    | import('./desktop/project-files').RasterformDesktopProjectFilesBridge
 }
 
 interface FontFaceSet {

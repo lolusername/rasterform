@@ -16,10 +16,18 @@ import {
   DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION,
   type DesktopBlenderExportEvent,
   type DesktopBlenderExportSnapshot,
-  type RasterformDesktopBlenderExportBridge,
 } from '../src/desktop/blender-export-contracts'
+import {
+  DESKTOP_PROJECT_FILES_PROTOCOL_VERSION,
+  type DesktopProjectSaveRequest,
+  type RasterformDesktopProjectFilesBridge,
+} from '../src/desktop/project-files'
 
-const bridge: RasterformDesktopBlenderExportBridge = Object.freeze({
+const bridge: RasterformDesktopProjectFilesBridge = Object.freeze({
+  projectFilesProtocolVersion: DESKTOP_PROJECT_FILES_PROTOCOL_VERSION,
+  saveProject: (request: DesktopProjectSaveRequest) => ipcRenderer.invoke('desktop:save-project', request),
+  openProject: () => ipcRenderer.invoke('desktop:open-project'),
+  revealLastExport: () => ipcRenderer.invoke('desktop:reveal-last-export'),
   protocolVersion: DESKTOP_PROTOCOL_VERSION,
   longExportProtocolVersion: DESKTOP_LONG_EXPORT_PROTOCOL_VERSION,
   prepareFinalSave: (suggestedName: string) => ipcRenderer.invoke('desktop:prepare-final-save', suggestedName),

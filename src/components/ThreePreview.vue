@@ -41,6 +41,15 @@ import { renderViewportPng } from '../lib/viewport-export'
 import type { ViewportExportProgress, ViewportPngResult } from '../lib/viewport-export'
 import { createStillExportCamera } from '../lib/straight-on-camera'
 import { fitStrataCamera } from '../lib/strata-frame'
+import { fitViewportFrame } from '../lib/viewport-frame'
+import {
+  capturePreviewCamera,
+  createOutputPreviewCamera,
+  isPreviewCameraSnapshot,
+  restorePreviewCamera,
+  type OutputCompositionPreview,
+  type PreviewCameraSnapshot,
+} from '../lib/preview-camera'
 import {
   DEFAULT_LIVING_FORM_SETTINGS,
   createLivingFormEngine,
@@ -65,31 +74,48 @@ const props = withDefaults(defineProps<{
   interactionLocked?: boolean
   livingForm?: LivingFormSettings
   livingPhase?: number
+  outputPreview?: OutputCompositionPreview | null
 }>(), {
   background: 'dark-gray',
   interactionLocked: false,
   livingForm: () => ({ ...DEFAULT_LIVING_FORM_SETTINGS }),
   livingPhase: 0,
+  outputPreview: null,
 })
 
 const emit = defineEmits<{
   'export-progress': [progress: FinalExportProgress]
+  'camera-change': [snapshot: PreviewCameraSnapshot]
 }>()
 
+const host = ref<HTMLDivElement | null>(null)
 const canvas = ref<HTMLCanvasElement | null>(null)
 const exportActive = ref(false)
-const canvasStyle = computed(() => ({
-  backgroundColor: viewportBackgroundPreset(props.background).color,
+const screenFrame = ref({ width: 1, height: 1 })
+const frameStyle = computed(() => ({
+  width: `${screenFrame.value.width}px`,
+  height: `${screenFrame.value.height}px`,
 }))
+const canvasStyle = computed(() => ({
+  backgroundColor: props.outputPreview?.background === 'transparent' && props.outputPreview.checkerboard
+    ? 'transparent'
+    : viewportBackgroundPreset(props.background).color,
+}))
+const straightOnPreview = computed(() => props.outputPreview?.view === 'straight-on')
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
+// OrbitControls and all captures own this editing camera. Composition previews
+// use a separate camera so entering Export can never rewrite the authored view.
 let camera: THREE.PerspectiveCamera | null = null
+let outputCamera: THREE.PerspectiveCamera | null = null
+let outputCameraDirty = true
 let controls: OrbitControls | null = null
 let object: THREE.Mesh | null = null
 let livingFormEngine: LivingFormEngine | null = null
 let appliedLivingFrame = ''
 let livingFrameDirty = true
 let composer: EffectComposer | null = null
+let renderPass: RenderPass | null = null
 let gtaoPass: GTAOPass | null = null
 let outputPass: OutputPass | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -100,6 +126,9 @@ const mainThreadExport = ref(false)
 let animationFrame = 0
 let mounted = false
 let framedMesh: MeshData | null = null
+let cameraChangeTimer: ReturnType<typeof setTimeout> | null = null
+let cameraGestureActive = false
+let cameraChangePending = false
 
 interface LivingFormLoopSnapshot {
   engine: LivingFormEngine
@@ -162,6 +191,7 @@ function applyLivingFormFrame(force = false) {
   object.geometry.computeVertexNormals()
   appliedLivingFrame = key
   livingFrameDirty = false
+  outputCameraDirty = true
 }
 
 function snapshotLivingFormMesh(phase = props.livingPhase): MeshData {
@@ -224,18 +254,153 @@ function updateObject() {
   if (camera && controls && framedMesh !== props.mesh
     && (props.mesh.mode === 'strata' || framedMesh?.mode === 'strata')) {
     // Match the actual screen aspect before fitting; never enlarge the canvas.
-    if (canvas.value) camera.aspect = Math.max(1, canvas.value.clientWidth) / Math.max(1, canvas.value.clientHeight)
+    if (host.value) camera.aspect = Math.max(1, host.value.clientWidth) / Math.max(1, host.value.clientHeight)
     const distance = fitStrataCamera(camera, controls.target, object.geometry.boundingBox!)
     controls.maxDistance = Math.max(8, distance * 2)
     controls.update()
   }
   framedMesh = props.mesh
   applyLivingFormFrame(true)
+  outputCameraDirty = true
 }
 
 function updateBackground() {
   renderer?.setClearColor(0x000000, 0)
   if (scene) scene.background = null
+}
+
+function updateInteractionEnabled() {
+  if (controls) controls.enabled = !props.interactionLocked && !mainThreadExport.value && !straightOnPreview.value
+}
+
+/** Clear OrbitControls inertia while keeping the exact current authored view. */
+function clearOrbitMomentum() {
+  if (!camera || !controls) return
+  const snapshot = capturePreviewCamera(camera, controls.target)
+  const damping = controls.enableDamping
+  controls.enableDamping = false
+  controls.update()
+  restorePreviewCamera(camera, controls.target, snapshot)
+  controls.update()
+  controls.enableDamping = damping
+}
+
+function getCameraSnapshot(): PreviewCameraSnapshot | null {
+  return camera && controls ? capturePreviewCamera(camera, controls.target) : null
+}
+
+function cancelPendingCameraChange() {
+  if (cameraChangeTimer !== null) clearTimeout(cameraChangeTimer)
+  cameraChangeTimer = null
+  cameraChangePending = false
+}
+
+function scheduleCameraChange() {
+  cameraChangePending = true
+  if (cameraChangeTimer !== null) clearTimeout(cameraChangeTimer)
+  cameraChangeTimer = setTimeout(() => {
+    cameraChangeTimer = null
+    if (cameraGestureActive || !mounted) return
+    cameraChangePending = false
+    const snapshot = getCameraSnapshot()
+    if (snapshot) emit('camera-change', snapshot)
+  }, 350)
+}
+
+function setCameraSnapshot(snapshot: PreviewCameraSnapshot): boolean {
+  if (!camera || !controls || !isPreviewCameraSnapshot(snapshot)) return false
+  cancelPendingCameraChange()
+  clearOrbitMomentum()
+  restorePreviewCamera(camera, controls.target, snapshot)
+  // Saved views can legitimately be farther away than the initial studio limit.
+  controls.maxDistance = Math.max(8, camera.position.distanceTo(controls.target) * 2)
+  controls.update()
+  outputCameraDirty = true
+  return true
+}
+
+/** Fit the authored camera to the current visible-phase geometry. */
+function fitCamera(): void {
+  if (!camera || !controls || !object) return
+  cancelPendingCameraChange()
+  clearOrbitMomentum()
+  applyLivingFormFrame()
+  object.geometry.computeBoundingBox()
+  if (!object.geometry.boundingBox) return
+  const distance = fitStrataCamera(camera, controls.target, object.geometry.boundingBox)
+  controls.maxDistance = Math.max(8, distance * 2)
+  controls.update()
+  outputCameraDirty = true
+  scheduleCameraChange()
+}
+
+function resetCamera(): void {
+  if (!camera || !controls) return
+  cancelPendingCameraChange()
+  clearOrbitMomentum()
+  camera.fov = 38
+  camera.near = 0.01
+  camera.far = 100
+  camera.zoom = 1
+  camera.filmGauge = 35
+  camera.filmOffset = 0
+  camera.up.set(0, 1, 0)
+  camera.position.set(2.45, -2.2, 2.15)
+  camera.clearViewOffset()
+  controls.target.set(0, 0, 0.12)
+  controls.maxDistance = 8
+  controls.update()
+  camera.updateProjectionMatrix()
+  camera.updateMatrixWorld(true)
+  if (props.mesh?.mode === 'strata') fitCamera()
+  outputCameraDirty = true
+  scheduleCameraChange()
+}
+
+function displayCamera(): THREE.PerspectiveCamera | null {
+  if (!camera || !props.outputPreview || !props.mesh) return camera
+  if (props.outputPreview.view === 'current') {
+    // Reuse the preview camera during orbiting; capture uses the same pose and
+    // independently applies this exact output ratio, not rounded CSS dimensions.
+    outputCamera ??= camera.clone()
+    outputCamera.copy(camera)
+    outputCamera.aspect = props.outputPreview.width / props.outputPreview.height
+    outputCamera.clearViewOffset()
+    outputCamera.updateProjectionMatrix()
+    outputCamera.updateMatrixWorld(true)
+  } else if (!outputCamera || outputCameraDirty) {
+    const position = object?.geometry.getAttribute('position')
+    const visibleMesh = position instanceof THREE.BufferAttribute && position.array instanceof Float32Array
+      ? { ...props.mesh, positions: position.array }
+      : props.mesh
+    outputCamera = createOutputPreviewCamera(visibleMesh, camera, props.outputPreview)
+  }
+  outputCameraDirty = false
+  return outputCamera
+}
+
+/** Small UI-only image for a kept version/job; never used as export pixels. */
+function capturePreviewThumbnail(): string | null {
+  if (!canvas.value || !renderer || !props.mesh || mainThreadExport.value) return null
+  try {
+    // A job thumbnail must not advance orbit damping after capture has already
+    // taken its camera snapshot. It observes the current view, never edits it.
+    renderFrame(false)
+    const width = canvas.value.width
+    const height = canvas.value.height
+    const scale = Math.min(1, 320 / Math.max(width, height))
+    const thumbnail = document.createElement('canvas')
+    thumbnail.width = Math.max(1, Math.round(width * scale))
+    thumbnail.height = Math.max(1, Math.round(height * scale))
+    const context = thumbnail.getContext('2d')
+    if (!context) return null
+    context.fillStyle = viewportBackgroundPreset(props.background).color
+    context.fillRect(0, 0, thumbnail.width, thumbnail.height)
+    context.drawImage(canvas.value, 0, 0, thumbnail.width, thumbnail.height)
+    return thumbnail.toDataURL('image/png')
+  } catch {
+    return null
+  }
 }
 
 async function captureHighPng(
@@ -359,7 +524,7 @@ async function captureHighPng(
     if (activeExport === controller) activeExport = null
     mainThreadExport.value = false
     exportActive.value = false
-    if (controls) controls.enabled = !props.interactionLocked
+    updateInteractionEnabled()
   }
 }
 
@@ -434,7 +599,7 @@ async function captureFinalPng(
     if (activeExport === controller) activeExport = null
     mainThreadExport.value = false
     exportActive.value = false
-    if (controls) controls.enabled = !props.interactionLocked
+    updateInteractionEnabled()
   }
 }
 
@@ -487,7 +652,7 @@ async function captureProRender(
   } finally {
     if (activeExport === controller) activeExport = null
     exportActive.value = false
-    if (controls) controls.enabled = !props.interactionLocked
+    updateInteractionEnabled()
   }
 }
 
@@ -502,23 +667,44 @@ defineExpose({
   cancelImageExport,
   beginLivingFormLoopExport,
   endLivingFormLoopExport,
+  getCameraSnapshot,
+  setCameraSnapshot,
+  fitCamera,
+  resetCamera,
+  capturePreviewThumbnail,
 })
 
 function resize() {
-  if (!canvas.value || !renderer || !camera) return
-  const width = Math.max(1, canvas.value.clientWidth)
-  const height = Math.max(1, canvas.value.clientHeight)
-  renderer.setSize(width, height, false)
-  composer?.setSize(width, height)
+  if (!host.value || !renderer || !camera) return
+  const width = Math.max(1, Math.floor(host.value.clientWidth))
+  const height = Math.max(1, Math.floor(host.value.clientHeight))
+  const frame = props.outputPreview
+    ? fitViewportFrame(props.outputPreview.width / props.outputPreview.height, width, height)
+    : { width, height }
+  screenFrame.value = frame
+  renderer.setSize(frame.width, frame.height, false)
+  composer?.setSize(frame.width, frame.height)
+  // The editing lens remains tied to the available studio, never the temporary
+  // output frame. Export dimensions are handled only by the preview/capture lens.
   camera.aspect = width / height
   camera.updateProjectionMatrix()
+  outputCameraDirty = true
+}
+
+function renderFrame(updateControls = true) {
+  applyLivingFormFrame()
+  if (updateControls && controls?.enabled) controls.update()
+  const currentCamera = displayCamera()
+  if (currentCamera) {
+    if (renderPass) renderPass.camera = currentCamera
+    if (gtaoPass) gtaoPass.camera = currentCamera
+  }
+  if (!mainThreadExport.value) composer?.render()
 }
 
 function render() {
   animationFrame = requestAnimationFrame(render)
-  applyLivingFormFrame()
-  controls?.update()
-  if (!mainThreadExport.value) composer?.render()
+  renderFrame()
 }
 
 async function loadEnvironment() {
@@ -565,13 +751,29 @@ onMounted(() => {
   controls.minDistance = 1.3
   controls.maxDistance = 8
   controls.target.set(0, 0, 0.12)
-  controls.enabled = !props.interactionLocked
+  updateInteractionEnabled()
+  controls.addEventListener('start', () => {
+    cameraGestureActive = true
+    cameraChangePending = true
+    if (cameraChangeTimer !== null) clearTimeout(cameraChangeTimer)
+    cameraChangeTimer = null
+  })
+  controls.addEventListener('change', () => {
+    // Includes damping updates after pointer release. Project restore does not
+    // start a gesture, so it cannot create a feedback loop in authored history.
+    if (cameraChangePending) scheduleCameraChange()
+  })
+  controls.addEventListener('end', () => {
+    cameraGestureActive = false
+    scheduleCameraChange()
+  })
 
   addStudioLighting(scene)
   updateObject()
 
   composer = new EffectComposer(renderer)
-  composer.addPass(new RenderPass(scene, camera))
+  renderPass = new RenderPass(scene, camera)
+  composer.addPass(renderPass)
   gtaoPass = new GTAOPass(scene, camera, 1, 1)
   gtaoPass.output = GTAOPass.OUTPUT.Default
   gtaoPass.blendIntensity = 0.78
@@ -589,7 +791,7 @@ onMounted(() => {
   composer.addPass(outputPass)
 
   resizeObserver = new ResizeObserver(resize)
-  resizeObserver.observe(canvas.value)
+  if (host.value) resizeObserver.observe(host.value)
   resize()
   environmentReady = loadEnvironment()
   render()
@@ -613,6 +815,17 @@ watch(
 watch(() => props.background, updateBackground)
 
 watch(
+  () => [props.outputPreview?.view, props.outputPreview?.width, props.outputPreview?.height] as const,
+  () => {
+    clearOrbitMomentum()
+    outputCameraDirty = true
+    updateInteractionEnabled()
+    resize()
+  },
+  { flush: 'post' },
+)
+
+watch(
   () => [
     props.livingForm.enabled,
     props.livingForm.behavior,
@@ -629,13 +842,12 @@ watch(
 
 watch(
   () => props.interactionLocked,
-  (locked) => {
-    if (controls) controls.enabled = !locked && !mainThreadExport.value
-  },
+  updateInteractionEnabled,
 )
 
 onBeforeUnmount(() => {
   mounted = false
+  cancelPendingCameraChange()
   cancelImageExport()
   endLivingFormLoopExport()
   cancelAnimationFrame(animationFrame)
@@ -651,17 +863,50 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <canvas
-    ref="canvas"
-    class="three-preview"
-    :style="canvasStyle"
-    :aria-busy="exportActive"
-    :aria-label="interactionLocked || mainThreadExport
-      ? '3D preview locked while the image renders.'
-      : exportActive
-        ? 'An image snapshot is rendering in the background. The 3D preview remains orbitable.'
-        : mesh
-          ? 'Orbitable 3D model preview. Drag to rotate and scroll to zoom.'
-          : '3D viewport. Add content to generate a model.'"
-  />
+  <div ref="host" class="three-preview-host" :class="{ 'has-output-frame': outputPreview }">
+    <div
+      class="three-preview-frame"
+      :class="{ 'shows-alpha-checker': outputPreview?.background === 'transparent' && outputPreview.checkerboard }"
+      :style="frameStyle"
+    >
+      <canvas
+        ref="canvas"
+        class="three-preview"
+        :style="canvasStyle"
+        :aria-busy="exportActive"
+        :aria-label="interactionLocked || mainThreadExport
+          ? '3D preview locked while the image renders.'
+          : straightOnPreview
+            ? 'Straight-on output composition preview. Your editing camera is preserved.'
+            : exportActive
+              ? 'An image snapshot is rendering in the background. The 3D preview remains orbitable.'
+              : mesh
+                ? 'Orbitable 3D model preview. Drag to rotate and scroll to zoom.'
+                : '3D viewport. Add content to generate a model.'"
+      />
+      <div v-if="outputPreview" class="three-output-frame-border" aria-hidden="true"></div>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.three-preview-host {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.three-preview-host.has-output-frame { background: #171717; }
+.three-preview-frame { position: relative; flex: none; max-width: 100%; max-height: 100%; overflow: hidden; }
+.three-preview { position: absolute; inset: 0; width: 100%; height: 100%; max-width: 100%; max-height: 100%; }
+.shows-alpha-checker {
+  background-color: #666;
+  background-image: conic-gradient(#888 25%, transparent 0 50%, #888 0 75%, transparent 0);
+  background-size: 20px 20px;
+}
+.three-output-frame-border { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.24); }
+</style>

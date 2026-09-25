@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import ThreePreview from './components/ThreePreview.vue'
+import NumberControl from './components/NumberControl.vue'
+import ChannelInspection from './components/ChannelInspection.vue'
+import FieldVariations from './components/FieldVariations.vue'
+import { cloneEditorDocument, editorFontRequirement, parseEditorProject, serializeEditorProject, type EditorDocument } from './lib/editor-document'
+import { createEditorHistory } from './lib/editor-history'
+import { createEditorSessionPersistence } from './lib/editor-session'
+import type { PreviewCameraSnapshot } from './lib/preview-camera'
+import { getDesktopProjectFilesBridge } from './desktop/project-files'
 import {
   VIEWPORT_BACKGROUNDS,
   isViewportBackground,
@@ -108,6 +116,11 @@ import type {
 } from './types'
 
 interface ThreePreviewHandle {
+  capturePreviewThumbnail: () => string | null
+  fitCamera: () => void
+  resetCamera: () => void
+  getCameraSnapshot: () => PreviewCameraSnapshot | null
+  setCameraSnapshot: (snapshot: PreviewCameraSnapshot) => boolean
   beginLivingFormLoopExport: (settings: LivingFormSettings) => void
   endLivingFormLoopExport: () => void
   captureHighPng: (
@@ -186,8 +199,21 @@ const colorMode = computed<ColorMode>({
   },
 })
 const imageExportOpen = ref(false)
+const compactPanel = ref<'build' | 'style'>('build')
+const styleInspector = ref<HTMLElement | null>(null)
+const inspectorScroll = { edit: 0, export: 0 }
+const showTransparency = ref(false)
+const jobThumbnail = ref<string | null>(null)
+const jobStartedAt = ref(0)
+const jobClock = ref(Date.now())
+let jobClockTimer = 0
+const jobElapsed = computed(() => {
+  const seconds = Math.max(0, Math.floor((jobClock.value - jobStartedAt.value) / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} elapsed`
+})
 const exportingImage = ref(false)
 const isDesktop = isRasterformDesktopBridge(window.rasterformDesktop)
+const desktopProjectFiles = getDesktopProjectFilesBridge()
 const editionExports = exportProfile(isDesktop)
 const modelSurfaceColor = ref<'source' | 'current'>('source')
 const useSourceTexture = computed(() => (
@@ -358,6 +384,300 @@ const textBuilding = ref(false)
 let textBuildTimer = 0
 
 const selectedFont = computed(() => fontChoices.value.find((font) => font.id === selectedFontId.value) ?? fontChoices.value[0]!)
+
+const editorMessage = ref('')
+const editorBusy = ref(false)
+const projectFileInput = ref<HTMLInputElement | null>(null)
+const recoverableSession = shallowRef<EditorDocument | null>(null)
+const comparison = shallowRef<{ current: EditorDocument; kept: EditorDocument; name: string; showKept: boolean } | null>(null)
+const checkpointThumbnails = reactive<Record<number, string | null>>({})
+const historyRevision = ref(0)
+const sessionPersistence = createEditorSessionPersistence()
+let restoringDocument = false
+let sessionReady = false
+let sessionSaveTimer = 0
+let activeInputGesture = false
+let documentCamera: PreviewCameraSnapshot | undefined
+let activeFontBlob: Blob | undefined
+let sourceImportSequence = 0
+
+function captureDocument(): EditorDocument {
+  return cloneEditorDocument({
+    image: image.value, workspace: workspace.value, channels: channelLayers,
+    selectedChannelId: selectedChannelId.value, field: fieldSettings, mesh: meshSettings,
+    strata: strataSettings, text: textSettings, font: selectedFont.value,
+    ...(activeFontBlob ? { fontBlob: activeFontBlob } : {}),
+    imageAppearance, textAppearance, imageLivingForm, textLivingForm,
+    imageLivingPhase: imageLivingPhase.value, textLivingPhase: textLivingPhase.value,
+    imageColorMode: imageColorMode.value, textColorMode: textColorMode.value,
+    viewportBackground: viewportBackground.value,
+    camera: threePreview.value?.getCameraSnapshot() ?? documentCamera,
+  })
+}
+function scheduleSessionSave() {
+  window.clearTimeout(sessionSaveTimer)
+  const canSave = () => sessionReady && !recoverableSession.value && !restoringDocument && !comparison.value && !editorBusy.value && !fontBusy.value
+  if (!canSave()) return
+  sessionSaveTimer = window.setTimeout(() => {
+    // A comparison/font restore may have started after the timer was scheduled.
+    if (!canSave()) return
+    void sessionPersistence.save(captureDocument()).catch(error => {
+      editorMessage.value = error instanceof Error ? error.message : 'Session recovery could not be saved.'
+    })
+  }, 700)
+}
+const editorHistory = createEditorHistory(captureDocument(), {
+  onChange: () => { historyRevision.value += 1; scheduleSessionSave() },
+})
+const canUndo = computed(() => { void historyRevision.value; return editorHistory.canUndo })
+const canRedo = computed(() => { void historyRevision.value; return editorHistory.canRedo })
+const keptVersions = computed(() => { void historyRevision.value; return editorHistory.checkpoints })
+
+function releaseActiveEditorFont() {
+  const previousId = activeFontRegistrationId
+  cleanupRegisteredFont(activeFontRegistration)
+  activeFontRegistration = undefined
+  activeFontRegistrationId = undefined
+  activeFontBlob = undefined
+  if (!previousId) return
+  const original = requestedFontRecords.value.find(font => font.id === previousId)
+  // Never leave a choice pointing at a FontFace alias that was just unloaded.
+  fontChoices.value = original
+    ? fontChoices.value.map(font => font.id === previousId ? original : font)
+    : fontChoices.value.filter(font => font.id !== previousId)
+}
+
+async function applyDocument(document: EditorDocument) {
+  // Validate font availability before mutating the project: no silent typography changes.
+  const requirement = editorFontRequirement(document, fontChoices.value)
+  if (requirement === 'missing') throw new Error(`This project needs ${document.font.label}. Connect that installed font first; the current project is unchanged.`)
+  editorBusy.value = true
+  restoringDocument = true
+  sourceImportSequence += 1
+  fontOperation += 1
+  fontBusy.value = false
+  window.clearTimeout(sessionSaveTimer)
+  try {
+    let selectedChoice = fontChoices.value.find(font => font.id === document.font.id
+      || (font.postscriptName && font.postscriptName === document.font.postscriptName)
+      || (font.family === document.font.family && font.style === document.font.style))
+    let restoredFontBlob = document.fontBlob
+    if (!restoredFontBlob && selectedChoice?.source === 'local') {
+      const source = requestedFontRecords.value.find(font => font.id === selectedChoice!.id)
+      if (source) restoredFontBlob = await source.fontData.blob()
+      else if (activeFontRegistrationId === selectedChoice.id) restoredFontBlob = activeFontBlob
+      if (!restoredFontBlob) throw new Error(`Reconnect ${document.font.label} before restoring this project. The current project is unchanged.`)
+    }
+    if (restoredFontBlob) {
+      const registration = await registerLocalFont({
+        family: document.font.family, fullName: document.font.label, style: document.font.style,
+        postscriptName: document.font.postscriptName ?? document.font.id,
+        blob: async () => restoredFontBlob!,
+      })
+      releaseActiveEditorFont()
+      activeFontRegistration = registration
+      activeFontRegistrationId = document.font.id
+      selectedChoice = { ...registration.choice, id: document.font.id }
+      fontChoices.value = [...fontChoices.value.filter(font => font.id !== document.font.id), selectedChoice]
+    } else {
+      // This branch uses a verified system/detected font, not an unloaded alias.
+      releaseActiveEditorFont()
+    }
+    if (!selectedChoice) throw new Error(`This project needs ${document.font.label}. The current project is unchanged.`)
+    fontOperation += 1 // An older asynchronous font selection must not overwrite this restore.
+    fontBusy.value = false
+    livingPlaying.value = false
+    livingAnimationElapsed = 0
+    image.value = document.image
+    workspace.value = document.workspace
+    channelLayers.splice(0, channelLayers.length, ...document.channels.map(layer => ({ ...layer })))
+    // IDs remain unique after restoring older projects and adding another channel.
+    channelSequence = Math.max(channelSequence, ...document.channels.map(layer => {
+      const suffix = /^channel-(\d+)$/.exec(layer.id)?.[1]
+      const sequence = suffix ? Number(suffix) : 0
+      return Number.isSafeInteger(sequence) ? sequence : 0
+    }))
+    selectedChannelId.value = document.selectedChannelId
+    Object.assign(fieldSettings, document.field)
+    Object.assign(meshSettings, document.mesh)
+    if (!document.mesh.strata) delete meshSettings.strata
+    Object.assign(strataSettings, document.strata)
+    Object.assign(textSettings, document.text)
+    for (const [target, source] of [[imageAppearance, document.imageAppearance], [textAppearance, document.textAppearance]] as const) {
+      Object.assign(target.clay, source.clay)
+      Object.assign(target.heightGradient, source.heightGradient)
+    }
+    Object.assign(imageLivingForm, document.imageLivingForm)
+    Object.assign(textLivingForm, document.textLivingForm)
+    imageLivingPhase.value = document.imageLivingPhase
+    textLivingPhase.value = document.textLivingPhase
+    imageColorMode.value = document.imageColorMode
+    textColorMode.value = document.textColorMode
+    viewportBackground.value = document.viewportBackground
+    selectedFontId.value = selectedChoice.id
+    activeFontBlob = restoredFontBlob
+    documentCamera = document.camera
+    await nextTick()
+    if (document.camera) threePreview.value?.setCameraSnapshot(document.camera)
+    await nextTick()
+  } finally {
+    restoringDocument = false
+    editorBusy.value = false
+  }
+}
+
+function recordEditorChange() {
+  if (restoringDocument || comparison.value || fontBusy.value) return
+  editorHistory.record(captureDocument(), 'Edit design')
+}
+watch([fieldSettings, meshSettings, strataSettings, textSettings, imageAppearance, textAppearance,
+  imageLivingForm, textLivingForm, imageColorMode, textColorMode, viewportBackground,
+  selectedFontId, workspace], recordEditorChange, { deep: true, flush: 'post' })
+// Only the playback clock is ephemeral. Shape/material edits made while playing
+// still need an undo action and session recovery.
+watch([imageLivingPhase, textLivingPhase], () => {
+  if (!livingPlaying.value) recordEditorChange()
+}, { flush: 'post' })
+watch(image, recordEditorChange, { flush: 'post' })
+watch(channelLayers, recordEditorChange, { deep: true, flush: 'post' })
+
+function beginEditorGesture(event: Event) {
+  const target = event.target
+  if (comparison.value || activeInputGesture || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return
+  if (target instanceof HTMLInputElement && !['range', 'number', 'color', 'text'].includes(target.type)) return
+  activeInputGesture = true
+  editorHistory.beginGesture('Adjust control')
+}
+async function endEditorGesture(event?: Event) {
+  // Range controls fire `change` on each keyboard repeat. The physical keyup,
+  // pointerup, cancellation, or blur is the gesture boundary, not that event.
+  if (event?.type === 'change' && event.target instanceof HTMLInputElement && event.target.type === 'range') return
+  if (!activeInputGesture) return
+  await nextTick()
+  activeInputGesture = false
+  editorHistory.endGesture()
+}
+async function undoEditor(redo = false) {
+  if (editorBusy.value || comparison.value) return
+  await endEditorGesture()
+  const document = redo ? editorHistory.peekRedo() : editorHistory.peekUndo()
+  if (!document) return
+  try {
+    await applyDocument(document)
+    if (redo) editorHistory.redo()
+    else editorHistory.undo()
+    editorMessage.value = redo ? 'Redone' : 'Undone'
+  }
+  catch (error) { editorMessage.value = String(error) }
+  scheduleSessionSave()
+}
+function handleCameraChange(snapshot: PreviewCameraSnapshot) {
+  documentCamera = snapshot
+  recordEditorChange()
+}
+async function keepVersion() {
+  if (editorHistory.checkpoints.length >= 8) {
+    editorMessage.value = 'Eight versions are kept. Remove one before keeping another; existing versions will not be replaced.'
+    return
+  }
+  await endEditorGesture()
+  editorHistory.synchronize(captureDocument())
+  const kept = editorHistory.checkpoint()
+  checkpointThumbnails[kept.id] = threePreview.value?.capturePreviewThumbnail() ?? null
+  editorMessage.value = `${kept.name} kept for this session. Compare does not overwrite your current work.`
+}
+async function compareVersion(id: number) {
+  const kept = editorHistory.checkpoints.find(candidate => candidate.id === id)
+  if (!kept || editorBusy.value) return
+  const current = captureDocument()
+  // Same view/light: compare the design, not a different camera angle.
+  const alternative = cloneEditorDocument({ ...kept.document, camera: current.camera })
+  comparison.value = { current, kept: alternative, name: kept.name, showKept: true }
+  try { await applyDocument(alternative) } catch (error) { comparison.value = null; editorMessage.value = String(error) }
+}
+async function toggleComparison(showKept: boolean) {
+  const state = comparison.value
+  if (!state || editorBusy.value) return
+  try {
+    await applyDocument(showKept ? state.kept : state.current)
+    comparison.value = { ...state, showKept }
+  } catch (error) { editorMessage.value = String(error) }
+}
+async function finishComparison(adopt: boolean) {
+  const state = comparison.value
+  if (!state || editorBusy.value) return
+  try {
+    await applyDocument(adopt ? state.kept : state.current)
+    comparison.value = null
+    if (adopt) editorHistory.record(captureDocument(), `Use ${state.name}`)
+    editorMessage.value = adopt ? `${state.name} applied · Undo restores your previous work` : 'Returned to your current version'
+    scheduleSessionSave()
+  } catch (error) { editorMessage.value = String(error) }
+}
+async function restoreSession() {
+  if (!recoverableSession.value) return
+  try {
+    await applyDocument(recoverableSession.value)
+    recoverableSession.value = null
+    editorHistory.record(captureDocument(), 'Recover session')
+    editorMessage.value = 'Previous session recovered'
+  } catch (error) { editorMessage.value = String(error) }
+}
+function dismissRecovery() {
+  recoverableSession.value = null
+  scheduleSessionSave()
+}
+async function saveEditorProject() {
+  if (!isDesktop || editorBusy.value || comparison.value) return
+  editorBusy.value = true
+  try {
+    const project = await serializeEditorProject(captureDocument())
+    if (desktopProjectFiles) {
+      const result = await desktopProjectFiles.saveProject({ suggestedName: 'rasterform-project.rasterform', contents: project })
+      editorMessage.value = result.cancelled ? 'Project save cancelled · your design is unchanged' : `${result.fileName} saved · source image, design settings and camera preserved. Export settings stay as currently selected.`
+    } else {
+      downloadBlob('rasterform-project.rasterform', new Blob([project], { type: 'application/json' }))
+      editorMessage.value = 'Design project download started · source image, design settings and camera included. Export settings stay as currently selected.'
+    }
+  } catch (error) { editorMessage.value = String(error) }
+  finally { editorBusy.value = false }
+}
+async function openEditorProject(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || editorBusy.value || comparison.value) return
+  try {
+    const project = parseEditorProject(await file.text())
+    await applyDocument(project)
+    recoverableSession.value = null
+    editorHistory.record(captureDocument(), 'Open project')
+    editorMessage.value = `${file.name} opened · Undo returns to your previous work`
+  } catch (error) { editorMessage.value = String(error) }
+  finally { input.value = '' }
+}
+
+async function chooseEditorProject() {
+  if (!isDesktop || editorBusy.value || comparison.value) return
+  if (!desktopProjectFiles) { projectFileInput.value?.click(); return }
+  editorBusy.value = true
+  try {
+    const result = await desktopProjectFiles.openProject()
+    if (result.cancelled) return
+    const project = parseEditorProject(result.contents)
+    await applyDocument(project)
+    recoverableSession.value = null
+    editorHistory.record(captureDocument(), 'Open project')
+    editorMessage.value = `${result.fileName} opened · Undo returns to your previous work. Export settings are unchanged.`
+  } catch (error) { editorMessage.value = String(error) }
+  finally { editorBusy.value = false }
+}
+
+async function revealLastExport() {
+  try {
+    const revealed = await desktopProjectFiles?.revealLastExport()
+    if (!revealed) editorMessage.value = 'No completed native save to reveal yet.'
+  } catch (error) { editorMessage.value = String(error) }
+}
 
 function mergeFontChoices(...groups: readonly FontChoice[][]): FontChoice[] {
   const activeChoice = activeFontRegistrationId
@@ -542,6 +862,12 @@ const livingLoopDimensions = computed(() => imageDimensionsForEdition(calculateV
   activeFrameSize.value.height,
   livingLoopLongEdge.value,
 ), isDesktop))
+const outputPreview = computed(() => imageExportOpen.value ? {
+  ...(imageExportKind.value === 'loop' ? livingLoopDimensions.value : imageExportDimensions.value),
+  view: imageExportKind.value === 'loop' ? 'current' as const : effectiveImageExportView.value,
+  background: imageExportBackground.value,
+  checkerboard: showTransparency.value,
+} : null)
 const livingLoopFrameCount = computed(() => calculateLivingFormFrameCount(
   livingForm.value.duration,
   livingLoopFps.value,
@@ -801,42 +1127,47 @@ async function connectFonts() {
 async function handleFontChange() {
   const operation = ++fontOperation
   const statusRevision = ++fontStatusRevision
+  const previousFontId = editorHistory.current.font.id
   const record = requestedFontRecords.value.find((font) => font.id === selectedFontId.value)
   if (!record) {
-    cleanupRegisteredFont(activeFontRegistration)
-    activeFontRegistration = undefined
-    activeFontRegistrationId = undefined
+    releaseActiveEditorFont()
     fontBusy.value = false
     fontStatus.value = `${selectedFont.value.label} ready`
     rebuildTextMesh()
+    recordEditorChange()
     return
   }
   fontBusy.value = true
   fontStatus.value = `Loading ${record.label}…`
   try {
-    const registration = await registerLocalFont(record.fontData)
-    if (appDisposed || operation !== fontOperation || selectedFontId.value !== record.id) {
+    const fontBlob = await record.fontData.blob()
+    const registration = await registerLocalFont({
+      family: record.family, fullName: record.fullName, style: record.style,
+      postscriptName: record.postscriptName ?? record.id, blob: async () => fontBlob,
+    })
+    if (appDisposed || restoringDocument || operation !== fontOperation || selectedFontId.value !== record.id) {
       cleanupRegisteredFont(registration)
       return
     }
-    cleanupRegisteredFont(activeFontRegistration)
+    releaseActiveEditorFont()
     activeFontRegistration = registration
     activeFontRegistrationId = record.id
+    activeFontBlob = fontBlob
     fontChoices.value = fontChoices.value.map((font) => font.id === record.id
       ? { ...registration.choice, id: record.id }
       : font)
     if (statusRevision === fontStatusRevision) fontStatus.value = `${record.label} ready`
     rebuildTextMesh()
   } catch {
-    if (appDisposed || operation !== fontOperation || selectedFontId.value !== record.id) return
-    cleanupRegisteredFont(activeFontRegistration)
-    activeFontRegistration = undefined
-    activeFontRegistrationId = undefined
-    selectedFontId.value = SYSTEM_SANS_FONT.id
-    if (statusRevision === fontStatusRevision) fontStatus.value = 'That face could not be read; using System Sans'
+    if (appDisposed || restoringDocument || operation !== fontOperation || selectedFontId.value !== record.id) return
+    selectedFontId.value = fontChoices.value.some(font => font.id === previousFontId) ? previousFontId : SYSTEM_SANS_FONT.id
+    if (statusRevision === fontStatusRevision) fontStatus.value = `That face could not be read; kept ${selectedFont.value.label}`
     rebuildTextMesh()
   } finally {
-    if (!appDisposed && operation === fontOperation) fontBusy.value = false
+    if (!appDisposed && operation === fontOperation) {
+      fontBusy.value = false
+      recordEditorChange()
+    }
   }
 }
 
@@ -897,6 +1228,7 @@ function pauseLivingFormForScrub() {
 }
 
 function switchWorkspace(next: WorkspaceMode) {
+  if (comparison.value || editorBusy.value || exportingImage.value || exportingBlenderProject.value) return
   livingPlaying.value = false
   livingAnimationElapsed = 0
   workspace.value = next
@@ -910,6 +1242,7 @@ function switchWorkspace(next: WorkspaceMode) {
 }
 
 function handleWorkspaceTabKeydown(event: KeyboardEvent) {
+  if (comparison.value || editorBusy.value || exportingImage.value || exportingBlenderProject.value) return
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
   event.preventDefault()
   const next: WorkspaceMode = event.key === 'ArrowLeft' || event.key === 'Home' ? 'image' : 'text'
@@ -959,6 +1292,7 @@ async function showBackgroundMenu(x: number, y: number, returnFocus: HTMLElement
 }
 
 function openBackgroundMenu(event: MouseEvent) {
+  if (comparison.value || editorBusy.value) return
   const stage = threeStage.value
   if (!stage) return
   const bounds = stage.getBoundingClientRect()
@@ -986,6 +1320,11 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
 }
 
 function handleGlobalKeydown(event: KeyboardEvent) {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !isEditableShortcutTarget(event.target)) {
+    if (event.key.toLowerCase() === 'z') { event.preventDefault(); void undoEditor(event.shiftKey); return }
+    if (event.key.toLowerCase() === 's' && isDesktop) { event.preventDefault(); void saveEditorProject(); return }
+    if (event.key.toLowerCase() === 'o' && isDesktop) { event.preventDefault(); void chooseEditorProject(); return }
+  }
   if (event.key === 'Escape' && backgroundMenuPosition.value) {
     event.preventDefault()
     closeBackgroundMenu(true)
@@ -998,6 +1337,8 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     || event.altKey
     || isEditableShortcutTarget(event.target)
   ) return
+  if (event.key.toLowerCase() === 'f') { event.preventDefault(); if (!comparison.value && outputPreview.value?.view !== 'straight-on') threePreview.value?.fitCamera(); return }
+  if (comparison.value) return
   const background = viewportBackgroundFromShortcut(event.key)
   if (!background) return
   event.preventDefault()
@@ -1074,15 +1415,11 @@ async function refreshDesktopProRenderer(): Promise<void> {
   desktopProProbeError.value = ''
   try {
     desktopProRenderer.value = await probeDesktopProRenderer()
-    if (!desktopProRenderer.value?.available && imageExportQuality.value === 'pro') {
-      imageExportQuality.value = 'high'
-    }
   } catch (error) {
     desktopProRenderer.value = null
     desktopProProbeError.value = error instanceof Error
       ? error.message
       : 'Rasterform could not inspect the Blender renderer.'
-    if (imageExportQuality.value === 'pro') imageExportQuality.value = 'high'
   } finally {
     desktopProProbePending.value = false
   }
@@ -1092,8 +1429,15 @@ onMounted(() => {
   appDisposed = false
   void cleanupStaleStoredZipArchives()
   void refreshDesktopProRenderer()
+  jobClockTimer = window.setInterval(() => { jobClock.value = Date.now() }, 1000)
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', handleWindowResize)
+  window.addEventListener('pointerup', endEditorGesture)
+  window.addEventListener('pointercancel', endEditorGesture)
+  void sessionPersistence.load().then(saved => {
+    recoverableSession.value = saved
+    sessionReady = true
+  }).catch(error => { sessionReady = true; editorMessage.value = String(error) })
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   document.addEventListener('focusin', handleDocumentFocusIn)
   livingAnimationTime = performance.now()
@@ -1120,6 +1464,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   appDisposed = true
+  window.clearInterval(jobClockTimer)
+  window.clearTimeout(sessionSaveTimer)
+  window.removeEventListener('pointerup', endEditorGesture)
+  window.removeEventListener('pointercancel', endEditorGesture)
   fontOperation += 1
   passiveFontRequest += 1
   window.removeEventListener('keydown', handleGlobalKeydown)
@@ -1154,6 +1502,19 @@ watch([exportingImage, exportingBlenderProject], ([isExportingImage, isExporting
       if (blenderExportDetails.value) blenderExportDetails.value.open = true
     })
   }
+})
+
+watch(imageExportOpen, async (open, previous) => {
+  if (styleInspector.value) inspectorScroll[previous ? 'export' : 'edit'] = styleInspector.value.scrollTop
+  if (open) compactPanel.value = 'style'
+  await nextTick()
+  if (styleInspector.value) styleInspector.value.scrollTop = inspectorScroll[open ? 'export' : 'edit']
+})
+watch(exportingImage, (active) => {
+  if (!active) return
+  jobStartedAt.value = Date.now()
+  jobClock.value = jobStartedAt.value
+  jobThumbnail.value = threePreview.value?.capturePreviewThumbnail() ?? null
 })
 
 watch([() => selectedFont.value.cssFamily, textSettings], rebuildTextMesh, { deep: true })
@@ -1281,7 +1642,7 @@ function applyPreset(preset: StackPreset) {
   )
   selectedChannelId.value = channelLayers[0]?.id ?? ''
   Object.assign(fieldSettings, preset.field)
-  status.value = `${preset.label} applied`
+  status.value = `${preset.label} applied to channels and Surface only · geometry, material, camera and render settings kept`
 }
 
 async function updateCanvases() {
@@ -1291,14 +1652,19 @@ async function updateCanvases() {
   if (heightCanvas.value) drawScalarField(heightCanvas.value, heightField.value)
 }
 
-watch([image, heightField], updateCanvases, { immediate: true })
+// Template refs change on workspace remount even when their source data does not.
+watch([image, heightField, sourceCanvas, sourceThumbCanvas, heightCanvas], updateCanvases, { immediate: true, flush: 'post' })
 
 async function openFile(file?: File) {
-  if (!file) return
+  if (!file || comparison.value || editorBusy.value) return
+  const operation = ++sourceImportSequence
   try {
-    image.value = await fileToPixelImage(file)
+    const decoded = await fileToPixelImage(file)
+    if (operation !== sourceImportSequence || comparison.value || editorBusy.value) return
+    image.value = decoded
     status.value = `${file.name} · ${image.value.sourceWidth} × ${image.value.sourceHeight}`
   } catch (error) {
+    if (operation !== sourceImportSequence) return
     status.value = error instanceof Error ? error.message : 'Could not open that image.'
   }
 }
@@ -1306,15 +1672,19 @@ async function openFile(file?: File) {
 function handleFile(event: Event) {
   const input = event.target as HTMLInputElement
   void openFile(input.files?.[0])
+  input.value = ''
 }
 
 function handleDrop(event: DragEvent) {
   dragging.value = false
+  if (comparison.value || editorBusy.value) return
   if (event.dataTransfer?.files?.[0]) switchWorkspace('image')
   void openFile(event.dataTransfer?.files?.[0])
 }
 
 function resetDemo() {
+  if (comparison.value || editorBusy.value) return
+  sourceImportSequence += 1
   image.value = createDemoImage()
   status.value = 'Demo restored'
 }
@@ -1822,6 +2192,12 @@ async function downloadLivingFormLoop() {
 <template>
   <main
     :class="['editor-app', { 'export-open': imageExportOpen }]"
+    :data-active-panel="compactPanel"
+    @pointerdown.capture="beginEditorGesture"
+    @keydown.capture="beginEditorGesture"
+    @keyup="endEditorGesture"
+    @change="endEditorGesture"
+    @focusout="endEditorGesture"
     @dragenter.prevent="dragging = workspace === 'image'"
     @dragover.prevent="dragging = workspace === 'image'"
     @dragleave.self.prevent="dragging = false"
@@ -1839,7 +2215,7 @@ async function downloadLivingFormLoop() {
           role="tab"
           :aria-selected="workspace === 'image'"
           :tabindex="workspace === 'image' ? 0 : -1"
-          :disabled="exportingImage || exportingBlenderProject"
+          :disabled="exportingImage || exportingBlenderProject || Boolean(comparison) || editorBusy"
           aria-controls="workspace-panel"
           @click="switchWorkspace('image')"
         >Image</button>
@@ -1849,7 +2225,7 @@ async function downloadLivingFormLoop() {
           role="tab"
           :aria-selected="workspace === 'text'"
           :tabindex="workspace === 'text' ? 0 : -1"
-          :disabled="exportingImage || exportingBlenderProject"
+          :disabled="exportingImage || exportingBlenderProject || Boolean(comparison) || editorBusy"
           aria-controls="workspace-panel"
           @click="switchWorkspace('text')"
         >Text</button>
@@ -1860,13 +2236,17 @@ async function downloadLivingFormLoop() {
         class="top-export"
         :aria-expanded="imageExportOpen"
         aria-controls="export-inspector"
-        :disabled="exportingImage || exportingBlenderProject"
+        :disabled="Boolean(comparison) || exportingBlenderProject || (exportingImage && imageExportKind === 'loop')"
         @click="imageExportOpen = !imageExportOpen"
       >{{ imageExportOpen ? 'Back to edit' : 'Export' }}</button>
     </header>
 
     <div id="workspace-panel" class="editor-grid" role="tabpanel" :aria-labelledby="`${workspace}-workspace-tab`">
-      <aside class="editor-panel build-panel" aria-label="Build controls">
+      <div class="compact-panel-tabs" role="group" aria-label="Editor panels">
+        <button type="button" :aria-pressed="compactPanel === 'build' && !imageExportOpen" aria-controls="build-inspector" @click="compactPanel = 'build'; imageExportOpen = false">Build</button>
+        <button type="button" :aria-pressed="compactPanel === 'style' || imageExportOpen" aria-controls="style-inspector" @click="compactPanel = 'style'">{{ imageExportOpen ? 'Export' : 'Properties' }}</button>
+      </div>
+      <aside id="build-inspector" class="editor-panel build-panel" aria-label="Build controls" :inert="Boolean(comparison)">
         <div class="panel-title">
           <div>
             <span class="panel-kicker">Build</span>
@@ -1874,6 +2254,33 @@ async function downloadLivingFormLoop() {
           </div>
           <span class="live-dot">Live</span>
         </div>
+        <div class="document-tools">
+          <button type="button" :disabled="!canUndo || editorBusy" @click="undoEditor()" title="Undo (⌘Z / Ctrl+Z)">Undo</button>
+          <button type="button" :disabled="!canRedo || editorBusy" @click="undoEditor(true)" title="Redo (⌘⇧Z / Ctrl+Shift+Z)">Redo</button>
+          <button type="button" :disabled="editorBusy || !hasModel || keptVersions.length >= 8" @click="keepVersion">Keep version</button>
+          <template v-if="isDesktop">
+            <button type="button" :disabled="editorBusy" @click="chooseEditorProject">Open project</button>
+            <button type="button" :disabled="editorBusy" @click="saveEditorProject">Save project</button>
+            <button v-if="desktopProjectFiles" type="button" @click="revealLastExport">Reveal last save</button>
+            <input ref="projectFileInput" class="sr-only" type="file" accept=".rasterform" @change="openEditorProject" />
+          </template>
+        </div>
+        <p v-if="editorMessage" class="inline-note editor-message" role="status">{{ editorMessage }}</p>
+        <div v-if="recoverableSession" class="session-recovery">
+          <p>Recover your previous {{ recoverableSession.workspace }} session?</p>
+          <div class="compact-buttons"><button type="button" :disabled="editorBusy" @click="restoreSession">Recover session</button><button type="button" @click="dismissRecovery">Keep current</button></div>
+        </div>
+        <details v-if="keptVersions.length" class="inspector-section" open>
+          <summary><span>Kept versions</span><small>{{ keptVersions.length }} · this session</small></summary>
+          <div class="kept-versions inspector-body">
+            <p v-if="keptVersions.length >= 8" class="inline-note">Eight versions kept. Remove one to keep another; nothing is replaced automatically.</p>
+            <article v-for="kept in keptVersions" :key="kept.id">
+              <img v-if="checkpointThumbnails[kept.id]" :src="checkpointThumbnails[kept.id]!" :alt="`${kept.name} captured view`" />
+              <strong>{{ kept.name }}</strong>
+              <div class="compact-buttons"><button type="button" :disabled="editorBusy || exportingImage" @click="compareVersion(kept.id)">Compare</button><button type="button" @click="editorHistory.removeCheckpoint(kept.id)">Remove</button></div>
+            </article>
+          </div>
+        </details>
 
         <template v-if="workspace === 'image'">
           <details class="inspector-section" open>
@@ -1897,6 +2304,7 @@ async function downloadLivingFormLoop() {
               <div class="preset-pills" role="group" aria-label="Channel presets">
                 <button v-for="preset in stackPresets" :key="preset.key" type="button" :title="preset.note" @click="applyPreset(preset)">{{ preset.label }}</button>
               </div>
+              <p class="inline-note">Presets replace Channels and Surface settings only. Your material, geometry and render quality stay unchanged.</p>
               <ul class="layer-list" aria-label="Image channels">
                 <li
                   v-for="(layer, index) in channelLayers"
@@ -1950,7 +2358,7 @@ async function downloadLivingFormLoop() {
               <label class="stacked-control"><span>Font face</span><select v-model="selectedFontId" :disabled="fontBusy" @change="handleFontChange"><option v-for="font in fontChoices" :key="font.id" :value="font.id">{{ font.label }} · {{ font.style }}</option></select></label>
               <button v-if="fontAccessSupported" type="button" class="wide-control primary-control" :disabled="fontBusy" @click="connectFonts">{{ fontBusy ? 'Loading fonts…' : 'Browse installed fonts' }}</button>
               <p class="inline-note" role="status">{{ fontStatus }}</p>
-              <p class="inline-note">Fonts stay in this browser session and are never uploaded.</p>
+              <p class="inline-note">Fonts stay on this device. Granted font bytes can be kept in local recovery and desktop projects; only redistribute fonts when their license permits it.</p>
             </div>
           </details>
 
@@ -1967,13 +2375,15 @@ async function downloadLivingFormLoop() {
       <section class="viewport-pane" aria-label="3D editor viewport">
         <div class="viewport-toolbar">
           <div class="view-switcher" role="group" aria-label="Viewport material">
-            <button v-for="mode in activePreviewModes" :key="mode.value" type="button" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">{{ mode.label }}</button>
+            <button v-for="mode in activePreviewModes" :key="mode.value" type="button" :disabled="Boolean(comparison)" :aria-pressed="colorMode === mode.value" @click="selectColorMode(mode.value)">{{ mode.label }}</button>
           </div>
           <div class="viewport-toolbar-meta"><span>{{ activeGeometry.label }}</span><span>{{ faceLabel }} tris</span></div>
+          <button type="button" class="background-trigger" :disabled="!hasModel || Boolean(comparison) || outputPreview?.view === 'straight-on'" @click="threePreview?.fitCamera()" :title="outputPreview?.view === 'straight-on' ? 'Straight-on output is automatically fitted' : 'Fit model (F)'">Fit</button>
           <button
             ref="backgroundTrigger"
             type="button"
             class="background-trigger"
+            :disabled="Boolean(comparison)"
             aria-haspopup="menu"
             aria-controls="viewport-background-menu"
             :aria-expanded="Boolean(backgroundMenuPosition)"
@@ -1998,11 +2408,18 @@ async function downloadLivingFormLoop() {
             :color-mode="colorMode"
             :appearance="appearance"
             :background="viewportBackground"
-            :interaction-locked="exportingImage && imageExportKind === 'loop'"
+            :output-preview="outputPreview"
+            :interaction-locked="Boolean(comparison) || (exportingImage && imageExportKind === 'loop')"
             :living-form="livingForm"
             :living-phase="livingPhase"
             @export-progress="handleImageExportProgress"
+            @camera-change="handleCameraChange"
           />
+          <div v-if="comparison" class="comparison-toolbar" role="group" aria-label="Compare kept version">
+            <strong>Compare · same camera and lighting</strong>
+            <div class="compact-buttons"><button type="button" :disabled="editorBusy" :aria-pressed="!comparison.showKept" @click="toggleComparison(false)">Current</button><button type="button" :disabled="editorBusy" :aria-pressed="comparison.showKept" @click="toggleComparison(true)">{{ comparison.name }}</button></div>
+            <div class="compact-buttons"><button type="button" :disabled="editorBusy" @click="finishComparison(false)">Back to current</button><button type="button" :disabled="editorBusy" @click="finishComparison(true)">Use {{ comparison.name }}</button></div>
+          </div>
           <div v-if="workspace === 'text' && (textBuilding || !mesh)" class="viewport-message" role="status">
             <span v-if="textBuilding" class="spinner" aria-hidden="true"></span>
             <strong>{{ textBuilding ? 'Building type…' : 'Type something to begin' }}</strong>
@@ -2036,8 +2453,17 @@ async function downloadLivingFormLoop() {
         </div>
       </section>
 
-      <aside class="editor-panel style-panel" aria-label="Style and export controls">
-        <template v-if="!imageExportOpen">
+      <aside id="style-inspector" ref="styleInspector" class="editor-panel style-panel" aria-label="Style and export controls" :inert="Boolean(comparison)">
+        <div v-if="exportingImage" class="render-job" role="status" aria-live="polite">
+          <img v-if="jobThumbnail" :src="jobThumbnail" alt="Composition captured for this render" />
+          <strong>{{ imageExportKind === 'loop' ? 'Rendering captured loop' : 'Rendering captured version' }}</strong>
+          <small>{{ imageExportKind === 'loop' ? livingLoopSummary : imageExportSummary }}</small>
+          <span>{{ imageExportKind === 'loop' ? livingLoopProgressLabel : imageExportProgressLabel }}</span>
+          <progress :value="imageExportKind === 'loop' ? livingLoopProgressBarValue : imageExportProgressBarValue" max="1" aria-label="Render progress"></progress>
+          <small>{{ jobElapsed }} · {{ isDesktop || displayImageExportRequest.quality === 'high' ? 'Later edits do not change this job.' : 'Web Final may pause the studio until rendering finishes.' }}</small>
+          <button type="button" :disabled="livingLoopNativeSaving" @click="cancelImageExport">{{ livingLoopNativeSaving ? 'Saving…' : 'Cancel render' }}</button>
+        </div>
+        <div v-show="!imageExportOpen">
           <div class="panel-title">
             <div><span class="panel-kicker">Inspector</span><h2>Properties</h2></div>
           </div>
@@ -2056,11 +2482,11 @@ async function downloadLivingFormLoop() {
                 <p class="inline-note">{{ imageMesh.strata?.parts.length }} contour layers · closed tops, undersides, and edges. Flat images produce a single layer. Use Surface smoothing for broader contours, or Living Form → Expand to animate the gaps.</p>
               </template>
               <template v-else>
-                <label class="slider-control"><span>Depth <output>{{ meshSettings.depth.toFixed(2) }}</output></span><input v-model.number="meshSettings.depth" type="range" min="0.02" max="1.4" step="0.02" /></label>
+                <NumberControl v-model="meshSettings.depth" label="Depth" :min="0.02" :max="1.4" :step="0.02" :neutral="0.58" help="Height of the relief; does not change image resolution." />
                 <label class="slider-control"><span>Midpoint <output>{{ meshSettings.midpoint.toFixed(2) }}</output></span><input v-model.number="meshSettings.midpoint" type="range" min="0" max="1" step="0.01" /></label>
               </template>
               <label v-if="meshSettings.mode === 'solid'" class="slider-control"><span>Base thickness <output>{{ meshSettings.baseThickness.toFixed(2) }}</output></span><input v-model.number="meshSettings.baseThickness" type="range" min="0.06" max="0.8" step="0.02" /></label>
-              <label class="slider-control"><span>Mesh detail <output>{{ meshSettings.resolution }}</output></span><input v-model.number="meshSettings.resolution" type="range" min="16" max="180" step="4" /></label>
+              <NumberControl v-model="meshSettings.resolution" label="Mesh detail" :min="16" :max="180" :step="4" :neutral="88" help="Geometry density, separate from exported pixels and render samples." />
             </div>
           </details>
 
@@ -2084,13 +2510,14 @@ async function downloadLivingFormLoop() {
               <p class="inline-note">Blob expands forms and rounds sharp peaks into exaggerated organic surfaces.</p>
               <template v-if="workspace === 'image'">
                 <template v-if="fieldSettings.finish === 'blob'">
-                  <label class="slider-control"><span>Dilation <output>{{ fieldSettings.blobDilation }}px</output></span><input v-model.number="fieldSettings.blobDilation" type="range" min="0" max="20" step="1" /></label>
-                  <label class="slider-control"><span>Smoothing <output>{{ fieldSettings.blobSmoothing }}px</output></span><input v-model.number="fieldSettings.blobSmoothing" type="range" min="0" max="24" step="1" /></label>
+                  <NumberControl v-model="fieldSettings.blobDilation" label="Dilation" :min="0" :max="20" :step="1" :neutral="6" unit="px" help="Expands raised regions in the working height field." />
+                  <NumberControl v-model="fieldSettings.blobSmoothing" label="Smoothing" :min="0" :max="24" :step="1" :neutral="8" unit="px" help="Rounds peaks after dilation. Zero turns this stage off." />
                 </template>
-                <label class="slider-control"><span>Base smoothing <output>{{ fieldSettings.blur }}px</output></span><input v-model.number="fieldSettings.blur" type="range" min="0" max="8" step="1" /></label>
-                <label class="slider-control"><span>Contrast <output>{{ fieldSettings.contrast > 0 ? '+' : '' }}{{ fieldSettings.contrast }}</output></span><input v-model.number="fieldSettings.contrast" type="range" min="-50" max="50" step="1" /></label>
+                <NumberControl v-model="fieldSettings.blur" label="Base smoothing" :min="0" :max="8" :step="1" :neutral="1" unit="px" help="Softens the combined field. Zero preserves its fine detail." />
+                <NumberControl v-model="fieldSettings.contrast" label="Contrast" :min="-50" :max="50" :step="1" :neutral="0" help="Separates low and high regions; zero is neutral." />
                 <label class="slider-control"><span>Quantize <output>{{ fieldSettings.quantize < 2 ? 'Off' : fieldSettings.quantize }}</output></span><input v-model.number="fieldSettings.quantize" type="range" min="0" max="12" step="1" /></label>
                 <label class="check-control"><input v-model="fieldSettings.invert" type="checkbox" />Invert composite</label>
+                <FieldVariations :raw="rawField" :settings="fieldSettings" @apply="(key, value) => fieldSettings[key] = value" />
               </template>
               <template v-else-if="textSettings.finish === 'blob'">
                 <label class="slider-control"><span>Dilation <output>{{ textSettings.blobDilation }}px</output></span><input v-model.number="textSettings.blobDilation" type="range" min="0" max="20" step="1" /></label>
@@ -2099,10 +2526,11 @@ async function downloadLivingFormLoop() {
             </div>
           </details>
 
-          <details class="inspector-section" open>
+          <details class="inspector-section" :open="livingForm.enabled">
             <summary><span>Living Form</span><small :class="{ success: livingForm.enabled }">{{ livingFormStatus }}</small></summary>
             <div class="inspector-body">
               <label class="check-control"><input v-model="livingForm.enabled" type="checkbox" />Enable kinetic form</label>
+              <div v-show="livingForm.enabled" class="inspector-body">
               <div class="segmented motion-presets" role="group" aria-label="Living Form behavior">
                 <button
                   v-for="behavior in availableLivingBehaviors"
@@ -2123,6 +2551,7 @@ async function downloadLivingFormLoop() {
                 <button type="button" :disabled="!hasModel" @click="restartLivingForm">Restart</button>
               </div>
               <label class="slider-control"><span>Phase <output>{{ Math.round(livingPhase * 100) }}%</output></span><input v-model.number="livingPhase" aria-label="Living Form phase" :aria-valuetext="`${Math.round(livingPhase * 100)}%`" type="range" min="0" max="0.999" step="0.001" @input="pauseLivingFormForScrub" /></label>
+              </div>
             </div>
           </details>
 
@@ -2151,6 +2580,8 @@ async function downloadLivingFormLoop() {
             <div class="inspector-body map-stack"><figure><figcaption>Source</figcaption><canvas ref="sourceCanvas" aria-label="Source image preview" /></figure><figure><figcaption>Height field</figcaption><canvas ref="heightCanvas" aria-label="Computed height field preview" /></figure></div>
           </details>
 
+          <ChannelInspection v-if="workspace === 'image'" :image="image" :layers="channelLayers" :selected-id="selectedChannelId" :height="heightField" />
+
           <details class="inspector-section">
             <summary><span>Mesh health</span><small :class="{ success: topology?.watertight }">{{ topology?.watertight ? 'Ready' : hasModel ? 'Open' : 'Empty' }}</small></summary>
             <div v-if="topology" class="inspector-body health-grid">
@@ -2164,11 +2595,14 @@ async function downloadLivingFormLoop() {
               <p>{{ isDesktop ? (topology.watertight ? 'Closed geometry, ready for STL.' : 'STL needs closed geometry. GLB and PNG remain available.') : (topology.watertight ? 'Closed geometry, ready to render.' : 'Open surface, ready to render.') }}</p>
             </div>
           </details>
-        </template>
+        </div>
 
-        <section v-else id="export-inspector" class="export-inspector" :aria-busy="exportingImage || exportingBlenderProject">
-          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>{{ isDesktop ? 'Export' : 'Export images' }}</h2></div><button type="button" class="icon-control" :disabled="exportingImage || exportingBlenderProject" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
+        <section v-show="imageExportOpen" id="export-inspector" class="export-inspector" :aria-busy="exportingImage || exportingBlenderProject">
+          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>{{ isDesktop ? 'Export' : 'Export images' }}</h2></div><button type="button" class="icon-control" :disabled="exportingBlenderProject || (exportingImage && imageExportKind === 'loop')" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
           <fieldset class="export-group"><legend>Output</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportKind === 'still'" :disabled="exportingImage" @click="imageExportKind = 'still'; imageExportError = ''; imageExportNotice = ''"><strong>Still</strong><small>PNG image</small></button><button type="button" :aria-pressed="imageExportKind === 'loop'" :disabled="exportingImage" @click="imageExportKind = 'loop'; imageExportError = ''; imageExportNotice = ''"><strong>Living loop</strong><small>PNG sequence</small></button></div></fieldset>
+          <p class="inline-note">Composition preview fits this window. Export dimensions do not resize the screen. Final lighting and denoising appear in the finished render.</p>
+          <label v-if="imageExportBackground === 'transparent'" class="check-control"><input v-model="showTransparency" type="checkbox" />Show transparency checker · preview only</label>
+          <div v-if="desktopProBridgeAvailable" class="renderer-readiness"><p class="inline-note">{{ desktopProStatus }}</p><button type="button" class="wide-control" :disabled="desktopProProbePending || exportingImage" @click="refreshDesktopProRenderer">{{ desktopProProbePending ? 'Checking Blender…' : 'Recheck Blender / Cycles' }}</button></div>
 
           <template v-if="imageExportKind === 'still'">
             <div class="export-summary">{{ imageExportSummary }}</div>
@@ -2203,12 +2637,12 @@ async function downloadLivingFormLoop() {
             <p v-if="!livingForm.enabled" class="export-message error" role="alert">Enable Living Form in Properties to export a loop.</p>
           </template>
 
-          <div v-if="exportingImage" class="render-progress"><span>{{ imageExportKind === 'loop' ? livingLoopProgressLabel : imageExportProgressLabel }}</span><progress :value="imageExportKind === 'loop' ? livingLoopProgressBarValue : imageExportProgressBarValue" max="1" :aria-label="imageExportKind === 'loop' ? 'Living Form export progress' : 'Image export progress'" :aria-valuetext="imageExportKind === 'loop' ? livingLoopProgressLabel : imageExportProgressLabel"></progress><button type="button" :disabled="livingLoopNativeSaving" @click="cancelImageExport">{{ livingLoopNativeSaving ? 'Saving…' : 'Cancel' }}</button></div>
           <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
           <p v-if="imageExportError" class="export-message error" role="alert">{{ imageExportError }}</p>
           <p v-else-if="imageExportNotice" class="export-message" role="status">{{ imageExportNotice }}</p>
-          <button v-if="imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel || exportingBlenderProject" @click="downloadImagePng">{{ imageExportActionLabel }}</button>
-          <button v-else type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled || exportingBlenderProject" @click="downloadLivingFormLoop">{{ livingLoopNativeSaving ? 'Saving ZIP…' : exportingImage ? 'Cancel sequence' : 'Export lossless loop ZIP' }}</button>
+          <button v-if="desktopProjectFiles && !exportingImage" type="button" class="wide-control" @click="revealLastExport">Reveal last completed export in Finder</button>
+          <button v-if="!exportingImage && imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel || exportingBlenderProject" @click="downloadImagePng">{{ imageExportActionLabel }}</button>
+          <button v-else-if="!exportingImage" type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled || exportingBlenderProject" @click="downloadLivingFormLoop">Export lossless loop ZIP</button>
 
           <div v-if="editionExports.modelFiles" class="file-export-section">
             <h3>3D &amp; project files</h3>
@@ -2234,7 +2668,7 @@ async function downloadLivingFormLoop() {
                 <div v-if="exportingBlenderProject" class="render-progress blender-export-progress" role="status" aria-live="polite" aria-atomic="true"><span>{{ blenderExportProgressLabel }}</span><progress aria-label="Blender project export progress"></progress><button type="button" @click="downloadBlenderProject">Cancel</button></div>
                 <p v-if="blenderExportError" class="export-message error" role="alert">{{ blenderExportError }}</p>
                 <p v-else-if="blenderExportNotice" class="export-message" role="status">{{ blenderExportNotice }}</p>
-                <button type="button" class="blender-export-button" aria-describedby="blender-export-help" :disabled="!hasModel || !desktopProReady || colorMode === 'wireframe' || exporting || exportingImage" @click="downloadBlenderProject">{{ exportingBlenderProject ? 'Cancel Blender export' : 'Save Blender project (.blend)' }}</button>
+                <button v-if="!exportingBlenderProject" type="button" class="blender-export-button" aria-describedby="blender-export-help" :disabled="!hasModel || !desktopProReady || colorMode === 'wireframe' || exporting || exportingImage" @click="downloadBlenderProject">Save Blender project (.blend)</button>
               </div>
             </details>
             <p v-else class="blender-export-help blender-export-help--web">{{ blenderExportHelp }}</p>

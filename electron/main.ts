@@ -13,6 +13,7 @@ import {
   Notification,
   powerSaveBlocker,
   protocol,
+  screen,
   session,
   shell,
   type IpcMainEvent,
@@ -60,6 +61,9 @@ import {
   type DesktopSavedBlenderExportResult,
 } from '../src/desktop/blender-export-contracts'
 import type { FinalExportProgress } from '../src/lib/final-image-export'
+import { DESKTOP_PROJECT_FILES_PROTOCOL_VERSION } from '../src/desktop/project-files'
+import { createProjectFileHandlers, isEditorFileDownload } from './project-files'
+import { initialEditorWindowBounds } from './window-bounds'
 import { finalSampleTarget, finalTileCount } from '../src/lib/final-quality'
 import {
   DESKTOP_SMOKE_HEARTBEAT_MAX_ATTEMPTS,
@@ -530,11 +534,9 @@ function configureWindowSecurity(window: BrowserWindow, allowedPrefix: string): 
 }
 
 function createMainWindow(): BrowserWindow {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
   const window = new BrowserWindow({
-    width: 1440,
-    height: 940,
-    minWidth: 980,
-    minHeight: 680,
+    ...initialEditorWindowBounds(display.workArea),
     show: false,
     backgroundColor: '#1f1f1f',
     title: app.name,
@@ -728,6 +730,13 @@ async function runDesktopSmokeProbe(): Promise<void> {
           longExportProtocolVersion: bridge?.longExportProtocolVersion ?? null,
           proRenderProtocolVersion: bridge?.proRenderProtocolVersion ?? null,
           blenderExportProtocolVersion: bridge?.blenderExportProtocolVersion ?? null,
+          projectFilesProtocolVersion: bridge?.projectFilesProtocolVersion ?? null,
+          projectFilesBridgeAvailable: (
+            typeof bridge?.saveProject === 'function'
+            && typeof bridge?.openProject === 'function'
+            && typeof bridge?.revealLastExport === 'function'
+          ),
+          projectFilesRejectInvalid: false,
           longExportLifecycleAvailable: (
             typeof bridge?.beginLongExport === 'function'
             && typeof bridge?.endLongExport === 'function'
@@ -749,6 +758,11 @@ async function runDesktopSmokeProbe(): Promise<void> {
           ),
           localFontApiAvailable: typeof window.queryLocalFonts === 'function',
         };
+        if (result.projectFilesBridgeAvailable) {
+          try {
+            await bridge.saveProject({ suggestedName: 'invalid.rasterform', contents: 'not a project' });
+          } catch { result.projectFilesRejectInvalid = true; }
+        }
         if (result.proRendererBridgeAvailable) {
           try {
             const probe = await bridge.probeProRenderer();
@@ -875,6 +889,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
       longExportProtocolVersion: editorCapabilities.longExportProtocolVersion,
       proRenderProtocolVersion: editorCapabilities.proRenderProtocolVersion,
       blenderExportProtocolVersion: editorCapabilities.blenderExportProtocolVersion,
+      projectFilesProtocolVersion: editorCapabilities.projectFilesProtocolVersion,
+      projectFilesBridgeAvailable: editorCapabilities.projectFilesBridgeAvailable === true,
+      projectFilesRejectInvalid: editorCapabilities.projectFilesRejectInvalid === true,
       longExportLifecycleAvailable: editorCapabilities.longExportLifecycleAvailable === true,
       longExportLifecycleHandshake: editorCapabilities.longExportLifecycleHandshake === true,
       proRendererBridgeAvailable: editorCapabilities.proRendererBridgeAvailable === true,
@@ -906,6 +923,9 @@ async function runDesktopSmokeProbe(): Promise<void> {
       && result.proRendererProbeHandshake
       && result.blenderExportProtocolVersion === DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION
       && result.blenderExportBridgeAvailable
+      && result.projectFilesProtocolVersion === DESKTOP_PROJECT_FILES_PROTOCOL_VERSION
+      && result.projectFilesBridgeAvailable
+      && result.projectFilesRejectInvalid
       && result.editorPid > 0
       && result.renderPid > 0
       && result.editorPid !== result.renderPid
@@ -945,6 +965,59 @@ async function savePreferences(): Promise<void> {
     // Remembering a folder must never turn a successful render into a failure.
   }
 }
+
+function rememberSavedFile(path: string): void {
+  lastExportPath = path
+  lastExportDirectory = dirname(path)
+  try { app.addRecentDocument(path) } catch { /* Recent Documents is optional. */ }
+  void savePreferences()
+  installApplicationMenu()
+}
+
+const projectFiles = createProjectFileHandlers<IpcMainInvokeEvent>({
+  isTrusted: isTrustedAppSender,
+  isBusy: () => saveDialogOpen || quitting,
+  setBusy: (value) => { saveDialogOpen = value },
+  chooseSave: async (fileName) => {
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: 'Save Rasterform Project',
+      buttonLabel: 'Save Project',
+      defaultPath: join(lastExportDirectory ?? app.getPath('documents'), fileName),
+      filters: [{ name: 'Rasterform project', extensions: ['rasterform'] }],
+      properties: ['createDirectory', 'showOverwriteConfirmation'],
+    })
+    return result.canceled ? null : result.filePath ?? null
+  },
+  chooseOpen: async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Open Rasterform Project',
+      buttonLabel: 'Open Project',
+      defaultPath: lastExportDirectory ?? app.getPath('documents'),
+      filters: [{ name: 'Rasterform project', extensions: ['rasterform'] }],
+      properties: ['openFile'],
+    })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  },
+  confirmOverwrite: async (path) => {
+    const result = await dialog.showMessageBox(mainWindow!, {
+      type: 'warning',
+      title: 'Replace existing Rasterform project?',
+      message: `${basename(path)} already exists. Replace it?`,
+      buttons: ['Cancel', 'Replace'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    return result.response === 1
+  },
+  trackWrite: async (promise) => {
+    pendingWrites.add(promise)
+    try { await promise } finally { pendingWrites.delete(promise) }
+  },
+  didSave: rememberSavedFile,
+  lastExportPath: () => lastExportPath,
+  reveal: (path) => { shell.showItemInFolder(path) },
+})
 
 async function prepareFinalSave(event: IpcMainInvokeEvent, suggestedName: unknown) {
   if (!isTrustedAppSender(event)) throw new Error('Untrusted Final render request.')
@@ -2245,6 +2318,9 @@ function installProtocol(): void {
 }
 
 function installIpc(): void {
+  ipcMain.handle('desktop:save-project', projectFiles.saveProject)
+  ipcMain.handle('desktop:open-project', projectFiles.openProject)
+  ipcMain.handle('desktop:reveal-last-export', projectFiles.revealLastExport)
   ipcMain.handle('desktop:prepare-final-save', prepareFinalSave)
   ipcMain.handle('desktop:submit-final-render', submitFinalRender)
   ipcMain.handle('desktop:cancel-final-render', requestCancel)
@@ -2331,6 +2407,29 @@ function installLongExportDownloadLifecycle(): void {
   })
 }
 
+function installEditorDownloadCompletion(): void {
+  session.defaultSession.on('will-download', (_event, item, webContents) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !webContents
+      || webContents.id !== mainWindow.webContents.id
+      || !webContents.getURL().startsWith(`${SCHEME}://app/`)
+      || !isEditorFileDownload(item.getURL(), item.getFilename())) return
+    // Keep Electron's native Save As flow; never set a renderer-controlled save
+    // path or intercept Living Loop ZIPs handled by their protected lifecycle.
+    item.setSaveDialogOptions({
+      title: 'Save Rasterform Export',
+      defaultPath: join(lastExportDirectory ?? app.getPath('downloads'), basename(item.getFilename())),
+      properties: ['createDirectory', 'showOverwriteConfirmation'],
+    })
+    item.once('done', (_downloadEvent, state) => {
+      if (state !== 'completed') return
+      const path = item.getSavePath()
+      if (!path) return
+      rememberSavedFile(path)
+      showCompletionNotification('Rasterform export saved', basename(path))
+    })
+  })
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -2367,6 +2466,7 @@ if (!app.requestSingleInstanceLock()) {
     installIpc()
     installPermissionPolicy()
     installLongExportDownloadLifecycle()
+    installEditorDownloadCompletion()
     await loadPreferences()
     installApplicationMenu()
     mainWindow = createMainWindow()
@@ -2407,3 +2507,4 @@ if (!app.requestSingleInstanceLock()) {
 export const desktopProtocolVersion = DESKTOP_PROTOCOL_VERSION
 export const desktopProRenderProtocolVersion = DESKTOP_PRO_RENDER_PROTOCOL_VERSION
 export const desktopBlenderExportProtocolVersion = DESKTOP_BLENDER_EXPORT_PROTOCOL_VERSION
+export const desktopProjectFilesProtocolVersion = DESKTOP_PROJECT_FILES_PROTOCOL_VERSION
