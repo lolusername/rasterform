@@ -107,7 +107,7 @@ async function saveWebPng(window, temporaryRoot, background) {
   })()`)
   assert.ok(viewport.width <= viewport.screenWidth && viewport.height <= viewport.screenHeight, 'Viewport stays screen-bounded after export')
   assert.ok(viewport.pageWidth <= viewport.screenWidth, 'PNG export does not add horizontal page overflow')
-  await waitFor(window, `!document.querySelector('#export-inspector .render-button')?.disabled && !document.querySelector('#export-inspector .render-progress')`, 'export controls restored')
+  await waitFor(window, `!!document.querySelector('#export-inspector .render-button:not(:disabled)') && !document.querySelector('.render-job')`, 'export controls restored')
   return { width: 2048, height: 1024, background, nonOpaquePixels: nonOpaque, opaquePixels: opaque, viewport }
 }
 
@@ -133,7 +133,7 @@ async function testUi(BrowserWindow, url, temporaryRoot, desktop) {
     await window.webContents.executeJavaScript(`(async () => {
       ${fixtureScript}
       const files = new DataTransfer(); files.items.add(await makeTextureFixture());
-      const input = document.querySelector('input[type="file"]');
+      const input = document.querySelector('input[type="file"][accept="image/png,image/jpeg,image/webp"]');
       input.files = files.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`)
     await waitFor(window, `document.querySelector('.document-name')?.textContent.includes('source-texture-3200x1600')`, 'uploaded source')

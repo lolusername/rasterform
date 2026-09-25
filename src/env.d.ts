@@ -19,6 +19,7 @@ interface Window {
     | import('./desktop/pro-contracts').RasterformDesktopProBridge
     | import('./desktop/blender-export-contracts').RasterformDesktopBlenderExportBridge
     | import('./desktop/project-files').RasterformDesktopProjectFilesBridge
+    | import('./desktop/editor-commands').RasterformDesktopEditorCommandsBridge
 }
 
 interface FontFaceSet {

@@ -9,6 +9,7 @@ import { createEditorHistory } from './lib/editor-history'
 import { createEditorSessionPersistence } from './lib/editor-session'
 import type { PreviewCameraSnapshot } from './lib/preview-camera'
 import { getDesktopProjectFilesBridge } from './desktop/project-files'
+import { getDesktopEditorCommandsBridge, type DesktopEditorCommand } from './desktop/editor-commands'
 import {
   VIEWPORT_BACKGROUNDS,
   isViewportBackground,
@@ -214,6 +215,8 @@ const jobElapsed = computed(() => {
 const exportingImage = ref(false)
 const isDesktop = isRasterformDesktopBridge(window.rasterformDesktop)
 const desktopProjectFiles = getDesktopProjectFilesBridge()
+const desktopEditorCommands = getDesktopEditorCommandsBridge()
+let unsubscribeEditorCommands: (() => void) | undefined
 const editionExports = exportProfile(isDesktop)
 const modelSurfaceColor = ref<'source' | 'current'>('source')
 const useSourceTexture = computed(() => (
@@ -432,6 +435,14 @@ const editorHistory = createEditorHistory(captureDocument(), {
 const canUndo = computed(() => { void historyRevision.value; return editorHistory.canUndo })
 const canRedo = computed(() => { void historyRevision.value; return editorHistory.canRedo })
 const keptVersions = computed(() => { void historyRevision.value; return editorHistory.checkpoints })
+watch([editorBusy, fontBusy], ([busy, fontPending]) => {
+  // A native dialog/font operation can outlast the save debounce. Retry when
+  // it releases the editor instead of dropping the last edit until another
+  // change happens. Comparison and pending recovery remain protected below.
+  // Returning to the initial document via Undo is still a save-worthy change,
+  // even though the history can then have no remaining undo actions.
+  if (!busy && !fontPending) scheduleSessionSave()
+})
 
 function releaseActiveEditorFont() {
   const previousId = activeFontRegistrationId
@@ -1319,11 +1330,44 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
   return target.matches('input, select, textarea, [contenteditable="true"], [contenteditable=""]')
 }
 
+function isTextEditingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.isContentEditable
+    || target instanceof HTMLTextAreaElement
+    || (target instanceof HTMLInputElement
+      && ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(target.type)))
+}
+
+async function handleEditorCommand(command: DesktopEditorCommand) {
+  try {
+    if (command === 'undo' || command === 'redo') {
+      if (isTextEditingTarget(document.activeElement)) {
+        await desktopEditorCommands?.editText(command)
+      } else {
+        await undoEditor(command === 'redo')
+      }
+      return
+    }
+    // Committing an in-progress numeric entry is part of saving/opening, just
+    // as clicking the corresponding visible button first leaves the input.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+    await endEditorGesture()
+    await nextTick()
+    if (command === 'save-project') await saveEditorProject()
+    else if (command === 'open-project') await chooseEditorProject()
+  } catch (error) {
+    editorMessage.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
 function handleGlobalKeydown(event: KeyboardEvent) {
-  if ((event.metaKey || event.ctrlKey) && !event.altKey && !isEditableShortcutTarget(event.target)) {
-    if (event.key.toLowerCase() === 'z') { event.preventDefault(); void undoEditor(event.shiftKey); return }
-    if (event.key.toLowerCase() === 's' && isDesktop) { event.preventDefault(); void saveEditorProject(); return }
-    if (event.key.toLowerCase() === 'o' && isDesktop) { event.preventDefault(); void chooseEditorProject(); return }
+  if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+    const key = event.key.toLowerCase()
+    // Native accelerators route through one command listener. Do not execute
+    // the same command a second time if Chromium also forwards its key event.
+    if (desktopEditorCommands && ['z', 's', 'o'].includes(key)) return
+    if (key === 'z' && !isTextEditingTarget(event.target)) { event.preventDefault(); void undoEditor(event.shiftKey); return }
+    if (key === 's' && isDesktop) { event.preventDefault(); void handleEditorCommand('save-project'); return }
+    if (key === 'o' && isDesktop) { event.preventDefault(); void handleEditorCommand('open-project'); return }
   }
   if (event.key === 'Escape' && backgroundMenuPosition.value) {
     event.preventDefault()
@@ -1427,6 +1471,7 @@ async function refreshDesktopProRenderer(): Promise<void> {
 
 onMounted(() => {
   appDisposed = false
+  unsubscribeEditorCommands = desktopEditorCommands?.onEditorCommand(command => { void handleEditorCommand(command) })
   // ThreePreview mounts before its parent, so its real startup pose is now
   // available. Setup ran before that camera existed; use this as the initial
   // history baseline so the very first orbit/Fit action can be undone.
@@ -1478,6 +1523,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   appDisposed = true
+  unsubscribeEditorCommands?.()
+  unsubscribeEditorCommands = undefined
   window.clearInterval(jobClockTimer)
   window.clearTimeout(sessionSaveTimer)
   window.removeEventListener('pointerup', endEditorGesture)

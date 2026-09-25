@@ -19,6 +19,8 @@ Use **Fit** or `F` to frame the model while editing. Straight-on output fits aut
 - Up to eight kept alternatives and 100 undo actions are retained in memory. Image pixel/Blob assets are immutable and shared between history entries, not recopied on every slider movement.
 - The latest design is saved locally through IndexedDB after edits. Reloading offers **Recover session**; it never silently replaces the current design. This is device/browser-local recovery, not cloud backup. Storage failures are reported and do not block editing.
 - Desktop **Save project / Open project** uses versioned `.rasterform` design files containing the original image bytes, working pixels, both workspace settings, material, motion, and camera. Export preferences are separate and remain as currently selected. Existing Recipe JSON remains a lighter descriptive export, not a complete project.
+- The desktop **File** menu offers **Open Project…** and **Save Project As…**, using the same project actions as the buttons. **Edit → Undo / Redo** follows design history outside text-entry controls and ordinary text history inside them. Native shortcuts are routed once, not once by the menu and again by the page.
+- Recovery saves deferred by a long-open file dialog or a font operation retry when that operation finishes. A pending recovery offer or read-only comparison is never overwritten by that retry.
 - A required font must be available or embedded from granted local-font access. Missing fonts are reported rather than silently changing typography. Project/session data stays local; do not distribute embedded fonts unless their license permits it.
 
 ## Understand a transformation without changing it
@@ -49,11 +51,14 @@ With a development server running and Playwright installed or provided through `
 
 ```sh
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-viewport-layout.mjs
+TEST_URL=http://127.0.0.1:5173 node scripts/verify-viewport-additional.mjs
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-recovery.mjs
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-controls.mjs
 ```
 
-The viewport sweep checks actual DOM/canvas bounds and independent scrolling through editing, export, straight-on, and return-to-edit at 13 window sizes. Recovery checks use an isolated browser context. Offscreen export buffers are allowed to be larger than the display; the visible viewport is not.
+The viewport sweep checks actual DOM/canvas bounds and independent scrolling through editing, export, straight-on, and return-to-edit at 13 window sizes. It also uploads a portrait PNG, checks edition-specific dimensions and 4K/8K preview-size invariance, and simulates desktop job-card transitions through an explicitly labeled bridge fixture. The simulated jobs test layout, not rendering. Recovery checks use an isolated browser context, including delayed storage initialization with and without an existing session. Offscreen export buffers are allowed to be larger than the display; the visible viewport is not.
+
+The additional viewport sweep covers Text and Image Living Loop inspectors, frame-rate/duration/background options, and DPR 2 displays in representative narrow and short windows. Device-pixel scaling of the visible canvas is intentional; export-resolution scaling is not.
 
 The controls regression uses Vue's development metadata to read the preview camera, so run it against the development server rather than a production preview.
 
@@ -63,8 +68,11 @@ For real native project-file checks after building the desktop staging directory
 npm run desktop:build
 node scripts/verify-desktop-projects.mjs
 node electron/scripts/smoke-texture-exports.mjs
+node scripts/verify-desktop-final.mjs
 ```
 
 The native project harness uses the actual staged main process, preload, and UI with an isolated profile. Only dialog destinations and Finder reveal are substituted with temporary fixtures; it never opens or overwrites the user's projects. The texture smoke produces actual image exports and checks source-textured model handoff through Blender.
+
+The Final check runs the real 2K transparent render at its normal sample target, edits the current design after capture, and inspects the completed PNG. It deliberately has no overall rendering deadline or quality override. Allow several minutes. A temporary artifact directory contains the result and job-state screenshots. Native QA scripts also use Playwright; set `PLAYWRIGHT_MODULE` when it is not installed locally.
 
 For release verification, also inspect actual downloaded PNG dimensions, alpha, and composition and run the staged/packaged Electron smoke tests. Unit tests alone do not establish that a real render or native save completed.

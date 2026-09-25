@@ -63,6 +63,8 @@ import {
 import type { FinalExportProgress } from '../src/lib/final-image-export'
 import { DESKTOP_PROJECT_FILES_PROTOCOL_VERSION } from '../src/desktop/project-files'
 import { createProjectFileHandlers, isEditorFileDownload } from './project-files'
+import type { DesktopEditorCommand } from '../src/desktop/editor-commands'
+import { createEditorTextCommandHandler } from './editor-commands'
 import { initialEditorWindowBounds } from './window-bounds'
 import { finalSampleTarget, finalTileCount } from '../src/lib/final-quality'
 import {
@@ -228,6 +230,19 @@ function isTrustedAppSender(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
     && event.sender.id === mainWindow.webContents.id
     && event.senderFrame?.url.startsWith(`${SCHEME}://app/`),
   )
+}
+
+const editText = createEditorTextCommandHandler<IpcMainInvokeEvent>({
+  isTrusted: isTrustedAppSender,
+  undo: event => event.sender.undo(),
+  redo: event => event.sender.redo(),
+})
+
+function sendEditorCommand(command: DesktopEditorCommand): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()
+    || !mainWindow.webContents.getURL().startsWith(`${SCHEME}://app/`)) return
+  try { mainWindow.webContents.send('desktop:editor-command', command) }
+  catch { /* The editor may close between the liveness check and dispatch. */ }
 }
 
 function isTrustedRenderSender(event: IpcMainEvent, job: PreparedJob): boolean {
@@ -2248,6 +2263,9 @@ function installApplicationMenu(): void {
     {
       label: 'File',
       submenu: [
+        { label: 'Open Project…', accelerator: 'CommandOrControl+O', click: () => sendEditorCommand('open-project') },
+        { label: 'Save Project As…', accelerator: 'CommandOrControl+S', click: () => sendEditorCommand('save-project') },
+        { type: 'separator' },
         {
           label: 'Reveal Last Export in Finder',
           enabled: Boolean(lastExportPath),
@@ -2263,7 +2281,11 @@ function installApplicationMenu(): void {
         { role: 'close' },
       ],
     },
-    { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+    { label: 'Edit', submenu: [
+      { label: 'Undo', accelerator: 'CommandOrControl+Z', click: () => sendEditorCommand('undo') },
+      { label: 'Redo', accelerator: 'Shift+CommandOrControl+Z', click: () => sendEditorCommand('redo') },
+      { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
+    ] },
     { label: 'View', submenu: [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ]
@@ -2318,6 +2340,7 @@ function installProtocol(): void {
 }
 
 function installIpc(): void {
+  ipcMain.handle('desktop:edit-text', editText)
   ipcMain.handle('desktop:save-project', projectFiles.saveProject)
   ipcMain.handle('desktop:open-project', projectFiles.openProject)
   ipcMain.handle('desktop:reveal-last-export', projectFiles.revealLastExport)

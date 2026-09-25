@@ -20,10 +20,29 @@ import {
 import {
   DESKTOP_PROJECT_FILES_PROTOCOL_VERSION,
   type DesktopProjectSaveRequest,
-  type RasterformDesktopProjectFilesBridge,
 } from '../src/desktop/project-files'
+import {
+  DESKTOP_EDITOR_COMMANDS_PROTOCOL_VERSION,
+  isDesktopEditorCommand,
+  isDesktopEditorTextAction,
+  type DesktopEditorCommand,
+  type DesktopEditorTextAction,
+  type RasterformDesktopEditorCommandsBridge,
+} from '../src/desktop/editor-commands'
 
-const bridge: RasterformDesktopProjectFilesBridge = Object.freeze({
+const bridge: RasterformDesktopEditorCommandsBridge = Object.freeze({
+  editorCommandsProtocolVersion: DESKTOP_EDITOR_COMMANDS_PROTOCOL_VERSION,
+  onEditorCommand: (listener: (command: DesktopEditorCommand) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+      if (isDesktopEditorCommand(payload)) listener(payload)
+    }
+    ipcRenderer.on('desktop:editor-command', wrapped)
+    return () => ipcRenderer.removeListener('desktop:editor-command', wrapped)
+  },
+  editText: (action: DesktopEditorTextAction) => {
+    if (!isDesktopEditorTextAction(action)) return Promise.reject(new Error('Invalid editor text command.'))
+    return ipcRenderer.invoke('desktop:edit-text', action)
+  },
   projectFilesProtocolVersion: DESKTOP_PROJECT_FILES_PROTOCOL_VERSION,
   saveProject: (request: DesktopProjectSaveRequest) => ipcRenderer.invoke('desktop:save-project', request),
   openProject: () => ipcRenderer.invoke('desktop:open-project'),
