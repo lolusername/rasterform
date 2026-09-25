@@ -18,6 +18,7 @@ Use **Fit** or `F` to frame the model while editing. Straight-on output fits aut
 - **Keep version** captures a design and thumbnail for this session. **Compare** switches between it and current work with one camera and lighting setup. **Back to current** discards the comparison; **Use version** adopts it as an undoable action. Comparisons are read-only.
 - Up to eight kept alternatives and 100 undo actions are retained in memory. Image pixel/Blob assets are immutable and shared between history entries, not recopied on every slider movement.
 - The latest design is saved locally through IndexedDB after edits. Reloading offers **Recover session**; it never silently replaces the current design. This is device/browser-local recovery, not cloud backup. Storage failures are reported and do not block editing.
+- Recovery distinguishes pending, saving, and saved states. The recovery offer identifies the source and snapshot date when available; older snapshots remain supported. A completed older write is not presented as proof that a newer edit has been saved.
 - Desktop **Save project / Open project** uses versioned `.rasterform` design files containing the original image bytes, working pixels, both workspace settings, material, motion, and camera. Export preferences are separate and remain as currently selected. Existing Recipe JSON remains a lighter descriptive export, not a complete project.
 - The desktop **File** menu offers **Open Project…** and **Save Project As…**, using the same project actions as the buttons. **Edit → Undo / Redo** follows design history outside text-entry controls and ordinary text history inside them. Native shortcuts are routed once, not once by the menu and again by the page.
 - Recovery saves deferred by a long-open file dialog or a font operation retry when that operation finishes. A pending recovery offer or read-only comparison is never overwritten by that retry.
@@ -27,7 +28,11 @@ Use **Fit** or `F` to frame the model while editing. Straight-on output fits aut
 
 **Inspect transformation** shows the source image, selected raw channel signal, actual composite before and after that channel, and final processed height field. White is high; black is low. The first enabled channel establishes the base, and later operations can be nonlinear. These are real intermediate fields, not percentages of attribution.
 
-**Compare one setting**, in Surface, shows real height-field variations of smoothing, contrast, or Blob dilation. All other settings stay fixed. The form changes only after **Apply**, and that change is undoable. Numeric controls accept typed values and expose individual resets without changing their original ranges or steps. Typed values snap to the same supported steps as the slider; out-of-range entries clamp visibly and blank entries restore the current value.
+**Inspect this channel** opens that optional inspection from the selected channel. Its description explains the actual base/muted state, combine operation, influence, inversion, and hue target. Each map can be enlarged in a screen-bounded dialog at its existing working resolution; Escape closes it and restores keyboard focus. This does not resample the export or change the design.
+
+**Compare one setting**, in Surface, shows real height-field variations of smoothing, contrast, or Blob dilation. All other settings stay fixed. **Preview form** temporarily shows a candidate on the model with the same camera and material. **Back to current** leaves authored work unchanged; **Use** adopts one undoable change. Direct **Apply** remains available. An unadopted preview cannot be exported or autosaved over the current design.
+
+Numeric controls accept typed values and expose individual resets where a meaningful default exists, without changing their original ranges or steps. Percent and degree fields convert back to the same underlying units as their sliders. Typed values snap to supported steps; out-of-range entries clamp visibly and blank entries restore the current value.
 
 Presets replace Channels and Surface settings; they do not change the selected geometry mode, material, camera, or render quality. Blob remains optional; rough or spiky forms are not treated as errors.
 
@@ -36,6 +41,8 @@ Presets replace Channels and Surface settings; they do not change the selected g
 The render card identifies the captured version, renderer, dimensions, stage, and elapsed time. It has one cancel action. Editing a later version does not change an already captured still. Desktop Final/Cycles remain isolated; web Final may pause the studio. No faster substitute is chosen to meet an arbitrary time target.
 
 Desktop Blender/Cycles readiness has an explicit recheck action. A failed readiness check does not silently change a Pro selection to High. Native saves can be located with Reveal Last Export; a browser download is described as started, not guaranteed saved.
+
+Desktop model handoff explains the distinction between a `.rasterform` project and a GLB/Blender model: geometry, selected surface colors/bitmap and material transfer, but the current Living Form phase is static and the studio camera/lights do not transfer. Blender's material appearance can differ; these are not finished-render transfers.
 
 ## Verification
 
@@ -54,6 +61,7 @@ TEST_URL=http://127.0.0.1:5173 node scripts/verify-viewport-layout.mjs
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-viewport-additional.mjs
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-recovery.mjs
 TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-controls.mjs
+TEST_URL=http://127.0.0.1:5173 node scripts/verify-editor-comparison.mjs
 ```
 
 The viewport sweep checks actual DOM/canvas bounds and independent scrolling through editing, export, straight-on, and return-to-edit at 13 window sizes. It also uploads a portrait PNG, checks edition-specific dimensions and 4K/8K preview-size invariance, and simulates desktop job-card transitions through an explicitly labeled bridge fixture. The simulated jobs test layout, not rendering. Recovery checks use an isolated browser context, including delayed storage initialization with and without an existing session. Offscreen export buffers are allowed to be larger than the display; the visible viewport is not.

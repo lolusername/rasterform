@@ -302,6 +302,10 @@ function scheduleCameraChange() {
     cameraChangeTimer = null
     if (cameraGestureActive || !mounted) return
     cameraChangePending = false
+    // OrbitControls can retain sub-threshold inertia after its last change
+    // event. Stop that tail before recording, so a subsequent save and Redo
+    // refer to the same settled view rather than two slightly different poses.
+    clearOrbitMomentum()
     const snapshot = getCameraSnapshot()
     if (snapshot) emit('camera-change', snapshot)
   }, 350)
@@ -874,8 +878,10 @@ onBeforeUnmount(() => {
         class="three-preview"
         :style="canvasStyle"
         :aria-busy="exportActive"
-        :aria-label="interactionLocked || mainThreadExport
+        :aria-label="mainThreadExport
           ? '3D preview locked while the image renders.'
+          : interactionLocked
+            ? '3D preview interaction is locked during comparison or loop capture.'
           : straightOnPreview
             ? 'Straight-on output composition preview. Your editing camera is preserved.'
             : exportActive

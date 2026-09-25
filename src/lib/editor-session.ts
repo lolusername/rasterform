@@ -22,7 +22,7 @@ export class EditorSessionError extends Error {
 export function createIndexedDbEditorSessionStorage(factory: IDBFactory | undefined = globalThis.indexedDB): EditorSessionStorage {
   let databasePromise: Promise<IDBDatabase> | undefined
   function database(): Promise<IDBDatabase> {
-    if (!factory) return Promise.reject(new EditorSessionError('Session recovery is unavailable in this browser. Save a project file to keep your work.'))
+    if (!factory) return Promise.reject(new EditorSessionError('Session recovery is unavailable in this browser. Keep this window open until you finish exporting.'))
     if (!databasePromise) {
       databasePromise = new Promise<IDBDatabase>((resolve, reject) => {
         const request = factory.open(SESSION_DATABASE, SESSION_VERSION)
@@ -69,6 +69,7 @@ export function createIndexedDbEditorSessionStorage(factory: IDBFactory | undefi
 export function createEditorSessionPersistence(storage: EditorSessionStorage = createIndexedDbEditorSessionStorage()) {
   let pending: Promise<void> = Promise.resolve()
   let revision = 0
+  let loadedAt: number | null = null
   function enqueue(operation: () => Promise<void>): Promise<void> {
     const result = pending.then(operation, operation)
     pending = result.catch(() => undefined)
@@ -76,7 +77,9 @@ export function createEditorSessionPersistence(storage: EditorSessionStorage = c
   }
   return {
     get revision(): number { return revision },
+    get loadedAt(): number | null { return loadedAt },
     async load(): Promise<EditorDocument | null> {
+      loadedAt = null
       await pending
       const value = await storage.read()
       if (value === undefined || value === null) return null
@@ -84,8 +87,13 @@ export function createEditorSessionPersistence(storage: EditorSessionStorage = c
         || (value as { version?: unknown }).version !== SESSION_VERSION) {
         throw new EditorSessionError('The saved session is from an unsupported version. Your current project has not been changed.')
       }
-      const session = value as { document?: unknown }
-      try { return validateEditorDocument(session.document) } catch {
+      const session = value as { document?: unknown; savedAt?: unknown }
+      try {
+        const document = validateEditorDocument(session.document)
+        loadedAt = typeof session.savedAt === 'number' && Number.isSafeInteger(session.savedAt) && session.savedAt > 0
+          ? session.savedAt : null
+        return document
+      } catch {
         throw new EditorSessionError('The saved session is incomplete or damaged. Your current project has not been changed.')
       }
     },
@@ -93,7 +101,8 @@ export function createEditorSessionPersistence(storage: EditorSessionStorage = c
       // Settings are captured now, not after an earlier queued write completes.
       const snapshot = cloneEditorDocument(validateEditorDocument(document))
       const savedRevision = ++revision
-      return enqueue(() => storage.write({ version: SESSION_VERSION, revision: savedRevision, document: snapshot }))
+      const savedAt = Date.now()
+      return enqueue(() => storage.write({ version: SESSION_VERSION, revision: savedRevision, savedAt, document: snapshot }))
     },
     clear(): Promise<void> {
       revision += 1

@@ -4,7 +4,7 @@ import FieldPreview from './FieldPreview.vue'
 import { createFieldVariations, FIELD_VARIATIONS, type FieldVariationKey } from '../lib/field-variations'
 import type { FieldSettings, ScalarField } from '../types'
 const props = defineProps<{ raw: ScalarField; settings: FieldSettings }>()
-const emit = defineEmits<{ apply: [key: FieldVariationKey, value: number] }>()
+const emit = defineEmits<{ apply: [key: FieldVariationKey, value: number]; preview: [key: FieldVariationKey, value: number] }>()
 const open = ref(false)
 const key = ref<FieldVariationKey>('blur')
 const effectiveKey = computed(() => key.value === 'blobDilation' && props.settings.finish !== 'blob' ? 'blur' : key.value)
@@ -16,9 +16,10 @@ const option = computed(() => FIELD_VARIATIONS[effectiveKey.value])
     <summary>Compare one setting</summary>
     <div v-if="open">
       <label>Parameter <select v-model="key" aria-label="Parameter to compare"><option value="blur">Base smoothing</option><option value="contrast">Contrast</option><option v-if="settings.finish === 'blob'" value="blobDilation">Dilation</option></select></label>
-      <p>Actual height fields; white is raised. Other settings stay fixed. Nothing changes until you apply a value.</p>
+      <p>Actual height fields; white is raised. Preview the difference on your 3D form with the same camera and material. Nothing is kept until you apply it.</p>
       <div class="field-variations__choices"><article v-for="choice in choices" :key="choice.value">
         <FieldPreview :label="`${choice.value}${option.unit}`" :field="choice.field" />
+        <button type="button" :aria-label="`Preview ${option.label} ${choice.value} on the form`" :disabled="choice.value === settings[effectiveKey]" @click="emit('preview', effectiveKey, choice.value)">Preview form</button>
         <button type="button" :aria-label="`Apply ${option.label} ${choice.value}`" :disabled="choice.value === settings[effectiveKey]" @click="emit('apply', effectiveKey, choice.value)">{{ choice.value === settings[effectiveKey] ? 'Current' : 'Apply' }}</button>
       </article></div>
     </div>

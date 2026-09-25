@@ -70,10 +70,9 @@ async function invokeMenu(menuLabel, itemLabel) {
 function assertSameCameraPose(actual, expected, message) {
   for (const [key, value] of Object.entries(expected)) {
     if (Array.isArray(value)) {
-      // OrbitControls can move by microunits below its change-event threshold
-      // after the recorded gesture settles. This is subpixel at this viewport, not
-      // permission to change a saved/restored project or its render resolution.
-      assert.ok(value.every((entry, index) => Math.abs(actual[key][index] - entry) < 0.00001), `${message}: ${key}`)
+      // The recorded gesture now clears residual inertia. Allow only numerical
+      // roundoff from restoring the spherical camera pose, not continued drift.
+      assert.ok(value.every((entry, index) => Math.abs(actual[key][index] - entry) < 1e-9), `${message}: ${key}`)
     } else assert.equal(actual[key], value, `${message}: ${key}`)
   }
 }

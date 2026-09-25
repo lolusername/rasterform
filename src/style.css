@@ -391,7 +391,7 @@ body { background: var(--editor-bg); }
 .inspector-section > summary::after { content: "›"; color: #848484; font-size: 16px; line-height: 1; transform: rotate(0); transition: transform 130ms ease; }
 .inspector-section[open] > summary::after { transform: rotate(90deg); }
 .inspector-section > summary > span { overflow: hidden; font-size: 12px; font-weight: 630; text-overflow: ellipsis; white-space: nowrap; }
-.inspector-section > summary small { max-width: 130px; overflow: hidden; color: #888; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-section > summary small { max-width: 130px; overflow: hidden; color: #999; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .inspector-section > summary small.success { color: var(--editor-accent); }
 .inspector-body { display: grid; gap: 12px; padding: 10px 13px 15px; background: #1f1f1f; }
 .inspector-body button { cursor: pointer; }
@@ -409,30 +409,31 @@ body { background: var(--editor-bg); }
 .editor-app .primary-control:hover:not(:disabled) { background: #d2ff78; border-color: #d2ff78; }
 
 .preset-pills { display: flex; flex-wrap: wrap; gap: 5px; }
-.preset-pills button { min-height: 26px; padding: 4px 7px; color: #bdbdbd; background: #282828; border: 1px solid #404040; border-radius: 4px; font-size: 10px; }
+.preset-pills button { min-height: 30px; padding: 4px 7px; color: #ccc; background: #282828; border: 1px solid #404040; border-radius: 4px; font-size: 11px; }
 .preset-pills button:hover { color: #fff; border-color: #686868; }
 .layer-list { margin: 0; padding: 0; overflow: hidden; list-style: none; border: 1px solid var(--editor-border); border-radius: 6px; }
-.layer-list li { display: grid; grid-template-columns: 27px minmax(0, 1fr) auto; min-height: 45px; background: #242424; border-bottom: 1px solid #373737; }
+.layer-list li { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; min-height: 48px; background: #242424; border-bottom: 1px solid #373737; }
 .layer-list li:last-child { border-bottom: 0; }
 .layer-list li.selected { background: #2d2d2d; box-shadow: inset 2px 0 var(--editor-accent); }
 .layer-list li.muted { opacity: 0.53; }
 .visibility-toggle { position: relative; display: grid; place-items: center; margin: 0; cursor: pointer; }
 .visibility-toggle:focus-within { outline: 2px solid var(--editor-accent); outline-offset: -2px; }
 .visibility-toggle input { position: absolute; opacity: 0; }
-.visibility-toggle span[aria-hidden] { color: #777; font-size: 9px; }
+.visibility-toggle span[aria-hidden] { color: #999; font-size: 11px; }
 .visibility-toggle input:checked + span { color: var(--editor-accent); }
 .layer-name { min-width: 0; padding: 6px 4px; color: #eee; text-align: left; background: transparent; border: 0; }
 .layer-name strong, .layer-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .layer-name strong { font-size: 11px; font-weight: 570; }
-.layer-name small { margin-top: 2px; color: #8e8e8e; font-size: 9px; }
+.layer-name small { margin-top: 2px; color: #a0a0a0; font-size: 11px; }
 .layer-actions { display: flex; }
-.layer-actions button { width: 23px; padding: 0; color: #999; background: transparent; border: 0; border-left: 1px solid #383838; font-size: 11px; }
+.layer-actions button { width: 32px; min-height: 44px; padding: 0; color: #aaa; background: transparent; border: 0; border-left: 1px solid #383838; font-size: 13px; }
 .layer-actions button:hover:not(:disabled) { color: #fff; background: #3a3a3a; }
+.layer-actions button:focus-visible, .layer-name:focus-visible { outline: 2px solid var(--editor-accent); outline-offset: -2px; }
 .sub-inspector { display: grid; gap: 11px; padding-top: 10px; border-top: 1px solid var(--editor-border); }
-.sub-inspector-title { color: #9a9a9a; font-size: 10px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; }
+.sub-inspector-title { color: #aaa; font-size: 11px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; }
 
 .editor-app label { min-width: 0; }
-.editor-app label > span, .text-input-label { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 6px; color: #bcbcbc; font-family: inherit; font-size: 10px; font-weight: 570; letter-spacing: 0; text-transform: none; }
+.editor-app label > span, .text-input-label { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 6px; color: #c8c8c8; font-family: inherit; font-size: 11px; font-weight: 570; letter-spacing: 0; text-transform: none; }
 .editor-app label output { color: #e8e8e8; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
 .control-row { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; align-items: center; }
 .control-row > span { margin: 0 !important; }

@@ -311,7 +311,7 @@ try {
     assert.equal(await value('Depth'), initialDepth, 'A failed font restore must not partially apply settings')
     assert.equal(await page.getByRole('tab', { name: 'Image', exact: true }).getAttribute('aria-selected'), 'true')
     assert.equal(await page.getByRole('button', { name: 'Undo', exact: true }).isEnabled(), undoBefore)
-    assert.ok(await page.locator('.editor-message').innerText(), 'Missing/invalid fonts need an explicit message')
+    assert.ok(await page.locator('.editor-message:not(.recovery-status)').innerText(), 'Missing/invalid fonts need an explicit message')
   }
   // Let any prior normal autosave finish before placing the isolated invalid fixture.
   await waitForSavedDepth(initialDepth)

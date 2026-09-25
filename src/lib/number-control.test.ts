@@ -1,5 +1,41 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeNumberControlValue } from './number-control'
+import { normalizeNumberControlDisplayValue, normalizeNumberControlValue, numberControlDisplayValue } from './number-control'
+
+describe('number control display units', () => {
+  it('displays percentages without changing authored influence or its step', () => {
+    const range = { min: 0, max: 1, step: 0.01 }
+    expect(numberControlDisplayValue(0.28, 100)).toBe(28)
+    expect(numberControlDisplayValue(range.step, 100)).toBe(1)
+    expect(normalizeNumberControlDisplayValue(28, range, 100)).toBe(0.28)
+    expect(normalizeNumberControlDisplayValue(28.5, range, 100)).toBe(0.29)
+    expect(normalizeNumberControlDisplayValue(110, range, 100)).toBe(1)
+  })
+
+  it('keeps the existing 0.005 hue step as 1.8 degrees, not one degree', () => {
+    const range = { min: 0, max: 1, step: 0.005 }
+    expect(numberControlDisplayValue(range.step, 360)).toBe(1.8)
+    expect(normalizeNumberControlDisplayValue(180, range, 360)).toBe(0.5)
+    expect(normalizeNumberControlDisplayValue(1, range, 360)).toBe(0.005)
+    expect(normalizeNumberControlDisplayValue(360, range, 360)).toBe(1)
+  })
+
+  it('retains half-percent tracking steps and a 99.9 percent last loop phase', () => {
+    expect(normalizeNumberControlDisplayValue(-7.5, { min: -0.08, max: 0.3, step: 0.005 }, 100)).toBe(-0.075)
+    expect(numberControlDisplayValue(0.035, 100)).toBe(3.5)
+    expect(normalizeNumberControlDisplayValue(100, { min: 0, max: 0.999, step: 0.001 }, 100)).toBe(0.999)
+    expect(numberControlDisplayValue(0.999, 100)).toBe(99.9)
+  })
+
+  it('keeps unscaled defaults and rejects invalid scale definitions', () => {
+    expect(numberControlDisplayValue(0.025)).toBe(0.025)
+    expect(normalizeNumberControlDisplayValue(0.025, { min: 0.005, max: 0.12, step: 0.005 })).toBe(0.025)
+    expect(normalizeNumberControlDisplayValue(Number.NaN, { min: 0, max: 1, step: 0.01 }, 100)).toBeNull()
+    for (const scale of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => numberControlDisplayValue(0.5, scale)).toThrow(RangeError)
+      expect(() => normalizeNumberControlDisplayValue(50, { min: 0, max: 1, step: 0.01 }, scale)).toThrow(RangeError)
+    }
+  })
+})
 
 describe('normalizeNumberControlValue', () => {
   it.each([2, 4])('keeps fractional mesh detail on its integer step-%i grid', (step) => {

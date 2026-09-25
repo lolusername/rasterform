@@ -4,6 +4,18 @@ export interface NumberControlRange {
   step: number
 }
 
+/** Presentation-only conversion; authored values and slider steps stay unchanged. */
+export function numberControlDisplayValue(value: number, scale = 1): number {
+  if (!Number.isFinite(scale) || scale <= 0) throw new RangeError('Number control display scales must be finite and positive.')
+  // Avoid displaying multiplication artifacts such as 28.000000000000004%.
+  return Number((value * scale).toPrecision(15))
+}
+
+export function normalizeNumberControlDisplayValue(value: number, range: NumberControlRange, scale = 1): number | null {
+  if (!Number.isFinite(scale) || scale <= 0) throw new RangeError('Number control display scales must be finite and positive.')
+  return normalizeNumberControlValue(value / scale, range)
+}
+
 function decimalPlaces(value: number): number {
   const [coefficient, exponent = '0'] = value.toString().split('e')
   return Math.max(0, (coefficient!.split('.')[1]?.length ?? 0) - Number(exponent))

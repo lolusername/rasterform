@@ -12,6 +12,31 @@ function memoryStorage(): EditorSessionStorage {
 }
 
 describe('session recovery', () => {
+  it('identifies a saved snapshot without changing the project format', async () => {
+    const storage = memoryStorage()
+    const session = createEditorSessionPersistence(storage)
+    const before = Date.now()
+    await session.save(editorDocumentFixture())
+    const after = Date.now()
+    await session.load()
+    expect(session.loadedAt).toBeGreaterThanOrEqual(before)
+    expect(session.loadedAt).toBeLessThanOrEqual(after)
+    await session.clear()
+    expect(await session.load()).toBeNull()
+    expect(session.loadedAt).toBeNull()
+  })
+
+  it('loads older snapshots without a date and ignores invalid date metadata', async () => {
+    const storage = memoryStorage()
+    const session = createEditorSessionPersistence(storage)
+    const document = editorDocumentFixture()
+    for (const savedAt of [undefined, 'yesterday', -1, Infinity]) {
+      await storage.write({ version: 1, document, savedAt })
+      expect(await session.load()).toEqual(document)
+      expect(session.loadedAt).toBeNull()
+    }
+  })
+
   it('round-trips typed pixels and original source Blob without base64 or data loss', async () => {
     const document = editorDocumentFixture()
     document.image.sourceBlob = new Blob(['preserve the compressed original'], { type: 'image/png' })

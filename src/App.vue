@@ -4,7 +4,9 @@ import ThreePreview from './components/ThreePreview.vue'
 import NumberControl from './components/NumberControl.vue'
 import ChannelInspection from './components/ChannelInspection.vue'
 import FieldVariations from './components/FieldVariations.vue'
-import { cloneEditorDocument, editorFontRequirement, parseEditorProject, serializeEditorProject, type EditorDocument } from './lib/editor-document'
+import { cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, parseEditorProject, serializeEditorProject, type EditorDocument } from './lib/editor-document'
+import { createFieldComparison } from './lib/editor-comparison'
+import type { FieldVariationKey } from './lib/field-variations'
 import { createEditorHistory } from './lib/editor-history'
 import { createEditorSessionPersistence } from './lib/editor-session'
 import type { PreviewCameraSnapshot } from './lib/preview-camera'
@@ -17,6 +19,7 @@ import {
   viewportBackgroundPreset,
 } from './lib/background'
 import { composeChannelStack } from './lib/channel-stack'
+import { HEIGHT_SOURCES as heightSources, CHANNEL_BLEND_MODES as blendModes, sourceLabel, blendLabel } from './lib/channel-presentation'
 import { processScalarField } from './lib/filters'
 import { createDemoImage, drawPixelImage, drawScalarField, fileToPixelImage } from './lib/image'
 import { buildMesh } from './lib/mesh'
@@ -92,7 +95,6 @@ import {
 import { cleanupStaleStoredZipArchives } from './lib/zip-writer'
 import type {
   AppearanceSettings,
-  ChannelBlendMode,
   ChannelLayer,
   ClayFinish,
   ColorMode,
@@ -172,6 +174,7 @@ interface LivingLoopExportRequestSnapshot {
 
 const image = shallowRef(createDemoImage())
 const threePreview = ref<ThreePreviewHandle | null>(null)
+const channelInspection = ref<{ reveal(): Promise<void> } | null>(null)
 const sourceCanvas = ref<HTMLCanvasElement | null>(null)
 const heightCanvas = ref<HTMLCanvasElement | null>(null)
 const sourceThumbCanvas = ref<HTMLCanvasElement | null>(null)
@@ -392,13 +395,16 @@ const editorMessage = ref('')
 const editorBusy = ref(false)
 const projectFileInput = ref<HTMLInputElement | null>(null)
 const recoverableSession = shallowRef<EditorDocument | null>(null)
-const comparison = shallowRef<{ current: EditorDocument; kept: EditorDocument; name: string; showKept: boolean } | null>(null)
+const recoveredAt = ref<number | null>(null)
+const recoveryStatus = ref('Checking recovery on this device…')
+const comparison = shallowRef<{ current: EditorDocument; kept: EditorDocument; name: string; showKept: boolean; kind?: 'version' | 'parameter' } | null>(null)
 const checkpointThumbnails = reactive<Record<number, string | null>>({})
 const historyRevision = ref(0)
 const sessionPersistence = createEditorSessionPersistence()
 let restoringDocument = false
 let sessionReady = false
 let sessionSaveTimer = 0
+let sessionSaveGeneration = 0
 let activeInputGesture = false
 let documentCamera: PreviewCameraSnapshot | undefined
 let activeFontBlob: Blob | undefined
@@ -419,12 +425,25 @@ function captureDocument(): EditorDocument {
 }
 function scheduleSessionSave() {
   window.clearTimeout(sessionSaveTimer)
+  const generation = ++sessionSaveGeneration
   const canSave = () => sessionReady && !recoverableSession.value && !restoringDocument && !comparison.value && !editorBusy.value && !fontBusy.value
+  if (sessionReady && !recoverableSession.value && !restoringDocument && !comparison.value) recoveryStatus.value = 'Recovery pending on this device…'
   if (!canSave()) return
   sessionSaveTimer = window.setTimeout(() => {
     // A comparison/font restore may have started after the timer was scheduled.
     if (!canSave()) return
-    void sessionPersistence.save(captureDocument()).catch(error => {
+    const snapshot = captureDocument()
+    const authoredAtSave = editorHistory.current
+    recoveryStatus.value = 'Saving recovery on this device…'
+    void sessionPersistence.save(snapshot).then(() => {
+      // A completed older write is not proof that newer edits are saved.
+      // Compare authored revisions, not the ephemeral Living Form playback
+      // clock captured alongside them; playback alone does not dirty a design.
+      if (!appDisposed && generation === sessionSaveGeneration && !comparison.value
+        && editorDocumentsEqual(editorHistory.current, authoredAtSave)) recoveryStatus.value = 'Recovery saved on this device'
+    }).catch(error => {
+      if (appDisposed || generation !== sessionSaveGeneration) return
+      recoveryStatus.value = 'Recovery unavailable'
       editorMessage.value = error instanceof Error ? error.message : 'Session recovery could not be saved.'
     })
   }, 700)
@@ -434,6 +453,8 @@ const editorHistory = createEditorHistory(captureDocument(), {
 })
 const canUndo = computed(() => { void historyRevision.value; return editorHistory.canUndo })
 const canRedo = computed(() => { void historyRevision.value; return editorHistory.canRedo })
+const undoDescription = computed(() => { void historyRevision.value; return editorHistory.undoLabel })
+const redoDescription = computed(() => { void historyRevision.value; return editorHistory.redoLabel })
 const keptVersions = computed(() => { void historyRevision.value; return editorHistory.checkpoints })
 watch([editorBusy, fontBusy], ([busy, fontPending]) => {
   // A native dialog/font operation can outlast the save debounce. Retry when
@@ -528,6 +549,9 @@ async function applyDocument(document: EditorDocument) {
     selectedFontId.value = selectedChoice.id
     activeFontBlob = restoredFontBlob
     documentCamera = document.camera
+    status.value = document.workspace === 'image'
+      ? `${document.image.name} · ${document.image.sourceWidth} × ${document.image.sourceHeight}`
+      : `3D type · ${document.font.label}`
     await nextTick()
     if (document.camera) threePreview.value?.setCameraSnapshot(document.camera)
     await nextTick()
@@ -557,7 +581,8 @@ function beginEditorGesture(event: Event) {
   if (comparison.value || activeInputGesture || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return
   if (target instanceof HTMLInputElement && !['range', 'number', 'color', 'text'].includes(target.type)) return
   activeInputGesture = true
-  editorHistory.beginGesture('Adjust control')
+  const label = target.getAttribute('aria-label')?.replace(/ value$/, '')
+  editorHistory.beginGesture(label ? `Adjust ${label}` : 'Adjust control')
 }
 async function endEditorGesture(event?: Event) {
   // Range controls fire `change` on each keyboard repeat. The physical keyup,
@@ -573,18 +598,37 @@ async function undoEditor(redo = false) {
   await endEditorGesture()
   const document = redo ? editorHistory.peekRedo() : editorHistory.peekUndo()
   if (!document) return
+  const description = redo ? editorHistory.redoLabel : editorHistory.undoLabel
   try {
     await applyDocument(document)
     if (redo) editorHistory.redo()
     else editorHistory.undo()
-    editorMessage.value = redo ? 'Redone' : 'Undone'
+    editorMessage.value = `${redo ? 'Redone' : 'Undone'} · ${description}`
   }
   catch (error) { editorMessage.value = String(error) }
   scheduleSessionSave()
 }
 function handleCameraChange(snapshot: PreviewCameraSnapshot) {
   documentCamera = snapshot
-  recordEditorChange()
+  if (!restoringDocument && !comparison.value && !fontBusy.value) editorHistory.record(captureDocument(), 'Adjust camera')
+}
+async function inspectSelectedChannel() {
+  if (comparison.value || editorBusy.value) return
+  imageExportOpen.value = false
+  compactPanel.value = 'style'
+  await nextTick()
+  await channelInspection.value?.reveal()
+}
+async function previewFieldSetting(key: FieldVariationKey, value: number) {
+  if (comparison.value || editorBusy.value || exportingImage.value || exportingBlenderProject.value) return
+  await endEditorGesture()
+  const current = captureDocument()
+  const candidate = createFieldComparison(current, key, value)
+  if (!candidate || current.field[key] === value) return
+  editorHistory.synchronize(current)
+  comparison.value = { current, kept: candidate.document, name: candidate.name, showKept: true, kind: 'parameter' }
+  try { await applyDocument(candidate.document) }
+  catch (error) { comparison.value = null; editorMessage.value = String(error) }
 }
 async function keepVersion() {
   if (editorHistory.checkpoints.length >= 8) {
@@ -707,28 +751,6 @@ function mergeFontChoices(...groups: readonly FontChoice[][]): FontChoice[] {
   if (activeChoice && !seen.has(activeChoice.id)) merged.push(activeChoice)
   return merged
 }
-
-const heightSources: Array<{ value: HeightSource; label: string }> = [
-  { value: 'luminance', label: 'Luminance' },
-  { value: 'hue', label: 'Hue target' },
-  { value: 'saturation', label: 'Saturation' },
-  { value: 'value', label: 'Value' },
-  { value: 'red', label: 'Red' },
-  { value: 'green', label: 'Green' },
-  { value: 'blue', label: 'Blue' },
-  { value: 'alpha', label: 'Alpha' },
-  { value: 'edges', label: 'Edges' },
-]
-
-const blendModes: Array<{ value: ChannelBlendMode; label: string }> = [
-  { value: 'normal', label: 'Mix' },
-  { value: 'add', label: 'Raise' },
-  { value: 'subtract', label: 'Carve' },
-  { value: 'multiply', label: 'Multiply' },
-  { value: 'screen', label: 'Screen' },
-  { value: 'max', label: 'Peak' },
-  { value: 'min', label: 'Valley' },
-]
 
 interface StackPreset {
   key: string
@@ -1261,14 +1283,6 @@ function handleWorkspaceTabKeydown(event: KeyboardEvent) {
   void nextTick(() => document.getElementById(`${next}-workspace-tab`)?.focus())
 }
 
-function sourceLabel(source: HeightSource): string {
-  return heightSources.find((item) => item.value === source)?.label ?? source
-}
-
-function blendLabel(blend: ChannelBlendMode): string {
-  return blendModes.find((item) => item.value === blend)?.label ?? blend
-}
-
 function closeBackgroundMenu(restoreFocus = false) {
   const returnFocus = backgroundMenuReturnFocus
   backgroundMenuPosition.value = null
@@ -1487,13 +1501,16 @@ onMounted(() => {
   void sessionPersistence.load().then(saved => {
     if (appDisposed) return
     recoverableSession.value = saved
+    recoveredAt.value = sessionPersistence.loadedAt
     sessionReady = true
+    recoveryStatus.value = saved ? 'Previous session available; current work is unchanged' : 'Recovery starts after your first edit'
     // An edit can arrive while IndexedDB opens. Its first save was deliberately
     // deferred so it could not overwrite an undiscovered recoverable session.
     if (!saved && editorHistory.canUndo) scheduleSessionSave()
   }).catch(error => {
     if (appDisposed) return
     sessionReady = true
+    recoveryStatus.value = 'Recovery unavailable'
     editorMessage.value = String(error)
     if (editorHistory.canUndo) scheduleSessionSave()
   })
@@ -2316,8 +2333,8 @@ async function downloadLivingFormLoop() {
           <span class="live-dot">Live</span>
         </div>
         <div class="document-tools">
-          <button type="button" :disabled="!canUndo || editorBusy" @click="undoEditor()" title="Undo (⌘Z / Ctrl+Z)">Undo</button>
-          <button type="button" :disabled="!canRedo || editorBusy" @click="undoEditor(true)" title="Redo (⌘⇧Z / Ctrl+Shift+Z)">Redo</button>
+          <button type="button" :disabled="!canUndo || editorBusy" @click="undoEditor()" :title="`Undo ${undoDescription} (⌘Z / Ctrl+Z)`">Undo</button>
+          <button type="button" :disabled="!canRedo || editorBusy" @click="undoEditor(true)" :title="`Redo ${redoDescription} (⌘⇧Z / Ctrl+Shift+Z)`">Redo</button>
           <button type="button" :disabled="editorBusy || !hasModel || keptVersions.length >= 8" @click="keepVersion">Keep version</button>
           <template v-if="isDesktop">
             <button type="button" :disabled="editorBusy" @click="chooseEditorProject">Open project</button>
@@ -2327,8 +2344,11 @@ async function downloadLivingFormLoop() {
           </template>
         </div>
         <p v-if="editorMessage" class="inline-note editor-message" role="status">{{ editorMessage }}</p>
+        <p class="inline-note editor-message recovery-status" role="status">{{ recoveryStatus }} <span v-if="!recoverableSession">· not a cloud backup</span></p>
         <div v-if="recoverableSession" class="session-recovery">
           <p>Recover your previous {{ recoverableSession.workspace }} session?</p>
+          <strong>{{ recoverableSession.workspace === 'image' ? recoverableSession.image.name : recoverableSession.text.text }}</strong>
+          <small v-if="recoveredAt">Snapshot from {{ new Date(recoveredAt).toLocaleString() }}</small>
           <div class="compact-buttons"><button type="button" :disabled="editorBusy" @click="restoreSession">Recover session</button><button type="button" @click="dismissRecovery">Keep current</button></div>
         </div>
         <details v-if="keptVersions.length" class="inspector-section" open>
@@ -2389,9 +2409,10 @@ async function downloadLivingFormLoop() {
                 <div class="sub-inspector-title">Selected channel</div>
                 <label class="control-row"><span>Image property</span><select v-model="selectedChannel.source"><option v-for="source in heightSources" :key="source.value" :value="source.value">{{ source.label }}</option></select></label>
                 <label v-if="selectedChannel.id !== baseLayerId" class="control-row"><span>Combine</span><select v-model="selectedChannel.blend" :disabled="!selectedChannel.enabled"><option v-for="mode in blendModes" :key="mode.value" :value="mode.value">{{ mode.label }}</option></select></label>
-                <label class="slider-control"><span>Influence <output>{{ Math.round(selectedChannel.amount * 100) }}%</output></span><input v-model.number="selectedChannel.amount" type="range" min="0" max="1" step="0.01" /></label>
-                <label v-if="selectedChannel.source === 'hue'" class="slider-control"><span>Target hue <output>{{ Math.round(selectedChannel.hueOrigin * 360) }}°</output></span><input v-model.number="selectedChannel.hueOrigin" type="range" min="0" max="1" step="0.005" /></label>
+                <NumberControl v-model="selectedChannel.amount" label="Influence" :min="0" :max="1" :step="0.01" :display-scale="100" unit="%" />
+                <NumberControl v-if="selectedChannel.source === 'hue'" v-model="selectedChannel.hueOrigin" label="Target hue" :min="0" :max="1" :step="0.005" :neutral="0" :display-scale="360" unit="°" />
                 <label class="check-control"><input v-model="selectedChannel.invert" type="checkbox" />Invert channel</label>
+                <button type="button" class="wide-control" @click="inspectSelectedChannel">Inspect this channel</button>
               </div>
             </div>
           </details>
@@ -2408,8 +2429,8 @@ async function downloadLivingFormLoop() {
                 <button type="button" :aria-pressed="textSettings.alignment === 'center'" @click="textSettings.alignment = 'center'">Center</button>
                 <button type="button" :aria-pressed="textSettings.alignment === 'right'" @click="textSettings.alignment = 'right'">Right</button>
               </div>
-              <label class="slider-control"><span>Tracking <output>{{ Math.round(textSettings.tracking * 100) }}%</output></span><input v-model.number="textSettings.tracking" type="range" min="-0.08" max="0.3" step="0.005" /></label>
-              <label class="slider-control"><span>Line height <output>{{ textSettings.lineHeight.toFixed(2) }}</output></span><input v-model.number="textSettings.lineHeight" type="range" min="0.8" max="1.8" step="0.02" /></label>
+              <NumberControl v-model="textSettings.tracking" label="Tracking" :min="-0.08" :max="0.3" :step="0.005" :neutral="0" :display-scale="100" unit="%" />
+              <NumberControl v-model="textSettings.lineHeight" label="Line height" :min="0.8" :max="1.8" :step="0.02" :neutral="1.06" unit="×" />
             </div>
           </details>
 
@@ -2426,7 +2447,7 @@ async function downloadLivingFormLoop() {
           <details class="inspector-section" open>
             <summary><span>Sampling</span><small>{{ textSettings.resolution }} px</small></summary>
             <div class="inspector-body">
-              <label class="slider-control"><span>Outline detail <output>{{ textSettings.resolution }}px</output></span><input v-model.number="textSettings.resolution" type="range" min="180" max="720" step="20" /></label>
+              <NumberControl v-model="textSettings.resolution" label="Outline detail" :min="180" :max="720" :step="20" :neutral="420" unit="px" />
               <p class="inline-note">Higher detail makes curves and counters cleaner.</p>
             </div>
           </details>
@@ -2476,8 +2497,8 @@ async function downloadLivingFormLoop() {
             @export-progress="handleImageExportProgress"
             @camera-change="handleCameraChange"
           />
-          <div v-if="comparison" class="comparison-toolbar" role="group" aria-label="Compare kept version">
-            <strong>Compare · same camera and lighting</strong>
+          <div v-if="comparison" class="comparison-toolbar" role="group" :aria-label="comparison.kind === 'parameter' ? 'Compare setting on the form' : 'Compare kept version'">
+            <strong>{{ comparison.kind === 'parameter' ? 'Preview only · same camera and material' : 'Compare · same camera and lighting' }}</strong>
             <div class="compact-buttons"><button type="button" :disabled="editorBusy" :aria-pressed="!comparison.showKept" @click="toggleComparison(false)">Current</button><button type="button" :disabled="editorBusy" :aria-pressed="comparison.showKept" @click="toggleComparison(true)">{{ comparison.name }}</button></div>
             <div class="compact-buttons"><button type="button" :disabled="editorBusy" @click="finishComparison(false)">Back to current</button><button type="button" :disabled="editorBusy" @click="finishComparison(true)">Use {{ comparison.name }}</button></div>
           </div>
@@ -2537,16 +2558,16 @@ async function downloadLivingFormLoop() {
               </div>
               <template v-if="isStrata">
                 <p class="inline-note">The whole image becomes stacked height contours—not horizontal strips. Gaps reveal the layers; nothing is painted or selected by hand.</p>
-                <label class="slider-control"><span>Layers <output>{{ strataSettings.layers }}</output></span><input v-model.number="strataSettings.layers" aria-label="Strata layers" type="range" min="2" max="24" step="1" /></label>
-                <label class="slider-control"><span>Thickness <output>{{ strataSettings.thickness.toFixed(3) }}</output></span><input v-model.number="strataSettings.thickness" aria-label="Strata thickness" type="range" min="0.005" max="0.12" step="0.005" /></label>
-                <label class="slider-control"><span>Separation <output>{{ strataSettings.separation.toFixed(3) }}</output></span><input v-model.number="strataSettings.separation" aria-label="Strata separation" type="range" min="0" max="0.18" step="0.005" /></label>
+                <NumberControl v-model="strataSettings.layers" label="Layers" aria-label="Strata layers" :min="2" :max="24" :step="1" :neutral="DEFAULT_STRATA_SETTINGS.layers" />
+                <NumberControl v-model="strataSettings.thickness" label="Thickness" aria-label="Strata thickness" :min="0.005" :max="0.12" :step="0.005" :neutral="DEFAULT_STRATA_SETTINGS.thickness" />
+                <NumberControl v-model="strataSettings.separation" label="Separation" aria-label="Strata separation" :min="0" :max="0.18" :step="0.005" :neutral="DEFAULT_STRATA_SETTINGS.separation" />
                 <p class="inline-note">{{ imageMesh.strata?.parts.length }} contour layers · closed tops, undersides, and edges. Flat images produce a single layer. Use Surface smoothing for broader contours, or Living Form → Expand to animate the gaps.</p>
               </template>
               <template v-else>
                 <NumberControl v-model="meshSettings.depth" label="Depth" :min="0.02" :max="1.4" :step="0.02" :neutral="0.58" help="Height of the relief; does not change image resolution." />
-                <label class="slider-control"><span>Midpoint <output>{{ meshSettings.midpoint.toFixed(2) }}</output></span><input v-model.number="meshSettings.midpoint" type="range" min="0" max="1" step="0.01" /></label>
+                <NumberControl v-model="meshSettings.midpoint" label="Relief midpoint" :min="0" :max="1" :step="0.01" :neutral="0.5" :help="meshSettings.mode === 'plane' ? 'Not used by Raised relief, which starts at zero.' : 'Height-field value used as the reference level for the relief.'" />
               </template>
-              <label v-if="meshSettings.mode === 'solid'" class="slider-control"><span>Base thickness <output>{{ meshSettings.baseThickness.toFixed(2) }}</output></span><input v-model.number="meshSettings.baseThickness" type="range" min="0.06" max="0.8" step="0.02" /></label>
+              <NumberControl v-if="meshSettings.mode === 'solid'" v-model="meshSettings.baseThickness" label="Base thickness" :min="0.06" :max="0.8" :step="0.02" :neutral="0.26" />
               <NumberControl v-model="meshSettings.resolution" label="Mesh detail" :min="16" :max="180" :step="4" :neutral="88" help="Geometry density, separate from exported pixels and render samples." />
             </div>
           </details>
@@ -2554,10 +2575,10 @@ async function downloadLivingFormLoop() {
           <details v-else class="inspector-section" open>
             <summary><span>Geometry</span><small>Beveled solid</small></summary>
             <div class="inspector-body">
-              <label class="slider-control"><span>Extrusion <output>{{ textSettings.depth.toFixed(2) }}</output></span><input v-model.number="textSettings.depth" type="range" min="0.06" max="0.9" step="0.01" /></label>
-              <label class="slider-control"><span>Bevel width <output>{{ textSettings.bevelSize.toFixed(3) }}</output></span><input v-model.number="textSettings.bevelSize" type="range" min="0" max="0.12" step="0.005" /></label>
-              <label class="slider-control"><span>Bevel depth <output>{{ textSettings.bevelThickness.toFixed(3) }}</output></span><input v-model.number="textSettings.bevelThickness" type="range" min="0" max="0.12" step="0.005" /></label>
-              <label class="slider-control"><span>Bevel smoothness <output>{{ textSettings.bevelSegments }}</output></span><input v-model.number="textSettings.bevelSegments" type="range" min="1" max="8" step="1" /></label>
+              <NumberControl v-model="textSettings.depth" label="Extrusion" :min="0.06" :max="0.9" :step="0.01" :neutral="0.34" />
+              <NumberControl v-model="textSettings.bevelSize" label="Bevel width" :min="0" :max="0.12" :step="0.005" :neutral="0.035" />
+              <NumberControl v-model="textSettings.bevelThickness" label="Bevel depth" :min="0" :max="0.12" :step="0.005" :neutral="0.035" />
+              <NumberControl v-model="textSettings.bevelSegments" label="Bevel smoothness" :min="1" :max="8" :step="1" :neutral="4" unit="segments" />
             </div>
           </details>
 
@@ -2576,13 +2597,13 @@ async function downloadLivingFormLoop() {
                 </template>
                 <NumberControl v-model="fieldSettings.blur" label="Base smoothing" :min="0" :max="8" :step="1" :neutral="1" unit="px" help="Softens the combined field. Zero preserves its fine detail." />
                 <NumberControl v-model="fieldSettings.contrast" label="Contrast" :min="-50" :max="50" :step="1" :neutral="0" help="Separates low and high regions; zero is neutral." />
-                <label class="slider-control"><span>Quantize <output>{{ fieldSettings.quantize < 2 ? 'Off' : fieldSettings.quantize }}</output></span><input v-model.number="fieldSettings.quantize" type="range" min="0" max="12" step="1" /></label>
+                <NumberControl v-model="fieldSettings.quantize" label="Quantize" :min="0" :max="12" :step="1" :neutral="0" :help="fieldSettings.quantize < 2 ? 'Off · 0 or 1 leaves heights continuous.' : `${fieldSettings.quantize} height levels · use 0 to turn off.`" />
                 <label class="check-control"><input v-model="fieldSettings.invert" type="checkbox" />Invert composite</label>
-                <FieldVariations :raw="rawField" :settings="fieldSettings" @apply="(key, value) => fieldSettings[key] = value" />
+                <FieldVariations :raw="rawField" :settings="fieldSettings" @apply="(key, value) => fieldSettings[key] = value" @preview="previewFieldSetting" />
               </template>
               <template v-else-if="textSettings.finish === 'blob'">
-                <label class="slider-control"><span>Dilation <output>{{ textSettings.blobDilation }}px</output></span><input v-model.number="textSettings.blobDilation" type="range" min="0" max="20" step="1" /></label>
-                <label class="slider-control"><span>Smoothing <output>{{ textSettings.blobSmoothing }}px</output></span><input v-model.number="textSettings.blobSmoothing" type="range" min="0" max="24" step="1" /></label>
+                <NumberControl v-model="textSettings.blobDilation" label="Dilation" :min="0" :max="20" :step="1" :neutral="5" unit="px" />
+                <NumberControl v-model="textSettings.blobSmoothing" label="Smoothing" :min="0" :max="24" :step="1" :neutral="6" unit="px" />
               </template>
             </div>
           </details>
@@ -2603,15 +2624,15 @@ async function downloadLivingFormLoop() {
                 >{{ behavior.label }}</button>
               </div>
               <p class="inline-note">{{ activeLivingBehavior.note }} Motion is procedural, deterministic, and closes on an exact seamless loop.</p>
-              <label class="slider-control"><span>Intensity <output>{{ Math.round(livingForm.amount * 100) }}%</output></span><input v-model.number="livingForm.amount" aria-label="Living Form intensity" :aria-valuetext="`${Math.round(livingForm.amount * 100)}%`" type="range" min="0" max="1" step="0.01" /></label>
-              <label v-if="livingForm.behavior !== 'expand'" class="slider-control"><span>Complexity <output>{{ livingForm.frequency.toFixed(2) }}</output></span><input v-model.number="livingForm.frequency" aria-label="Living Form complexity" :aria-valuetext="livingForm.frequency.toFixed(2)" type="range" min="0.25" max="5" step="0.05" /></label>
-              <label v-if="livingForm.behavior !== 'expand'" class="slider-control"><span>Variation <output>{{ Math.round(livingForm.seed) }}</output></span><input v-model.number="livingForm.seed" aria-label="Living Form variation" :aria-valuetext="`${Math.round(livingForm.seed)}`" type="range" min="0" max="100" step="1" /></label>
-              <label class="slider-control"><span>Loop duration <output>{{ livingForm.duration.toFixed(1) }}s</output></span><input v-model.number="livingForm.duration" aria-label="Living Form loop duration" :aria-valuetext="`${livingForm.duration.toFixed(1)} seconds`" type="range" min="1" max="12" step="0.5" /></label>
+              <NumberControl v-model="livingForm.amount" label="Intensity" aria-label="Living Form intensity" :min="0" :max="1" :step="0.01" :neutral="workspace === 'image' ? DEFAULT_LIVING_FORM_SETTINGS.amount : 0.42" :display-scale="100" unit="%" />
+              <NumberControl v-if="livingForm.behavior !== 'expand'" v-model="livingForm.frequency" label="Complexity" aria-label="Living Form complexity" :min="0.25" :max="5" :step="0.05" :neutral="workspace === 'image' ? DEFAULT_LIVING_FORM_SETTINGS.frequency : 1.25" />
+              <NumberControl v-if="livingForm.behavior !== 'expand'" v-model="livingForm.seed" label="Variation" aria-label="Living Form variation" :min="0" :max="100" :step="1" :neutral="workspace === 'image' ? 17 : 31" />
+              <NumberControl v-model="livingForm.duration" label="Loop duration" aria-label="Living Form loop duration" :min="1" :max="12" :step="0.5" :neutral="DEFAULT_LIVING_FORM_SETTINGS.duration" unit="s" />
               <div class="living-transport">
                 <button type="button" class="primary-control" :aria-pressed="livingPlaying" :disabled="!hasModel" @click="toggleLivingFormPlayback">{{ livingPlaying ? 'Pause' : 'Play' }}</button>
                 <button type="button" :disabled="!hasModel" @click="restartLivingForm">Restart</button>
               </div>
-              <label class="slider-control"><span>Phase <output>{{ Math.round(livingPhase * 100) }}%</output></span><input v-model.number="livingPhase" aria-label="Living Form phase" :aria-valuetext="`${Math.round(livingPhase * 100)}%`" type="range" min="0" max="0.999" step="0.001" @input="pauseLivingFormForScrub" /></label>
+              <NumberControl v-model="livingPhase" label="Phase" aria-label="Living Form phase" :min="0" :max="0.999" :step="0.001" :neutral="0" :display-scale="100" unit="%" @update:model-value="pauseLivingFormForScrub" />
               </div>
             </div>
           </details>
@@ -2630,7 +2651,7 @@ async function downloadLivingFormLoop() {
                   <label><span>Mid</span><input v-model="appearance.heightGradient.mid" type="color" /></label>
                   <label><span>High</span><input v-model="appearance.heightGradient.high" type="color" /></label>
                 </div>
-                <label class="slider-control"><span>Midpoint <output>{{ Math.round(appearance.heightGradient.midpoint * 100) }}%</output></span><input v-model.number="appearance.heightGradient.midpoint" type="range" min="0.05" max="0.95" step="0.01" /></label>
+                <NumberControl v-model="appearance.heightGradient.midpoint" label="Gradient color midpoint" :min="0.05" :max="0.95" :step="0.01" :neutral="0.5" :display-scale="100" unit="%" help="Position of the middle color; does not change the relief's shape." />
               </template>
               <p v-else class="inline-note">Switch to {{ workspace === 'text' ? 'Material' : 'Clay' }} to edit color and finish.</p>
             </div>
@@ -2641,7 +2662,7 @@ async function downloadLivingFormLoop() {
             <div class="inspector-body map-stack"><figure><figcaption>Source</figcaption><canvas ref="sourceCanvas" aria-label="Source image preview" /></figure><figure><figcaption>Height field</figcaption><canvas ref="heightCanvas" aria-label="Computed height field preview" /></figure></div>
           </details>
 
-          <ChannelInspection v-if="workspace === 'image'" :image="image" :layers="channelLayers" :selected-id="selectedChannelId" :height="heightField" />
+          <ChannelInspection v-if="workspace === 'image'" ref="channelInspection" :image="image" :layers="channelLayers" :selected-id="selectedChannelId" :height="heightField" />
 
           <details class="inspector-section">
             <summary><span>Mesh health</span><small :class="{ success: topology?.watertight }">{{ topology?.watertight ? 'Ready' : hasModel ? 'Open' : 'Empty' }}</small></summary>
@@ -2676,10 +2697,10 @@ async function downloadLivingFormLoop() {
               <summary><span>Advanced Cycles controls</span><small>{{ proRenderSettingsAreProduction ? 'Production' : 'Custom' }}</small></summary>
               <div class="pro-render-controls__body">
                 <p class="pro-render-status">{{ desktopProStatus }}</p>
-                <label class="slider-control"><span>Maximum samples <output>{{ proRenderSettings.maxSamples.toLocaleString() }}</output></span><input v-model.number="proRenderSettings.maxSamples" type="range" min="64" max="8192" step="64" :disabled="exportingImage" /></label>
-                <label class="slider-control"><span>Minimum samples <output>{{ proRenderSettings.minSamples.toLocaleString() }}</output></span><input v-model.number="proRenderSettings.minSamples" type="range" min="64" :max="proRenderSettings.maxSamples" step="64" :disabled="exportingImage" /></label>
-                <label class="slider-control"><span>Noise threshold <output>{{ proRenderSettings.noiseThreshold.toFixed(3) }}</output></span><input v-model.number="proRenderSettings.noiseThreshold" type="range" min="0.001" max="0.05" step="0.001" :disabled="exportingImage" /></label>
-                <label class="slider-control"><span>Light bounces <output>{{ proRenderSettings.maxBounces }}</output></span><input v-model.number="proRenderSettings.maxBounces" type="range" min="2" max="16" step="1" :disabled="exportingImage" /></label>
+                <NumberControl v-model="proRenderSettings.maxSamples" label="Maximum samples" :min="64" :max="8192" :step="64" :neutral="DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.maxSamples" :disabled="exportingImage" />
+                <NumberControl v-model="proRenderSettings.minSamples" label="Minimum samples" :min="64" :max="proRenderSettings.maxSamples" :step="64" :disabled="exportingImage" />
+                <NumberControl v-model="proRenderSettings.noiseThreshold" label="Noise threshold" :min="0.001" :max="0.05" :step="0.001" :neutral="DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.noiseThreshold" :disabled="exportingImage" />
+                <NumberControl v-model="proRenderSettings.maxBounces" label="Light bounces" :min="2" :max="16" :step="1" :neutral="DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.maxBounces" :disabled="exportingImage" />
                 <label class="check-control"><input v-model="proRenderSettings.denoise" type="checkbox" :disabled="exportingImage" />OpenImageDenoise final pass</label>
                 <button type="button" class="pro-production-reset" :disabled="exportingImage || proRenderSettingsAreProduction" @click="resetProRenderSettings">Reset production preset</button>
               </div>
@@ -2692,7 +2713,7 @@ async function downloadLivingFormLoop() {
             <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" aria-pressed="true" disabled><strong>High 2×</strong><small>Lossless frames</small></button><button type="button" aria-pressed="false" disabled><strong>Final</strong><small>Still images only</small></button></div></fieldset>
             <fieldset class="export-group"><legend>Long edge</legend><div class="segmented cards"><button v-for="edge in editionExports.loopEdges" :key="edge" type="button" :aria-pressed="livingLoopLongEdge === edge" :disabled="exportingImage" @click="livingLoopLongEdge = edge">{{ edge / 1024 }}K</button></div></fieldset>
             <fieldset class="export-group"><legend>Frame rate</legend><div class="segmented"><button v-for="fps in LIVING_FORM_FRAME_RATES" :key="fps" type="button" :aria-pressed="livingLoopFps === fps" :disabled="exportingImage" @click="livingLoopFps = fps">{{ fps }} fps</button></div></fieldset>
-            <fieldset class="export-group"><legend>Timing</legend><label class="slider-control"><span>Duration <output>{{ displayLivingLoopRequest.settings.duration.toFixed(1) }}s · {{ displayLivingLoopRequest.frameCount }} frames</output></span><input v-model.number="livingForm.duration" aria-label="Living Loop duration" :aria-valuetext="`${displayLivingLoopRequest.settings.duration.toFixed(1)} seconds, ${displayLivingLoopRequest.frameCount} frames`" type="range" min="1" max="12" step="0.5" :disabled="exportingImage" /></label></fieldset>
+            <fieldset class="export-group"><legend>Timing</legend><NumberControl v-model="livingForm.duration" label="Duration" aria-label="Living Loop duration" :min="1" :max="12" :step="0.5" :neutral="DEFAULT_LIVING_FORM_SETTINGS.duration" unit="s" :help="`${displayLivingLoopRequest.frameCount} frames`" :disabled="exportingImage" /></fieldset>
             <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ viewportBackgroundPreset(displayLivingLoopRequest.studioBackground).label }}</small></button></div></fieldset>
             <p class="inline-note">{{ livingLoopHelp }}</p>
             <p v-if="!livingForm.enabled" class="export-message error" role="alert">Enable Living Form in Properties to export a loop.</p>
@@ -2707,6 +2728,7 @@ async function downloadLivingFormLoop() {
 
           <div v-if="editionExports.modelFiles" class="file-export-section">
             <h3>3D &amp; project files</h3>
+            <p class="inline-note model-handoff-note">GLB and Blender files carry geometry, selected surface colors or bitmap, and material. Living Form exports the current phase as a static model, not animation. Studio cameras, lights, and the finished render do not transfer; materials can look different in Blender. Use Save project (.rasterform) to reopen the original Rasterform controls.</p>
             <fieldset v-if="workspace === 'image'" class="export-group">
               <legend>Surface color</legend>
               <div class="segmented cards">
