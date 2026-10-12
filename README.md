@@ -2,107 +2,105 @@
 
 **Turn color, light, and texture into dimensional form.**
 
-Rasterform is a browser-based 3D form studio for artists and designers. Bring in a PNG, JPEG, or WebP and choose which parts should rise or recede, or switch to the separate Text workspace and turn an installed font into beveled, extruded geometry. Then shape, light, and export the result as a finished image or 3D object.
+Rasterform is a local 3D form studio for artists, designers, photographers, and creative technologists. Turn a photograph or graphic into a relief, make beveled 3D lettering from an installed font, or build a stack of contour layers. Explore materials and seamless motion, then export an image, a loop, or a model for further work.
 
-It is a focused **2.5D tool**: more tactile than an image editor, more immediate than building a displacement setup in Blender, and honest about what it creates. Rasterform interprets the image you can see; it does not invent hidden depth.
+The image workflow is **2.5D**: brightness, color, transparency, and edges become height. It interprets the pixels you provide; it does not reconstruct hidden surfaces or infer a photograph's real depth.
 
-## A visual workflow
+![An example artwork, its luminance height field, and the resulting relief geometry](docs/interview/assets/pipeline-example.png)
 
-1. **Choose Image or Text** — derive height from brightness, hue, saturation, color channels, transparency, or edges; or type directly with an installed font.
-2. **Compose the form** — layer image signals, tune text extrusion and bevels, or use Blob mode to dilate and round either source into organic forms.
-3. **Bring it to life** — enable Living Form to make the finished mesh breathe, ripple, flow, or melt on an exact procedural loop.
-4. **Find the material** — explore original color, height gradients, clay finishes, or wireframe structure.
-5. **Light and export** — work quickly in the HDR studio preview, switch to a progressive Final Render, or continue in other tools.
+*A small generated example of the image → height field → relief mesh pipeline.*
 
-Right-click the 3D viewport to choose a white, dark-gray, or black background, or use the `W`, `G`, and `B` shortcuts. The background is always a flat color—no floor or grid geometry is added to the viewport or image exports.
+## Download the Mac app
 
-The studio stays within the available screen in editing and export modes, with independently scrolling inspectors. Undo/Redo, kept-version comparison, local session recovery, actual channel-field inspection, and optional one-setting comparisons support reversible exploration without changing image generation or render quality. Desktop can save/open complete `.rasterform` design projects. See [the editing and recovery guide](docs/EDITOR_UX.md) for behavior, shortcuts, limits, and verification.
+**[Download Rasterform for Apple silicon Macs (.zip)](https://github.com/lolusername/rasterform/releases/download/v1.0.0-preview.20261011/Rasterform-macOS-arm64.zip)** · [Release notes and checksums](https://github.com/lolusername/rasterform/releases/tag/v1.0.0-preview.20261011)
 
-Opening Export swaps the right-hand inspector without resizing the screen-bounded viewport or visible WebGL canvas. High images use a dedicated background renderer when supported. Final keeps the full path-traced sample and denoising contract on the main thread, where its BVH worker is not nested inside another worker; it may pause the studio while it renders, but preserves the requested resolution, material, lighting, and background options.
+This download contains **Rasterform.app** for **Apple silicon Macs (M1 or newer), macOS 12 Monterey or later**. You do not need Node.js, npm, or the source code to use it. Intel, Windows, and Linux binaries are not included in this release.
 
-In the Image workspace, Still export offers two framing choices. **Current view** uses the active editor camera. **Straight on** creates a fresh, front-aligned camera without moving or replacing the editor camera. The **web edition exports images only, up to a 2K long edge**, including proportionally fitted straight-on images and Living Loop PNG sequences; transparency remains optional. The **desktop edition retains 2K/4K/8K High stills, exact source-sized straight-on images, and 2K/4K loops**. Final and desktop Cycles Pro retain their full-quality contracts and 4K maximum, so a desktop original above 4K requires High with Straight on to export its exact pixels. These edition limits affect output dimensions only: High remains the existing 2× tiled renderer, and no sample, material, lighting, or denoising settings are reduced.
+1. Download and unzip `Rasterform-macOS-arm64.zip`.
+2. Open `Rasterform.app` from the extracted folder to try it, or drag it into **Applications** to install it.
+3. Import a PNG, JPEG, or WebP, or choose **Text** and start typing.
 
-Living Form is deterministic and post-mesh: it never rewrites the source image, text contours, or base geometry, and every displayed or exported frame is evaluated from that immutable base rather than the previous frame. Image and Text keep independent motion settings. Still PNG and desktop GLB, STL, Blender, and recipe exports bake the visible phase. Living Loop export creates a transparent or studio-background, lossless RGBA PNG-sequence ZIP at High 2× quality with a timing manifest; frames use `phase = index / frameCount`, so no duplicate terminal frame introduces a hitch. Long sequences stream through private browser storage when available instead of retaining every rendered frame in memory. The archive switches to ZIP64 when it crosses the classic 4 GiB boundary, checks available storage as soon as the first frame establishes a useful size projection, and scavenges abandoned private archives after 24 hours.
+**This is a preview build.** It is ad-hoc signed, but is not Developer ID-signed or notarized by Apple. If macOS blocks the first launch and you trust this download, use **System Settings → Privacy & Security → Open Anyway** after attempting to open it. See [Apple's instructions](https://support.apple.com/en-us/102445) and the [installation guide](docs/INSTALLING_MACOS.md).
 
-Living Loop is deliberately labeled **High 2×**, not Final. It does not replace or weaken the existing still-image Final path tracer: Final uses 6,144 samples for diffuse/matte work and 8,192 samples for specular (glossy or metallic) work, while retaining its full bounce, MIS, tile, and denoising contract.
+### Do I need Blender?
 
-The optional macOS desktop edition shares the same studio and rendering behavior while moving Final into a separate hidden Electron renderer process. It uses the same quality owner and exact 6,144/8,192-sample contract, but the visible studio remains responsive and shows progress while the native shell prevents sleep and saves the completed PNG atomically. Living Loop remains the same shared renderer and ZIP writer; the shell adds app-suspension protection, disables background throttling for the active job, warns before quit, waits for the ZIP to finish writing, and adds successful loops to Reveal Last Export and Recent Documents.
+**Blender is optional.** Editing, High/Final PNG renders, Living Loop exports, GLB, STL, and `.rasterform` project files work without it.
 
-On macOS, **Cycles Pro** is an optional desktop-only still-render path when Blender 5.2 LTS or newer is installed. Its production preset keeps adaptive Cycles at up to 8,192 samples with a 512-sample floor, a `0.001` noise threshold, 12 light bounces, and the High-quality OpenImageDenoise pass guided by albedo and normals. It saves a display-ready AgX RGBA PNG and a matching PIZ-compressed multipart EXR. The EXR's Combined and Diffuse Color passes use 16-bit half-float color channels; Normal and the other data or denoising-guide passes retain the precision appropriate to those passes. Rasterform starts a new `--background --factory-startup` Blender process with private configuration and temporary directories: it never opens, attaches to, saves, or closes the `.blend` project in an already-running Blender app. Both can run together, although they share the Mac's GPU and memory and can therefore slow each other down. No floor plane or grid is created in the Cycles scene.
+Install **Blender 5.2 LTS or newer (minimum 5.2.0)** only if you want:
 
-The desktop edition offers **Blender project (.blend)** for editing and **Portable model (.glb)** for interchange. Image models default to **Source image**: the original bitmap is embedded at its full pixel dimensions on the front, with neutral gray sides/back and the active material's roughness and metalness. **Current appearance** retains the existing visible color mode instead. Bitmap exports normalize browser-decoded pixels into lossless, 8-bit sRGB PNG; they do not preserve an arbitrary source file's high-bit-depth or wide-gamut encoding. Upload bytes stay compressed while editing and are decoded at full size only during export. Sources above 16,384 pixels per side, 100 megapixels, or a 512 MiB encoded PNG are explicitly rejected, never silently resized.
+- **Cycles Pro** still rendering, which saves an AgX PNG and a matching multilayer EXR for compositing.
+- **Blender project (.blend)** export, with packed source textures and Exact, Balanced, or Lightweight topology.
 
-Exact `.blend` keeps the source triangles and UVs. Balanced and Lightweight create a lower-density editable mesh, regenerate a padded `UVMap`, and apply angle-aware smooth shading. A separate `SourceUV` map preserves the bitmap placement in every topology mode, and the image is packed into the `.blend` so the file works without its original upload. Regular image reliefs are deterministically rebuilt as quad grids; feature-aware sampling preserves narrow peaks and grooves between the lower-density grid points. Irregular text/freeform geometry uses Blender's fixed-seed QuadriFlow path with sharp edges, open boundaries, and attributes protected. The saved project contains one selected mesh and no camera, light, floor, grid, or plane. Blender's viewport grid overlays are disabled in the project.
+Get the Apple silicon version from the [official Blender 5.2 LTS release page](https://www.blender.org/releases/5-2/) and place `Blender.app` in **Applications**. Blender is not bundled with Rasterform. The app checks its version before enabling these features and launches its own background process for each job. You can keep another Blender project open; both applications share your Mac's GPU and memory.
 
-The web export panel contains still PNGs, lossless Living Form PNG-sequence ZIPs, and height PNGs only, with optional alpha on rendered images and a 2K maximum. Desktop keeps the larger image sizes plus textured GLB, editable `.blend`, reusable recipes, and watertight STL files when the topology is ready to fabricate.
+## Make a piece
 
-## Strata
+1. **Choose Image or Text.** Use brightness, hue, saturation, RGB channels, alpha, or edges as image height signals. Text has extrusion, bevel, tracking, line-height, and alignment controls.
+2. **Shape the form.** Blend channels, adjust depth and smoothing, or use Blob to round the result. **Strata** builds separately closed contour layers with adjustable thickness and gaps.
+3. **Choose an appearance.** Keep the original colors, map height to a gradient, try matte/glossy/metallic clay, or inspect the wireframe in the HDR studio.
+4. **Add motion.** Living Form makes the mesh breathe, ripple, flow, or melt; Strata's Expand opens and closes the stack. Motion loops exactly and preserves the original source and base geometry.
+5. **Frame and export.** Use the current camera or, for Image stills, a straight-on view. Choose a transparent background or a flat white, gray, or black studio background.
 
-Choose **Image → Properties → Geometry → Strata** to turn the whole height field into separately closed contour layers. Layers, Thickness, and Separation control the stack; **Living Form → Expand** closes and reopens its gaps without bending the sheets. Existing relief modes and render quality settings are unchanged.
+Undo/Redo, **Keep version**, temporary comparisons, and channel inspection make exploration reversible. Kept versions last for the current session; local recovery can restore the latest design after a reload. Desktop **Save project** creates a complete `.rasterform` file containing the source, settings, material, motion, and camera. Recipe JSON is a lighter description, not a complete project backup.
 
-Desktop GLB and Blender exports keep each contour layer as a separately named object. The original bitmap can be embedded on every top cap, with source UVs and material finish retained. Strata is the exception to the one-object `.blend` behavior described above: it exports one object per height layer and no other scene objects. See [the Strata guide](docs/STRATA.md) for controls, topology choices, limitations, and verification.
+## Choose an output
 
-## Text workspace
+| Output | Browser edition | Mac app |
+| --- | --- | --- |
+| Still PNG, with optional transparency | Up to 2K | High up to 8K; Final/Cycles Pro up to 4K |
+| Source-sized, straight-on Image still | Fitted within 2K | Exact original dimensions through High; Final/Pro limited to 4K |
+| Living Loop PNG-sequence ZIP | Up to 2K | Up to 4K |
+| Height PNG | Yes | Yes |
+| Textured GLB, STL, recipe JSON | — | Yes; no Blender required |
+| Complete `.rasterform` projects | Local recovery only | Save and open |
+| Editable `.blend` and Cycles Pro PNG/EXR | — | Requires Blender 5.2.0+ |
 
-Text generates automatically as you type. On supported desktop Chromium browsers, **Browse installed fonts** uses the permission-gated Local Font Access API to load the exact face you select. Other browsers passively verify a curated set of common installed faces and always retain a system-font default. Granted font bytes can be retained in local session recovery and complete desktop projects; they are never uploaded or written into lightweight recipes. Missing project fonts are reported rather than silently substituted. Only redistribute embedded fonts when their license permits it.
+**High** uses 2× rendering. **Final** is the built-in path tracer, with 6,144 samples for diffuse/matte work and 8,192 for glossy/metallic work. **Cycles Pro** uses the optional Blender renderer. On desktop, Final runs in a separate renderer process so the studio stays responsive; browser Final may pause editing while it renders. Full-quality stills can take several minutes.
 
-The resulting masks are contoured into closed, indexed meshes with counters preserved, then extruded and beveled. Tracking, line height, alignment, outline detail, extrusion, bevel width/depth/smoothness, material color, matte/glossy/metallic finish, and Blob dilation/smoothing are all editable. Text uses the same HDR viewport and full-quality High/Final image paths as image reliefs, with GLB, Blender, STL, and recipe exports available on desktop.
+Loops are lossless RGBA PNG sequences with a timing manifest, ready to assemble in a video or compositing tool. They use High quality; Final and Cycles Pro are still-render paths. GLB, STL, and `.blend` bake the visible motion phase rather than exporting animated geometry. Camera and studio lights are not included in model exports. Strata preserves separately named layers in GLB and `.blend`; STL contains separate shells rather than a fused fabrication-ready union.
 
-## Why channels matter
+Image model exports embed the original-resolution bitmap as an **8-bit sRGB PNG**, with neutral sides and back. They preserve source dimensions, not arbitrary high-bit-depth or wide-gamut encoding. STL export requires watertight topology. Text fonts must be available or explicitly embedded; check the font license before distributing projects with embedded font bytes.
 
-Every image contains several possible landscapes. Brightness might reveal volume; saturation can isolate intensity; hue can select a color family; edges can become ridges. Rasterform lets you combine these readings non-destructively, so creating form feels closer to art direction than mesh construction.
+## Local by design
 
-Processing stays in your browser—no account, upload, server, analytics, or remote inference.
+Your artwork is processed on your device. There is no account, artwork upload, analytics, or remote inference. The desktop package includes its UI, renderers, and studio HDR image and works offline; optional Blender work also runs locally. The browser edition's UI stylesheet requests hosted fonts, but image processing stays in the browser. Session recovery is local storage, so save a desktop project when you need a portable backup.
 
-## Run the app
+## Run or build from source
+
+Use **Node.js 22.12 or newer** to work with both editions. Vue, TypeScript, and Vite power the studio; Three.js handles geometry and preview rendering, and `three-gpu-pathtracer` supplies Final. The optional Electron shell owns native files and isolated render jobs. There is no backend or database to configure.
 
 ```bash
-npm install
+git clone https://github.com/lolusername/rasterform.git
+cd rasterform
+npm ci
 npm run dev
 ```
 
-To verify the project:
+Build and check the browser edition:
 
 ```bash
 npm test
 npm run build
 ```
 
-## macOS desktop edition
-
-The desktop toolchain is isolated under `electron/`; the normal `npm run dev` and `npm run build` commands remain the browser app. Desktop development requires Node 22.12 or newer.
+Build the Mac app on an Apple silicon Mac:
 
 ```bash
-npm ci
 npm --prefix electron ci
-npm run desktop:test
-npm run desktop:build
-npm run desktop:smoke
-npm run desktop:dev
-```
-
-Ad-hoc-signed local development packages can be built for Apple silicon, Intel, or both architectures. They are not Developer ID-signed or notarized:
-
-```bash
-npm run desktop:package
 npm run desktop:package:arm64
-npm run desktop:package:lab:arm64
-npm run desktop:package:x64
-npm run desktop:package:universal
-npm run desktop:smoke:packaged
-npm run desktop:smoke:packaged:lab:arm64
+npm --prefix electron run smoke:packaged:existing:arm64
 ```
 
-`npm run desktop:build` only builds and stages the desktop runtime. To create an installable `.app`, run `npm run desktop:package:arm64` on an Apple-silicon Mac. The result is `electron/out/Rasterform-darwin-arm64/Rasterform.app`; packaging does not copy it into `/Applications`.
+The result is `electron/out/Rasterform-darwin-arm64/Rasterform.app`. Packaging does not install it. `npm run desktop:dev` builds and launches the development app; `npm run desktop:build` stages it without producing an installable bundle.
 
-`npm run desktop:package:lab:arm64` creates the renderer experiment separately at `electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app`, with bundle ID `io.atil.rasterform.rendererlab`. Install it as `/Applications/Rasterform Renderer Lab.app`; it remains independent from the known-good `/Applications/Rasterform.app` checkpoint. Blender is intentionally not bundled, so install Blender 5.2 LTS or newer in `/Applications` to enable Cycles Pro and Blender project preparation. The source recovery tag for the stable pre-Pro checkpoint is `checkpoint/pre-pro-renderer-2026-08-26`.
+Maintainers can explicitly build Intel or universal packages with `desktop:package:x64` or `desktop:package:universal`. These are not the downloadable, tested Apple silicon artifact. `desktop:package:lab:arm64` creates a separate **Rasterform Renderer Lab.app** for experiments. Local packages are ad-hoc signed; Developer ID signing and notarization require the separate release process described in the desktop guide.
 
-The unqualified package and packaged-smoke commands build and run only the physical host Mac's native architecture (`arm64` on Apple silicon), even if Node itself was started through Rosetta. Intel and universal artifacts are explicit compatibility builds; Rasterform refuses to launch the x64 smoke test on an Apple-silicon Mac. Package verification still checks restrictive ATS metadata, the Rasterform icon, embedded ASAR integrity, locked Electron fuse values, every nested Mach-O architecture/deployment target, and the internal consistency of the ad-hoc code-signature seal. That integrity check does not authenticate a Developer ID identity or verify notarization; distributable releases still require the separate Apple-credentialed release workflow.
+## Guides and credits
 
-New to Mac app bundles or Electron? See [docs/INSTALLING_MACOS.md](docs/INSTALLING_MACOS.md) for a beginner-friendly guide to installing, launching, updating, and removing Rasterform. See [docs/DESKTOP.md](docs/DESKTOP.md) for the architecture, quality guarantees, macOS support policy, verification gates, and signing/notarization release checklist.
+- [Install, launch, update, and remove the Mac app](docs/INSTALLING_MACOS.md)
+- [Editing, comparisons, recovery, and verification](docs/EDITOR_UX.md)
+- [Strata controls and export behavior](docs/STRATA.md)
+- [Desktop architecture, render settings, platform policy, and release verification](docs/DESKTOP.md)
+- [Technical teaching case study](docs/interview/README.md)
 
-## Rendering credits
-
-Progressive rendering uses [three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer). Studio lighting uses **Studio Small 08** by Sergej Majboroda from [Poly Haven](https://polyhaven.com/a/studio_small_08), provided under CC0.
-
-The optional desktop Pro path uses Blender Cycles and Blender's OpenImageDenoise integration through a separate locally installed Blender 5.2 LTS (or newer) process.
+Final rendering uses [three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer). Studio lighting uses **Studio Small 08** by Sergej Majboroda from [Poly Haven](https://polyhaven.com/a/studio_small_08), provided under CC0. Optional Pro rendering uses Blender Cycles and its OpenImageDenoise integration.

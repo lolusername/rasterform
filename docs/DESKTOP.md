@@ -175,7 +175,9 @@ The committed `electron/assets/Rasterform.icns` is generated directly from `publ
 npm --prefix electron run icon:generate
 ```
 
-These outputs are development packages, not distributable releases. Once signing credentials are configured, add a single release orchestrator so Developer ID signing, notarization, stapling, and verification cannot be accidentally reordered. The intended command contract is:
+These outputs are ad-hoc-signed development packages. The [downloadable preview](https://github.com/lolusername/rasterform/releases/tag/v1.0.0-preview.20261011) publishes the tested Apple-silicon package with this status stated in the README and release notes, plus an archive checksum and build provenance. It is not a Developer ID-signed or notarized release. The preview's minimum target is macOS 12; its recorded runtime checks cover the actual build host, not every supported macOS version.
+
+Once signing credentials are configured, add a single production release orchestrator so Developer ID signing, notarization, stapling, and verification cannot be accidentally reordered. The intended command contract is:
 
 ```bash
 npm run desktop:release:mac

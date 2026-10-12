@@ -1,282 +1,103 @@
 # Installing and running Rasterform on macOS
 
-This guide assumes no experience with Electron or macOS app development.
+You can use the downloadable app without installing developer tools or building the source.
 
-## Is Rasterform installed right now?
+## Download and try it
 
-**Yes.** The known-good stable checkpoint is installed at:
+1. [Download Rasterform for Apple silicon Macs](https://github.com/lolusername/rasterform/releases/download/v1.0.0-preview.20261011/Rasterform-macOS-arm64.zip).
+2. Double-click the ZIP to extract **Rasterform.app**.
+3. Double-click the app to try it from that folder. To install it, drag the complete **Rasterform.app** bundle into **Applications**, then open it there.
 
-```text
-/Applications/Rasterform.app
-```
+The download is for **Apple silicon Macs (M1 or newer), macOS 12 Monterey or later**. It includes the Electron runtime; Node.js, npm, and the repository are not needed to run it. This release does not include Intel, Windows, or Linux binaries. [Release notes](https://github.com/lolusername/rasterform/releases/tag/v1.0.0-preview.20261011) list the tested platform and build details.
 
-The optional Pro renderer candidate is a different app named **Rasterform Renderer Lab**. Its separate installation path is:
+You can also keep the app in `~/Applications` for your user account only. A `.app` is a bundle that Finder displays as one item; move or copy the whole bundle.
 
-```text
-/Applications/Rasterform Renderer Lab.app
-```
+## First launch of the preview
 
-Installing or removing the Lab app does not replace the stable app. Building either app also does not install it automatically. After a build, the native Apple-silicon bundles are created at:
+This preview is ad-hoc signed for integrity, but is not Developer ID-signed or notarized by Apple. macOS may block a downloaded copy on first launch.
 
-```text
-electron/out/Rasterform-darwin-arm64/Rasterform.app
-electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app
-```
+After trying to open it, if you trust the download from this repository:
 
-Either app can instead be installed for only the current user under `~/Applications`.
+1. Open **System Settings → Privacy & Security**.
+2. Find the Rasterform message and click **Open Anyway**, then authenticate if prompted.
+3. Confirm **Open** in the following dialog.
 
-Check both installations at any time with:
+See [Apple's first-launch instructions](https://support.apple.com/en-us/102445). Do not globally disable Gatekeeper. If macOS reports that the app is damaged, download a fresh copy and check its checksum rather than removing security attributes.
 
-```bash
-test -d "/Applications/Rasterform.app" && echo "Stable Rasterform is installed"
-test -d "/Applications/Rasterform Renderer Lab.app" && echo "Renderer Lab is installed"
-```
-
-## Build the `.app` from source
-
-Yes—Rasterform has an Electron packaging command that creates a real macOS `.app` bundle.
-
-Open Terminal, move into the project, and run:
+For an optional integrity check, download `SHA256SUMS.txt` from the same release into the folder containing the ZIP, then run:
 
 ```bash
-cd /Users/atiliobarreda/Desktop/software/personal/atil.io/portfolio-labs/rasterform
-npm run desktop:package:arm64
+shasum -a 256 -c SHA256SUMS.txt
 ```
 
-That is the recommended command for this Apple-silicon Mac. It builds the shared web application, type-checks the desktop code, builds the hidden Final renderer, assembles Electron, applies the security hardening, verifies the package, and creates:
+The checksum detects changes to the archive; it does not supply Apple notarization or a Developer ID identity.
 
-```text
-electron/out/Rasterform-darwin-arm64/Rasterform.app
-```
+## Optional Blender installation
 
-The packaging command **builds** the app but does not **install** it. After it finishes, copy the resulting `Rasterform.app` into `/Applications` using the Finder steps below.
+Rasterform's editing, High/Final PNG renders, Living Loop exports, GLB, STL, and complete project files work without Blender.
 
-To build the current Pro renderer candidate without replacing the stable app, run:
+**Cycles Pro** and **Blender project (.blend)** export require **Blender 5.2 LTS or newer, minimum 5.2.0**. Blender is not included in the Rasterform ZIP.
+
+1. Download the Apple silicon build from the [official Blender 5.2 LTS release page](https://www.blender.org/releases/5-2/).
+2. Open Blender's disk image and drag **Blender.app** into **Applications**.
+3. In Rasterform, use the Blender readiness recheck if it was already running when you installed Blender.
+
+Rasterform probes the version before running a job. It also recognizes supported version-named Blender apps in Applications and common Homebrew command-line locations.
+
+Each job uses a new background Blender process and private temporary files. It does not attach to an already-open Blender window or change that window's project. Concurrent heavy rendering shares GPU, memory, and CPU resources.
+
+## Save work and update the app
+
+Use **Save project** to save a complete `.rasterform` design. Local session recovery can help after a reload, but a project file is the portable copy of your work. Keep exports in your chosen folders.
+
+To update:
+
+1. Save your current project and quit Rasterform with **Command–Q**.
+2. Download and unzip the newer preview.
+3. Drag **Rasterform.app** into **Applications** and choose **Replace** if Finder asks.
+4. Open the replacement app.
+
+This preview does not auto-update. Replacing the bundle normally preserves local preferences and recovery; saved projects and exports remain in their selected folders.
+
+## Build from source
+
+On macOS, with **Node.js 22.12 or newer** installed:
 
 ```bash
-npm run desktop:package:lab:arm64
-```
-
-That command creates a separate arm64 bundle with bundle ID `io.atil.rasterform.rendererlab`:
-
-```text
-electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app
-```
-
-The current source and Lab candidate use 6,144 samples for diffuse/matte Final rendering and 8,192 samples for specular (glossy or metallic) Final rendering. The sample increase does not remove options or reduce resolution, bounces, MIS, tiling, or denoising quality.
-
-### First build on a fresh checkout
-
-Install the locked project dependencies once before packaging:
-
-```bash
-cd /Users/atiliobarreda/Desktop/software/personal/atil.io/portfolio-labs/rasterform
+git clone https://github.com/lolusername/rasterform.git
+cd rasterform
 npm ci
 npm --prefix electron ci
 npm run desktop:package:arm64
-```
-
-Rasterform's desktop toolchain requires Node.js 22.12 or newer. Check with:
-
-```bash
-node --version
-```
-
-### Blender prerequisite for Cycles Pro and editable projects
-
-Cycles Pro and editable `.blend` project preparation are optional and desktop-only. They require a separate **Blender 5.2 LTS or newer** installation; Blender is not included inside either Rasterform app. Put `Blender.app` in `/Applications` as with any normal Mac app. Rasterform also recognizes supported version-named Blender apps there and common Homebrew command-line locations. Portable GLB remains available in the desktop app without Blender installed. The web edition exports images only, up to 2K, with optional transparency; the desktop app keeps the larger image sizes and 3D/project formats.
-
-You may keep Blender open on another project while Rasterform renders. Rasterform launches a new isolated background process and does not open, save, close, or otherwise touch the `.blend` file in Blender's UI. The two processes still share the Mac's GPU, unified memory, CPU, and cooling, so running two heavy renders together can make both slower or use substantial memory.
-
-### What the similar commands do
-
-| Command | Result |
-| --- | --- |
-| `npm run desktop:dev` | Builds and launches a temporary development app. It is for coding, not installation. |
-| `npm run desktop:build` | Builds and stages the desktop files, but does not create a packaged `.app`. |
-| `npm run desktop:package:arm64` | Creates the native Apple-silicon `.app`. Use this on this Mac. |
-| `npm run desktop:package:lab:arm64` | Creates the separate native Apple-silicon **Rasterform Renderer Lab.app** without overwriting the stable package. |
-| `npm run desktop:package` | Detects the physical Mac architecture and packages its native version. On this Apple-silicon Mac it should also produce arm64. |
-| `npm run desktop:package:x64` | Creates an Intel build for an actual Intel Mac. Do not use this as the normal build on an M-series Mac. |
-| `npm run desktop:package:universal` | Creates a larger bundle containing both Intel and Apple-silicon slices. It is not needed for this Mac. |
-| `npm run desktop:smoke:packaged:lab:arm64` | Rebuilds and launches the actual packaged Lab app in self-test mode, then closes it. |
-
-To check an already-built stable package without rebuilding it again:
-
-```bash
 npm --prefix electron run smoke:packaged:existing:arm64
 ```
 
-This launches the packaged app in a self-test mode and closes it automatically. It is a verification command, not the way to use Rasterform normally.
-
-## What “installing” a Mac app means
-
-Most Mac apps are `.app` bundles. A bundle looks like one file in Finder, but it is really a folder containing the program, icon, frameworks, and resources it needs.
-
-For this kind of app, installation normally means copying the complete `.app` bundle into `Applications`. There is no separate setup wizard, registry, or `npm install` step. A packaged Electron app contains its own Electron/Chromium runtime; Node.js and the source code are needed to develop or rebuild it, but not to use the packaged app.
-
-Rasterform can run from its build folder without being installed. Moving it to `Applications` simply puts it in the normal permanent location so Finder, Spotlight, Launchpad, and the Dock can find it easily.
-
-## Install Rasterform with Finder — recommended
-
-1. Open Finder.
-2. Press **Command–Shift–G** to open **Go to Folder**.
-3. Paste this path and press Return:
-
-   ```text
-   /Users/atiliobarreda/Desktop/software/personal/atil.io/portfolio-labs/rasterform/electron/out/Rasterform-darwin-arm64
-   ```
-
-4. A file named **Rasterform.app** will appear.
-5. Open a second Finder window and choose **Applications** in the sidebar.
-6. Drag **Rasterform.app** into **Applications**. macOS may ask for your password or Touch ID.
-7. Open **Applications**, then double-click **Rasterform**.
-8. Optional: while Rasterform is running, Control-click its Dock icon and choose **Options → Keep in Dock**.
-
-The current primary build is native Apple silicon (`arm64`). It is the correct build for an M-series Mac and does not contain an Intel executable slice.
-
-## Install Renderer Lab beside stable Rasterform
-
-First run `npm run desktop:package:lab:arm64`. In Finder, press **Command–Shift–G** and open:
+The Apple silicon app is created at:
 
 ```text
-/Users/atiliobarreda/Desktop/software/personal/atil.io/portfolio-labs/rasterform/electron/out-lab/Rasterform Renderer Lab-darwin-arm64
+electron/out/Rasterform-darwin-arm64/Rasterform.app
 ```
 
-Drag **Rasterform Renderer Lab.app** into **Applications**. Its name and bundle ID are different from stable Rasterform, so both appear as independent apps. Do not rename the Lab bundle to `Rasterform.app` and do not copy it over `/Applications/Rasterform.app`.
+The package command builds the web studio and native code, assembles Electron, hardens the package, and verifies its architecture and signature integrity. The smoke command then launches that packaged app for a short self-test and closes it. Neither command installs the app. Open the bundle from Finder or copy it into Applications yourself.
 
-The equivalent Terminal commands, run from the project directory, are:
+### Other development commands
 
-```bash
-ditto "electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app" "/Applications/Rasterform Renderer Lab.app"
-open "/Applications/Rasterform Renderer Lab.app"
-```
-
-## Run it without installing it
-
-Double-click `Rasterform.app` in the build folder, or run this from Terminal while the project directory is open:
-
-```bash
-open electron/out/Rasterform-darwin-arm64/Rasterform.app
-open "electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app"
-```
-
-Running from the build folder is useful for testing. Installing it in `Applications` is better for normal use.
-
-## Install it from Terminal — optional
-
-From the Rasterform project directory:
-
-```bash
-ditto electron/out/Rasterform-darwin-arm64/Rasterform.app /Applications/Rasterform.app
-open /Applications/Rasterform.app
-```
-
-If an older Rasterform is already installed, quit it first and use Finder to replace the old app with the new one. Finder makes the replacement explicit and avoids accidentally merging two app bundles.
-
-Once installed, either open Rasterform from Finder/Spotlight or use:
-
-```bash
-open -a Rasterform
-open -a "Rasterform Renderer Lab"
-```
-
-## The first-launch security warning
-
-This local development build is ad-hoc signed for integrity, but it is not yet signed with an Apple Developer ID or notarized by Apple. Because of that, Gatekeeper may show a warning the first time it opens.
-
-For a stable or Lab build you created and trust:
-
-1. Control-click **Rasterform.app** or **Rasterform Renderer Lab.app** in Finder and choose **Open**.
-2. Click **Open** in the confirmation dialog if macOS offers it.
-3. If it is still blocked, open **System Settings → Privacy & Security**.
-4. Find the message about Rasterform and choose **Open Anyway**, then authenticate.
-
-Do not globally disable Gatekeeper. If macOS says an app is *damaged*, stop and rebuild or obtain a fresh copy instead of blindly removing security attributes. A normal public release should be Developer ID signed, notarized, and stapled so users do not need these development-build steps.
-
-## Update Rasterform
-
-This development build does not auto-update.
-
-1. Quit Rasterform completely with **Rasterform → Quit Rasterform** or **Command–Q**.
-2. Build or obtain the new `Rasterform.app`.
-3. Drag it into **Applications**.
-4. Choose **Replace** when Finder asks.
-5. Launch Rasterform again.
-
-Replacing the app does not normally erase its preferences or exported files. Exports remain wherever they were saved.
-
-Update the Lab app the same way, but replace only `/Applications/Rasterform Renderer Lab.app`. Its separate name prevents a candidate build from overwriting stable Rasterform.
-
-## Recover the known-good pre-Pro checkpoint
-
-The immutable source recovery tag is:
-
-```text
-checkpoint/pre-pro-renderer-2026-08-26
-```
-
-It points to the saved state immediately before the Cycles Pro renderer experiment. Do not reset the current development branch or discard uncommitted work. To inspect or rebuild the checkpoint independently, create a separate Git worktree:
-
-```bash
-git worktree add ../rasterform-pre-pro checkpoint/pre-pro-renderer-2026-08-26
-cd ../rasterform-pre-pro
-npm ci
-npm --prefix electron ci
-npm run desktop:package:arm64
-```
-
-The already installed `/Applications/Rasterform.app` remains the stable checkpoint while the experiment is built and installed only as **Rasterform Renderer Lab.app**.
-
-## Uninstall Rasterform
-
-1. Quit Rasterform.
-2. Open **Applications** in Finder.
-3. Drag **Rasterform.app** to the Trash.
-4. Empty the Trash whenever convenient.
-
-That removes the application. To perform a complete reset, optional settings may also exist under:
-
-```text
-~/Library/Application Support/Rasterform
-~/Library/Preferences/io.atil.rasterform.plist
-~/Library/Caches/Rasterform
-```
-
-Those files are small. Leave them alone if you may reinstall and want Rasterform to remember its last export location.
-
-To remove only the experiment, quit **Rasterform Renderer Lab** and drag `/Applications/Rasterform Renderer Lab.app` to the Trash. That does not remove `/Applications/Rasterform.app`.
-
-## How Mac apps are commonly distributed
-
-| Format | What to do |
+| Command | Result |
 | --- | --- |
-| Mac App Store | Click **Get** or the price; macOS installs and updates it automatically. |
-| `.dmg` disk image | Open the DMG, then drag the app onto the Applications shortcut shown inside it. Eject the DMG afterward. |
-| `.zip` archive | Double-click to unzip it, then drag the resulting `.app` into Applications. |
-| `.pkg` installer | Double-click it and follow the installer. PKGs are used when software needs files outside its app bundle. |
-| Plain `.app` bundle | Drag the whole app into Applications, as with this Rasterform build. |
+| `npm run dev` | Runs the browser studio through Vite. |
+| `npm run desktop:dev` | Builds and launches the development desktop app. |
+| `npm run desktop:build` | Builds and stages native runtime files without packaging an app. |
+| `npm run desktop:package:arm64` | Creates the Apple silicon `.app`. |
+| `npm run desktop:package:x64` | Creates an Intel compatibility build; test on an actual Intel Mac. |
+| `npm run desktop:package:universal` | Creates a larger bundle containing both architectures. |
+| `npm run desktop:package:lab:arm64` | Creates a separate **Rasterform Renderer Lab.app** for experiments. |
 
-Only install software from a source you trust. Publicly distributed apps should normally be signed and notarized. Check that a download is intended for your Mac:
+The normal `desktop:package` command selects the physical Mac's native architecture. Intel and universal packages are explicit compatibility builds, not the tested downloadable preview.
 
-- **Apple silicon / arm64:** M1, M2, M3, M4, and later Apple chips.
-- **Intel / x64:** older Intel-based Macs.
-- **Universal:** contains both architectures and is larger.
+Renderer Lab has the separate bundle ID `io.atil.rasterform.rendererlab` and is built at `electron/out-lab/Rasterform Renderer Lab-darwin-arm64/Rasterform Renderer Lab.app`. Keep its name and install it alongside Rasterform when needed. Do not rename it to `Rasterform.app` or merge the two bundles. The source tag `checkpoint/pre-pro-renderer-2026-08-26` preserves the earlier pre-Pro implementation for maintainers.
 
-To see which Mac you have, choose **Apple menu → About This Mac**. A line labeled **Chip** means Apple silicon; a line labeled **Processor** usually identifies an Intel Mac.
+For renderer settings, process isolation, supported-platform policy, and the future Developer ID/notarization workflow, see [Rasterform Desktop](DESKTOP.md).
 
-## Electron in plain language
+## Remove the app
 
-Electron packages a web interface together with Chromium and a small native main process as a normal desktop app. Rasterform's Vue/Three.js studio is shared with the web edition, while Electron adds Mac-specific behavior such as native windows, Save dialogs, preventing sleep during long exports, Recent Documents, notifications, a separate Final-render process, and the optional Blender Cycles Pro bridge.
-
-You do not need to know Electron to run the packaged app. Treat `Rasterform.app` like any other Mac application.
-
-For developers, the source app and the installed app are different things:
-
-- `npm run dev` starts the browser development server.
-- `npm run desktop:dev` builds and launches a temporary Electron development copy.
-- `npm run desktop:package:arm64` creates the installable Apple-silicon `.app`.
-- `npm run desktop:package:lab:arm64` creates the separate Apple-silicon renderer experiment.
-- Copying that `.app` to Applications installs it.
-
-The full desktop architecture, signing, security, and release checklist is in [DESKTOP.md](DESKTOP.md).
+Quit Rasterform, then move its `.app` bundle to the Trash. Keep any `.rasterform` projects and exports you want. Removing the app does not remove those files or its local recovery/preferences.
