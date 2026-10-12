@@ -57,6 +57,8 @@ Undo/Redo, **Keep version**, temporary comparisons, and channel inspection make 
 
 **High** uses 2× rendering. **Final** is the built-in path tracer, with 6,144 samples for diffuse/matte work and 8,192 for glossy/metallic work. **Cycles Pro** uses the optional Blender renderer. On desktop, Final runs in a separate renderer process so the studio stays responsive; browser Final may pause editing while it renders. Full-quality stills can take several minutes.
 
+**FYI:** Blender/Cycles Pro has seemed faster than the built-in Final renderer in use so far. Render times vary with the scene, render settings, and hardware.
+
 Loops are lossless RGBA PNG sequences with a timing manifest, ready to assemble in a video or compositing tool. They use High quality; Final and Cycles Pro are still-render paths. GLB, STL, and `.blend` bake the visible motion phase rather than exporting animated geometry. Camera and studio lights are not included in model exports. Strata preserves separately named layers in GLB and `.blend`; STL contains separate shells rather than a fused fabrication-ready union.
 
 Image model exports embed the original-resolution bitmap as an **8-bit sRGB PNG**, with neutral sides and back. They preserve source dimensions, not arbitrary high-bit-depth or wide-gamut encoding. STL export requires watertight topology. Text fonts must be available or explicitly embedded; check the font license before distributing projects with embedded font bytes.
