@@ -79,11 +79,14 @@ For real native project-file checks after building the desktop staging directory
 ```sh
 npm run desktop:build
 node scripts/verify-desktop-projects.mjs
+node scripts/verify-desktop-exports.mjs
 node electron/scripts/smoke-texture-exports.mjs
 node scripts/verify-desktop-final.mjs
 ```
 
 The native project harness uses the actual staged main process, preload, and UI with an isolated profile. Only dialog destinations and Finder reveal are substituted with temporary fixtures; it never opens or overwrites the user's projects. The texture smoke produces actual image exports and checks source-textured model handoff through Blender.
+
+The native export check decodes saved Photo and Wireframe GLBs, compares the complete edge set, and verifies a saved Expand ZIP's frame count, CRCs and success message. Its artifacts use a temporary directory and an isolated copy of the staged app.
 
 The Final check runs the real 2K transparent render at its normal sample target, edits the current design after capture, and inspects the completed PNG. It deliberately has no overall rendering deadline or quality override. Allow several minutes. A temporary artifact directory contains the result and job-state screenshots. Native QA scripts also use Playwright; set `PLAYWRIGHT_MODULE` when it is not installed locally.
 
