@@ -2,7 +2,7 @@ Development plan for Rasterform · November 12, 2026 · baseline `72c153f`
 
 Use functional programming to make each calculation understandable from its inputs, and use category theory to state what must agree when data crosses representations. Apply those ideas while repairing the six confirmed defects. Judge the result by whether another developer can safely make the next change. The existing Vue, TypeScript, Three.js and Electron architecture already supports this approach.
 
-This is proposed implementation work. The affected source definitions still match the November 10 audit. That audit passed 442 tests while finding failures in builds, exported files and editor behavior. Reproduction details and research context are in the [maintainability review](MAINTAINABILITY.md).
+Implemented on `change/functional-maintenance` on November 12, 2026. The six changes below have passed the regression checks recorded at the end of this plan. The original audit passed 442 tests while finding failures in builds, exported files and editor behavior. Reproduction details and research context are in the [maintainability review](MAINTAINABILITY.md).
 
 Repeated agent edits can accumulate redundant code even with quality instructions. Later work also becomes harder when earlier changes leave broken behavior behind. These findings support preserving earlier behavior and evaluating a follow-up change as separate acceptance criteria. The plan below is an engineering recommendation drawn from those findings. [SlopCodeBench](https://arxiv.org/abs/2603.24755v2) · [SWE-Maintain](https://arxiv.org/abs/2610.14768)
 
@@ -50,3 +50,22 @@ Items 2–6 depend on restored build checks. The ordering groups repairs by thei
 **Evaluate one follow-up before expanding the process.** After item 2, use a disposable branch to add a temporary motion name through validation, project persistence and export recognition. A fresh reviewer should be able to locate the shared definition, explain the native checks and complete the extension using repository context. Record completion and review time, missed consumers, regressions and model cost. Then repeat this observation on the next actual feature. Use those results to decide which harness instructions and checks earn continued maintenance.
 
 For each future change, give the coding agent the requested behavior, its current owner, the relevant existing test command and one observable acceptance condition. Review the diff for duplicated rules, unexplained layers and weakened failure handling. Ask the handoff to identify the next place a developer would edit and the evidence that the existing behavior still works.
+
+**Implementation results · November 12, 2026.** The branch starts at `c0f189f`. Each repair has its own commit and regression coverage.
+
+| Change | Commit | Observed result |
+| --- | --- | --- |
+| Build declarations | `5be1f1d` | Fresh root and Electron installs pass the web build and desktop type check. |
+| Shared motion contract | `ede9001` | One tuple supplies the type, validators, UI choices and native recognition. All five behaviors reopen in version-1 projects. Expand saves a valid 12-frame ZIP and reports success in Electron. |
+| Linear Photo colors | `6e2ec76` | Saved mid-gray GLB attributes equal approximately `0.2158605`; interpolation happens after decoding sRGB. |
+| Wireframe edges | `735f527` | Three.js `WireframeGeometry` supplies the export adapter. The native relief GLB preserves all 23,408 expected edges without collapsed segments. |
+| Preset document transformation | `455af86` | `withChannelPreset` preserves inputs and unrelated authored state. Real editor orbit, zoom, preset Undo/Redo and explicit Fit checks pass. |
+| Vertex topology | `7ac73f9` | Pinched and branching vertices fail readiness; valid slivers, open surfaces and separate closed shells retain their expected classifications. |
+
+The complete suite passes **464 tests in 57 files**, including Blender integration. The full desktop build/stage succeeds. Four browser control checks and five comparison groups pass. Native project QA covers Save/Open, Undo/Redo, camera and source-byte preservation, cancelled dialogs, malformed imports, recovery and resized export views. Commit `b7b9e49` adds the repeatable native GLB/Expand verification command documented in [editor verification](EDITOR_UX.md#verification). These checks exercised local web and staged native builds. Release packaging and deployment were outside this experiment.
+
+Photo projects retain their authored data and reopen with corrected midtones. Wireframe output, native Expand status and pinched-mesh eligibility intentionally change to correct the audited defects. The existing large-chunk build warning remains. No runtime dependency or production module was added.
+
+**Follow-up extension probe.** Disposable copies compared `5be1f1d` with `b7b9e49`. Adding `probe-motion` to the old type first caused a compiler error against the separate tuple. Updating both let the type check pass, but project persistence and native recognition still rejected the value. In the new copy, one tuple edit reached both consumers. The compiler required its UI label; after adding that label, type checking and 43 targeted project/native tests passed, including the new value. Four separate allowed-value definitions became one, with a compiler-checked label map. The temporary value was confined to the disposable copies. This measured contract propagation, without implementing new animation mathematics. Human comprehension time, review time and model cost remain unmeasured.
+
+The vertex check added about 3–6 ms in a local warmed Node comparison using five alternating samples. Median inspection time changed from 85.1 to 88.3 ms for a 131,040-triangle solid and from 77.1 to 83.5 ms for a 129,608-triangle Strata fixture. These are local measurements. The validator checks connectivity, edge/vertex manifoldness and face degeneracy; geometric self-intersections remain outside its scope.
