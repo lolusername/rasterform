@@ -2,6 +2,8 @@
 
 Rasterform engineering review · November 10, 2026 · source revision `5e9564a`
 
+The [development plan](DEVELOPMENT_PLAN.md) turns these findings into ordered changes and acceptance tests.
+
 Rasterform's renderer knows about five animation behaviors. Its desktop download handler knows about four. Both pass their own tests, yet a completed export tells the artist to run it again. The extra maintenance work comes from having to discover every copy of one decision. On the next change, ask a second person to find that decision, predict what happens on failure, and verify the result where the artist encounters it.
 
 ## Six reproducible findings in Rasterform
