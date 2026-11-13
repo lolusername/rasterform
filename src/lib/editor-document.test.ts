@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { editorDocumentFixture } from '../../tests/fixtures/editor-document'
 import {
   cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, EditorProjectError,
-  parseEditorProject, serializeEditorProject, validateEditorDocument,
+  parseEditorProject, serializeEditorProject, validateEditorDocument, withChannelPreset,
 } from './editor-document'
 import { composeChannelStack } from './channel-stack'
 import { processScalarField } from './filters'
@@ -10,6 +10,23 @@ import { buildMesh } from './mesh'
 import { LIVING_FORM_BEHAVIORS } from '../types'
 
 describe('authored editor documents', () => {
+  it('applies only preset channels and Surface values without changing the input or sharing mutable settings', () => {
+    const original = editorDocumentFixture()
+    const before = structuredClone(original)
+    const channels = [{ ...original.channels[0]!, id: 'preset-channel', amount: 0.58 }]
+    const field = { ...original.field, blur: 0, contrast: 18 }
+    const candidate = withChannelPreset(original, channels, field)
+    expect(candidate).toEqual({ ...original, channels, selectedChannelId: 'preset-channel', field })
+    expect(original).toEqual(before)
+    expect(candidate.image.data).toBe(original.image.data)
+    candidate.channels[0]!.amount = 1
+    candidate.field.contrast = 30
+    candidate.camera!.position[0] = 99
+    expect(channels[0]!.amount).toBe(0.58)
+    expect(field.contrast).toBe(18)
+    expect(original).toEqual(before)
+  })
+
   it.each(LIVING_FORM_BEHAVIORS)('reopens version-1 projects using %s in either workspace', async (behavior) => {
     const original = editorDocumentFixture()
     original.imageLivingForm.behavior = behavior

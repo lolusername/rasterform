@@ -113,6 +113,51 @@ try {
   await enterNumber('Depth', -2, 0.02)
   checks++
   console.log('PASS: decimal-step and bounded numeric controls agree with their sliders')
+
+  await enterNumber('Mesh detail', 20, 20)
+  await page.getByRole('group', { name: 'Geometry mode' }).getByRole('button', { name: /Strata/ }).click()
+  await page.getByRole('button', { name: 'Fit', exact: true }).click()
+  const strataBounds = await page.locator('.three-preview').boundingBox()
+  await page.mouse.move(strataBounds.x + strataBounds.width / 2, strataBounds.y + strataBounds.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(strataBounds.x + strataBounds.width * 0.6, strataBounds.y + strataBounds.height * 0.6, { steps: 6 })
+  await page.mouse.up()
+  await page.mouse.wheel(0, -240)
+  await page.waitForTimeout(600)
+  const presetState = () => page.locator('.editor-app').evaluate(host => {
+    const app = host.__vueParentComponent.setupState
+    const document = app.captureDocument()
+    return { channels: document.channels, field: document.field, undo: app.editorHistory.undoCount }
+  })
+  const beforePreset = await presetState()
+  const presetButton = page.getByRole('button', { name: 'Ink emboss', exact: true })
+  // Capture at click dispatch because OrbitControls can still be damping after mouse release.
+  await presetButton.evaluate(button => button.addEventListener('click', () => {
+    const app = document.querySelector('.editor-app').__vueParentComponent.setupState
+    window.__presetCamera = app.captureDocument().camera
+  }, { capture: true, once: true }))
+  await presetButton.click()
+  const authoredCamera = await page.evaluate(() => window.__presetCamera)
+  await page.waitForTimeout(400)
+  assertCameraClose(await cameraSnapshot(), authoredCamera, 'Preset preserves authored camera')
+  const afterPreset = await presetState()
+  assert.equal(afterPreset.field.contrast, 18)
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  assertCameraClose(await cameraSnapshot(), authoredCamera, 'Preset Undo camera')
+  const undonePreset = await presetState()
+  assert.equal(undonePreset.undo, afterPreset.undo - 1, 'Preset reverts in one history action')
+  assert.deepEqual(undonePreset.channels, beforePreset.channels)
+  assert.deepEqual(undonePreset.field, beforePreset.field)
+  await page.getByRole('button', { name: 'Redo', exact: true }).click()
+  assertCameraClose(await cameraSnapshot(), authoredCamera, 'Preset Redo camera')
+  const redonePreset = await presetState()
+  assert.deepEqual(redonePreset.channels, afterPreset.channels)
+  assert.deepEqual(redonePreset.field, afterPreset.field)
+  await page.getByRole('button', { name: 'Fit', exact: true }).click()
+  const fittedCamera = await cameraSnapshot()
+  assert.ok(fittedCamera.position.some((value, index) => Math.abs(value - authoredCamera.position[index]) > 0.01), 'Explicit Fit still reframes the model')
+  checks++
+  console.log('PASS: Strata preset preserves orbit and zoom through one Undo/Redo action, and explicit Fit works')
   assert.deepEqual(errors, [], 'Controls must not throw browser errors')
   console.log(`PASS: ${checks} editor-control browser checks`)
 } finally {

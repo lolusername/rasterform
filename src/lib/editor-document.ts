@@ -76,6 +76,19 @@ export function cloneEditorDocument(value: EditorDocument): EditorDocument {
   }
 }
 
+/** Replace a preset's authored fields using already allocated channel IDs. */
+export function withChannelPreset(
+  document: EditorDocument,
+  channels: readonly ChannelLayer[],
+  field: FieldSettings,
+): EditorDocument {
+  const result = cloneEditorDocument(document)
+  result.channels = channels.map(channel => ({ ...channel }))
+  result.selectedChannelId = channels[0]?.id ?? ''
+  result.field = { ...field }
+  return result
+}
+
 /** Cheap equality for documents sharing immutable source assets. */
 export function editorDocumentsEqual(left: EditorDocument, right: EditorDocument): boolean {
   if (left.image.data !== right.image.data || left.image.sourceBlob !== right.image.sourceBlob

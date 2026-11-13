@@ -4,7 +4,7 @@ import ThreePreview from './components/ThreePreview.vue'
 import NumberControl from './components/NumberControl.vue'
 import ChannelInspection from './components/ChannelInspection.vue'
 import FieldVariations from './components/FieldVariations.vue'
-import { cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, parseEditorProject, serializeEditorProject, type EditorDocument } from './lib/editor-document'
+import { cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, parseEditorProject, serializeEditorProject, withChannelPreset, type EditorDocument } from './lib/editor-document'
 import { createFieldComparison } from './lib/editor-comparison'
 import type { FieldVariationKey } from './lib/field-variations'
 import { createEditorHistory } from './lib/editor-history'
@@ -1714,14 +1714,29 @@ function moveChannel(index: number, direction: -1 | 1) {
   status.value = 'Channel order changed; the first enabled channel remains the base.'
 }
 
-function applyPreset(preset: StackPreset) {
-  channelLayers.splice(
-    0,
-    channelLayers.length,
-    ...preset.layers.map((layer) => createChannelLayer(layer.source, layer)),
+async function applyPreset(preset: StackPreset) {
+  if (editorBusy.value || comparison.value || fontBusy.value) return
+  await endEditorGesture()
+  const current = captureDocument()
+  const candidate = withChannelPreset(
+    current,
+    preset.layers.map(layer => createChannelLayer(layer.source, layer)),
+    preset.field,
   )
-  selectedChannelId.value = channelLayers[0]?.id ?? ''
-  Object.assign(fieldSettings, preset.field)
+  // Settle any camera gesture before grouping the preset and its mesh rebuild.
+  editorHistory.record(current, 'Adjust camera')
+  editorHistory.beginGesture(`Apply ${preset.label}`)
+  try {
+    channelLayers.splice(0, channelLayers.length, ...candidate.channels)
+    selectedChannelId.value = candidate.selectedChannelId
+    Object.assign(fieldSettings, candidate.field)
+    await nextTick()
+    // Strata may auto-fit during rebuilding. Restore the authored view before paint.
+    if (candidate.camera) threePreview.value?.setCameraSnapshot(candidate.camera)
+    recordEditorChange()
+  } finally {
+    editorHistory.endGesture()
+  }
   status.value = `${preset.label} applied to channels and Surface only · geometry, material, camera and render settings kept`
 }
 
