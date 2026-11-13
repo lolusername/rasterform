@@ -1,6 +1,7 @@
-import { clamp01 } from './channels'
+import { clamp01, srgbToLinear } from './channels'
 import type { PixelImage, ScalarField } from '../types'
 
+/** Decode sRGB pixels before bilinear interpolation into linear mesh colors. */
 export function sampleColor(image: PixelImage, u: number, v: number): [number, number, number] {
   const x = clamp01(u) * Math.max(0, image.width - 1)
   const y = clamp01(v) * Math.max(0, image.height - 1)
@@ -11,7 +12,7 @@ export function sampleColor(image: PixelImage, u: number, v: number): [number, n
   const tx = x - x0
   const ty = y - y0
   const channel = (pixelX: number, pixelY: number, offset: number) =>
-    (image.data[(pixelY * image.width + pixelX) * 4 + offset] ?? 0) / 255
+    srgbToLinear((image.data[(pixelY * image.width + pixelX) * 4 + offset] ?? 0) / 255)
   return [0, 1, 2].map((offset) => {
     const top = channel(x0, y0, offset) * (1 - tx) + channel(x1, y0, offset) * tx
     const bottom = channel(x0, y1, offset) * (1 - tx) + channel(x1, y1, offset) * tx

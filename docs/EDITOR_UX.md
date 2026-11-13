@@ -36,6 +36,8 @@ Numeric controls accept typed values and expose individual resets where a meanin
 
 Presets replace Channels and Surface settings; they do not change the selected geometry mode, material, camera, or render quality. Blob remains optional; rough or spiky forms are not treated as errors.
 
+Photo colors use linear-light interpolation of the source image. Correcting the former sRGB vertex-color interpretation also corrects midtones when an older Photo project is reopened. Geometry and height-channel settings retain their existing interpretation.
+
 ## Long renders
 
 The render card identifies the captured version, renderer, dimensions, stage, and elapsed time. It has one cancel action. Editing a later version does not change an already captured still. Desktop Final/Cycles remain isolated; web Final may pause the studio. No faster substitute is chosen to meet an arbitrary time target.

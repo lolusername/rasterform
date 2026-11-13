@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MeshStandardMaterial } from 'three'
+import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three'
 import { buildMesh } from './mesh'
 import { buildStrataMesh, DEFAULT_STRATA_SETTINGS, isStrataData, spaceStrataMesh, splitStrataMesh } from './strata'
 import { inspectTopology } from './topology'
@@ -88,8 +88,10 @@ describe('Strata height-contour geometry', () => {
     for (let index = 0; index < mesh.heights.length; index += 1) {
       expect(mesh.uvs[index * 2]).toBeCloseTo(mesh.positions[index * 3]! / 2 + 0.5)
       expect(mesh.uvs[index * 2 + 1]).toBeCloseTo(mesh.positions[index * 3 + 1]! / 2 + 0.5)
-      expect(mesh.colors[index * 3]).toBeCloseTo(mesh.uvs[index * 2]!, 2)
-      expect(mesh.colors[index * 3 + 1]).toBeCloseTo(1 - mesh.uvs[index * 2 + 1]!, 2)
+      const expected = new Color().setRGB(mesh.uvs[index * 2]!, 1 - mesh.uvs[index * 2 + 1]!, 128 / 255, SRGBColorSpace)
+      expect(mesh.colors[index * 3]).toBeCloseTo(expected.r, 2)
+      expect(mesh.colors[index * 3 + 1]).toBeCloseTo(expected.g, 2)
+      expect(mesh.colors[index * 3 + 2]).toBeCloseTo(expected.b, 6)
     }
     const first = mesh.strata!.parts[0]!
     expect(first.vertexCount).toBeGreaterThan(8)

@@ -35,6 +35,7 @@ export interface PixelImage {
   sourceHeight: number
   /** Compressed original upload, retained for lossless full-resolution texture export. */
   sourceBlob?: Blob
+  /** sRGB color bytes followed by linear alpha for each working pixel. */
   data: Uint8ClampedArray
   name: string
 }
@@ -163,6 +164,7 @@ export interface FontChoice {
 export interface MeshData {
   positions: Float32Array
   indices: Uint32Array
+  /** Linear-sRGB vertex colors, shared by the preview, GLB and Blender adapters. */
   colors: Float32Array
   uvs: Float32Array
   heights: Float32Array

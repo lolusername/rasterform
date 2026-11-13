@@ -63,6 +63,17 @@ function readGlb(glb: ArrayBuffer) {
 }
 
 describe('portable mesh exports', () => {
+  it('encodes an sRGB mid-gray source as linear vertex color', async () => {
+    const gray: PixelImage = {
+      width: 1, height: 1, sourceWidth: 1, sourceHeight: 1, name: 'middle-gray',
+      data: new Uint8ClampedArray([128, 128, 128, 255]),
+    }
+    const relief = buildMesh(field, gray, { mode: 'plane', resolution: 8, depth: .4, midpoint: .5, baseThickness: .4 })
+    const { document, values } = readGlb(await encodeGlb(relief, 'original'))
+    const primitive = document.meshes[0]!.primitives[0]!
+    for (const value of values(primitive.attributes.COLOR_0!, 3)) expect(value).toBeCloseTo(0.2158605, 7)
+  })
+
   it('exports each contour layer as a named object with shared embedded bitmap and correct UVs', async () => {
     const strata = buildStrataMesh(field, image, 8, { layers: 5 })
     const appearance = createDefaultAppearanceSettings()

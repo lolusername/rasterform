@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildMesh } from './mesh'
 import { inspectTopology } from './topology'
+import { sampleColor } from './mesh-sampling'
 import type { MeshSettings, PixelImage, ScalarField } from '../types'
 
 const field: ScalarField = {
@@ -21,6 +22,16 @@ const image: PixelImage = {
 const base: MeshSettings = { mode: 'plane', resolution: 8, depth: 0.6, midpoint: 0.5, baseThickness: 0.3 }
 
 describe('mesh generation and topology', () => {
+  it('decodes image colors before interpolating in linear light', () => {
+    const source: PixelImage = {
+      width: 2, height: 1, sourceWidth: 2, sourceHeight: 1, name: 'black-gray',
+      data: new Uint8ClampedArray([0, 0, 0, 255, 128, 128, 128, 255]),
+    }
+    expect(sampleColor(source, 1, 0)[0]).toBeCloseTo(0.2158605, 7)
+    expect(sampleColor(source, 0.5, 0)[0]).toBeCloseTo(0.10793025, 7)
+    expect(source.data).toEqual(new Uint8ClampedArray([0, 0, 0, 255, 128, 128, 128, 255]))
+  })
+
   it('builds a deterministic open relief plane', () => {
     const mesh = buildMesh(field, image, base)
     const report = inspectTopology(mesh)
