@@ -38,6 +38,7 @@ describe('mesh generation and topology', () => {
     expect(report.vertices).toBe(81)
     expect(report.faces).toBe(128)
     expect(report.boundaryLoops).toBe(1)
+    expect(report.nonManifoldVertices).toBe(0)
     expect(report.eulerCharacteristic).toBe(1)
     expect(report.watertight).toBe(false)
   })

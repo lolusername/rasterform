@@ -182,6 +182,8 @@ export interface TopologyReport {
   boundaryLoops: number
   connectedComponents: number
   nonManifoldEdges: number
+  /** Vertices with disconnected face fans or branching incident edges. */
+  nonManifoldVertices: number
   eulerCharacteristic: number
   watertight: boolean
   degenerateFaces: number

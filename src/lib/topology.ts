@@ -39,9 +39,13 @@ function triangleAreaSquared(positions: Float32Array, a: number, b: number, c: n
 export function inspectTopology(mesh: MeshData): TopologyReport {
   const vertices = mesh.positions.length / 3
   const faces = mesh.indices.length / 3
-  const edgeIncidence = new Map<string, { count: number; a: number; b: number }>()
+  const edgeIncidence = new Map<string, { count: number; a: number; b: number; cornerA: number; cornerB: number }>()
   const used = new Set<number>()
   const unionFind = new UnionFind(vertices)
+  // Each triangle corner belongs to one vertex's face fan. Join corners across
+  // shared edges, so two shells touching only at a vertex keep separate fans.
+  const vertexFans = new UnionFind(mesh.indices.length)
+  const nonManifoldVertices = new Set<number>()
   let degenerateFaces = 0
 
   for (let offset = 0; offset < mesh.indices.length; offset += 3) {
@@ -53,13 +57,35 @@ export function inspectTopology(mesh: MeshData): TopologyReport {
       degenerateFaces += 1
     }
     for (const vertex of triangle) used.add(vertex)
-    for (const [a, b] of [[triangle[0], triangle[1]], [triangle[1], triangle[2]], [triangle[2], triangle[0]]] as const) {
+    for (let side = 0; side < 3; side += 1) {
+      const nextSide = (side + 1) % 3
+      const a = triangle[side]!
+      const b = triangle[nextSide]!
+      const cornerA = offset + (a < b ? side : nextSide)
+      const cornerB = offset + (a < b ? nextSide : side)
       const key = edgeKey(a, b)
       const existing = edgeIncidence.get(key)
-      if (existing) existing.count += 1
-      else edgeIncidence.set(key, { count: 1, a: Math.min(a, b), b: Math.max(a, b) })
+      if (existing) {
+        existing.count += 1
+        vertexFans.union(existing.cornerA, cornerA)
+        vertexFans.union(existing.cornerB, cornerB)
+        if (existing.count > 2) {
+          nonManifoldVertices.add(a)
+          nonManifoldVertices.add(b)
+        }
+      } else {
+        edgeIncidence.set(key, { count: 1, a: Math.min(a, b), b: Math.max(a, b), cornerA, cornerB })
+      }
       unionFind.union(a, b)
     }
+  }
+
+  const firstFan = new Int32Array(vertices).fill(-1)
+  for (let corner = 0; corner < mesh.indices.length; corner += 1) {
+    const vertex = mesh.indices[corner]!
+    const fan = vertexFans.find(corner)
+    if (firstFan[vertex] === -1) firstFan[vertex] = fan
+    else if (firstFan[vertex] !== fan) nonManifoldVertices.add(vertex)
   }
 
   const boundary = [...edgeIncidence.values()].filter((edge) => edge.count === 1)
@@ -94,9 +120,11 @@ export function inspectTopology(mesh: MeshData): TopologyReport {
     boundaryLoops,
     connectedComponents: componentRoots.size,
     nonManifoldEdges,
+    nonManifoldVertices: nonManifoldVertices.size,
     eulerCharacteristic: vertices - edgeIncidence.size + faces,
     watertight: boundary.length === 0
       && nonManifoldEdges === 0
+      && nonManifoldVertices.size === 0
       && degenerateFaces === 0
       && componentRoots.size > 0,
     degenerateFaces,

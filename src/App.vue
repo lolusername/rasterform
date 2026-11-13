@@ -2687,7 +2687,8 @@ async function downloadLivingFormLoop() {
               <div><span>Loops</span><strong>{{ topology.boundaryLoops }}</strong></div>
               <div><span>Components</span><strong>{{ topology.connectedComponents }}</strong></div>
               <div><span>Boundary edges</span><strong>{{ topology.boundaryEdges }}</strong></div>
-              <div><span>Non-manifold</span><strong>{{ topology.nonManifoldEdges }}</strong></div>
+              <div><span>Non-manifold edges</span><strong>{{ topology.nonManifoldEdges }}</strong></div>
+              <div><span>Non-manifold vertices</span><strong>{{ topology.nonManifoldVertices }}</strong></div>
               <div><span>Degenerate</span><strong>{{ topology.degenerateFaces }}</strong></div>
               <p>{{ isDesktop ? (topology.watertight ? 'Closed geometry, ready for STL.' : 'STL needs closed geometry. GLB and PNG remain available.') : (topology.watertight ? 'Closed geometry, ready to render.' : 'Open surface, ready to render.') }}</p>
             </div>
