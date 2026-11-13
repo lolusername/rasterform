@@ -3,6 +3,7 @@ import type {
   MeshSettings, PixelImage, StrataSettings, TextShapeSettings, ViewportBackground, WorkspaceMode,
 } from '../types'
 import { isPreviewCameraSnapshot, type PreviewCameraSnapshot } from './preview-camera'
+import { LIVING_FORM_BEHAVIORS } from '../types'
 
 /** Authored state only: no mesh caches, renderer jobs, progress, or playback clocks. */
 export interface EditorDocument {
@@ -131,7 +132,7 @@ function livingForm(value: unknown, name: string): LivingFormSettings {
   const settings = object(value, name)
   return {
     enabled: boolean(settings.enabled, `${name}.enabled`),
-    behavior: enumeration(settings.behavior, ['breathe', 'ripple', 'flow', 'melt', 'expand'], `${name}.behavior`),
+    behavior: enumeration(settings.behavior, LIVING_FORM_BEHAVIORS, `${name}.behavior`),
     amount: number(settings.amount, `${name}.amount`, 0, 1),
     frequency: number(settings.frequency, `${name}.frequency`, 0.01, 100),
     seed: number(settings.seed, `${name}.seed`, -1e9, 1e9),

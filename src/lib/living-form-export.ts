@@ -69,6 +69,7 @@ export interface LivingFormLoopExportOptions {
 }
 
 export interface LivingFormLoopExportResult {
+  fileName: string
   blob: Blob
   width: number
   height: number
@@ -245,7 +246,9 @@ export async function exportLivingFormPngSequence(
     const blob = await archive.complete({ signal: options.signal })
     throwIfAborted(options.signal)
     options.onProgress?.({ phase: 'packaging', progress: 1, frame: frameCount, frames: frameCount })
+    const background = manifest.render.background === 'transparent' ? 'transparent' : manifest.render.studioBackground
     return {
+      fileName: `rasterform-living-${manifest.livingForm.behavior}-${manifest.dimensions.width}x${manifest.dimensions.height}-${manifest.timing.fps}fps-${background}.zip`,
       blob,
       width: manifest.dimensions.width,
       height: manifest.dimensions.height,

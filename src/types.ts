@@ -23,7 +23,8 @@ export type ViewportSupersample = 1 | 2
 export type WorkspaceMode = 'image' | 'text'
 export type TextAlignment = 'left' | 'center' | 'right'
 export type FontSource = 'default' | 'detected' | 'local'
-export type LivingFormBehavior = 'breathe' | 'ripple' | 'flow' | 'melt' | 'expand'
+export const LIVING_FORM_BEHAVIORS = ['breathe', 'ripple', 'flow', 'melt', 'expand'] as const
+export type LivingFormBehavior = (typeof LIVING_FORM_BEHAVIORS)[number]
 
 export interface PixelImage {
   /** Working raster dimensions used to build the mesh. */

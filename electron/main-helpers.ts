@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { open, rename, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { inflateSync } from 'node:zlib'
+import { LIVING_FORM_BEHAVIORS } from '../src/types'
 
 const PNG_EXTENSION = '.png'
 const MAX_FILE_NAME_LENGTH = 180
@@ -11,7 +12,10 @@ export type DesktopJobState = 'prepared' | 'rendering' | 'cancelling' | 'writing
 export const DESKTOP_SMOKE_HEARTBEAT_MAX_ATTEMPTS = 3
 export const DESKTOP_SMOKE_HEARTBEAT_REQUIRED_BEATS = 2
 
-const LIVING_LOOP_DOWNLOAD_NAME = /^rasterform-living-(?:breathe|ripple|flow|melt)-\d+x\d+-(?:12|24|30)fps-(?:transparent|white|dark-gray|black)\.zip$/i
+const LIVING_LOOP_DOWNLOAD_NAME = new RegExp(
+  `^rasterform-living-(?:${LIVING_FORM_BEHAVIORS.join('|')})-\\d+x\\d+-(?:12|24|30)fps-(?:transparent|white|dark-gray|black)\\.zip$`,
+  'i',
+)
 
 export function isLivingLoopDownload(url: unknown, fileName: unknown): boolean {
   return typeof url === 'string'

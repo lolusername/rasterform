@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
+import { LIVING_FORM_BEHAVIORS } from '../src/types'
+import { exportLivingFormPngSequence } from '../src/lib/living-form-export'
 import {
   atomicPngTemporaryPath,
   DESKTOP_SMOKE_HEARTBEAT_MAX_ATTEMPTS,
@@ -116,6 +118,23 @@ function validOnePixelRgbaPng(): Uint8Array {
 }
 
 describe('desktop main helpers', () => {
+  it.each(LIVING_FORM_BEHAVIORS)('recognizes the completed %s loop archive', async (behavior) => {
+    const png = validRgbaPng(1, [new Uint8Array([128, 128, 128, 255])], [0])
+    const result = await exportLivingFormPngSequence({
+      width: 1, height: 1, fps: 12,
+      settings: { enabled: true, behavior, amount: 0.5, frequency: 1, seed: 0, duration: 1 },
+      background: 'transparent', studioBackground: 'black',
+      archiveOptions: { preferTemporaryFile: false },
+      renderFrame: async () => new Blob([new Uint8Array(png)], { type: 'image/png' }),
+    })
+    try {
+      expect(result.fileName).toBe(`rasterform-living-${behavior}-1x1-12fps-transparent.zip`)
+      expect(isLivingLoopDownload('blob:rasterform://app/export', result.fileName)).toBe(true)
+    } finally {
+      await result.cleanup()
+    }
+  })
+
   it('matches only the trusted Living Loop blob download contract', () => {
     const valid = 'rasterform-living-flow-4096x3072-30fps-transparent.zip'
     expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', valid)).toBe(true)
@@ -124,6 +143,7 @@ describe('desktop main helpers', () => {
     expect(isLivingLoopDownload('blob:rasterform://render/94a9a69d', valid)).toBe(false)
     expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', '../rasterform-living-flow-4096x3072-30fps-transparent.zip')).toBe(false)
     expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', 'rasterform.zip')).toBe(false)
+    expect(isLivingLoopDownload('blob:rasterform://app/94a9a69d', 'rasterform-living-unknown-2048x32-12fps-transparent.zip')).toBe(false)
   })
 
   it('counts only visible-renderer heartbeats inside the hidden block window', () => {

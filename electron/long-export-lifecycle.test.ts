@@ -76,6 +76,18 @@ describe('native long-export lifecycle', () => {
     expect(stop).not.toHaveBeenCalled()
   })
 
+  it('waits for the renderer when the native write finishes first, releasing once', async () => {
+    const { lifecycle, stop } = harness()
+    lifecycle.begin(7, request(), () => 'download_first')
+    lifecycle.attachDownload(7, 'download_first', vi.fn())
+    expect(lifecycle.finishDownload('download_first', 'completed')).toBe(true)
+    expect(stop).not.toHaveBeenCalled()
+    await expect(lifecycle.end(7, 'download_first', 'completed')).resolves.toBe(true)
+    expect(lifecycle.finishDownload('download_first', 'completed')).toBe(false)
+    expect(lifecycle.active).toBeNull()
+    expect(stop).toHaveBeenCalledOnce()
+  })
+
   it('fails closed when native sleep protection cannot start', () => {
     const { lifecycle, stop } = harness(false)
     expect(lifecycle.begin(7, request(), () => 'unprotected')).toMatchObject({

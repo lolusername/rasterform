@@ -80,6 +80,7 @@ import {
 } from './lib/viewport-export'
 import {
   DEFAULT_LIVING_FORM_SETTINGS,
+  LIVING_FORM_BEHAVIORS,
   animateLivingFormMesh,
   createLivingFormEngine,
   normalizeLivingFormPhase,
@@ -843,13 +844,14 @@ const clayFinishes: Array<{ value: ClayFinish; label: string }> = [
   { value: 'metallic', label: 'Metallic' },
 ]
 
-const livingFormBehaviors: Array<{ value: LivingFormBehavior; label: string; note: string }> = [
-  { value: 'breathe', label: 'Breathe', note: 'A soft whole-form inhale and release.' },
-  { value: 'ripple', label: 'Ripple', note: 'Concentric waves travel through the surface.' },
-  { value: 'flow', label: 'Flow', note: 'Multiple fields drift through one another.' },
-  { value: 'melt', label: 'Melt', note: 'The form slumps and organically reforms.' },
-  { value: 'expand', label: 'Expand', note: 'Contour layers close together and open again without bending. At full intensity the gaps close completely.' },
-]
+const livingFormLabels: Record<LivingFormBehavior, { label: string; note: string }> = {
+  breathe: { label: 'Breathe', note: 'A soft whole-form inhale and release.' },
+  ripple: { label: 'Ripple', note: 'Concentric waves travel through the surface.' },
+  flow: { label: 'Flow', note: 'Multiple fields drift through one another.' },
+  melt: { label: 'Melt', note: 'The form slumps and organically reforms.' },
+  expand: { label: 'Expand', note: 'Contour layers close together and open again without bending. At full intensity the gaps close completely.' },
+}
+const livingFormBehaviors = LIVING_FORM_BEHAVIORS.map((value) => ({ value, ...livingFormLabels[value] }))
 const availableLivingBehaviors = computed(() => livingFormBehaviors.filter((item) => item.value !== 'expand' || isStrata.value))
 const activeLivingBehavior = computed(() => livingFormBehaviors.find((item) => item.value === livingForm.value.behavior)!)
 const livingFormStatus = computed(() => !livingForm.value.enabled
@@ -2193,10 +2195,8 @@ async function downloadLivingFormLoop() {
         }
       },
     })
-    const backgroundLabel = request.background === 'transparent' ? 'transparent' : request.studioBackground
-    const fileName = `rasterform-living-${request.settings.behavior}-${request.dimensions.width}x${request.dimensions.height}-${result.fps}fps-${backgroundLabel}.zip`
     completedLoopCleanup = result.cleanup
-    downloadBlob(fileName, result.blob)
+    downloadBlob(result.fileName, result.blob)
     // Browsers do not expose download-completion events. Retain a private-file
     // archive long enough for multi-gigabyte downloads; stale archives are also
     // scavenged on a later export.

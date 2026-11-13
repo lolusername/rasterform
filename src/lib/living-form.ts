@@ -1,12 +1,12 @@
 import type { LivingFormBehavior, LivingFormSettings, MeshData } from '../types'
+import { LIVING_FORM_BEHAVIORS } from '../types'
 import { cloneStrataData } from './strata'
 
 export type { LivingFormBehavior, LivingFormSettings } from '../types'
+export { LIVING_FORM_BEHAVIORS } from '../types'
 
 const TAU = Math.PI * 2
 const MIN_EXTENT = 1e-6
-
-export const LIVING_FORM_BEHAVIORS = ['breathe', 'ripple', 'flow', 'melt', 'expand'] as const
 
 export interface LivingFormBounds {
   readonly min: readonly [number, number, number]

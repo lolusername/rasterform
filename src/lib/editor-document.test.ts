@@ -7,8 +7,20 @@ import {
 import { composeChannelStack } from './channel-stack'
 import { processScalarField } from './filters'
 import { buildMesh } from './mesh'
+import { LIVING_FORM_BEHAVIORS } from '../types'
 
 describe('authored editor documents', () => {
+  it.each(LIVING_FORM_BEHAVIORS)('reopens version-1 projects using %s in either workspace', async (behavior) => {
+    const original = editorDocumentFixture()
+    original.imageLivingForm.behavior = behavior
+    original.textLivingForm.behavior = behavior
+    const json = await serializeEditorProject(original)
+    expect(JSON.parse(json).version).toBe(1)
+    const restored = parseEditorProject(json)
+    expect(restored.imageLivingForm).toEqual(original.imageLivingForm)
+    expect(restored.textLivingForm).toEqual(original.textLivingForm)
+  })
+
   it('copies mutable state but retains immutable image/Blob assets', () => {
     const original = editorDocumentFixture()
     original.image.sourceBlob = new Blob(['original bytes'], { type: 'image/png' })
@@ -86,6 +98,7 @@ describe('authored editor documents', () => {
     ['duplicate channel IDs', (doc: any) => { doc.channels[1].id = doc.channels[0].id }],
     ['missing selected channel', (doc: any) => { doc.selectedChannelId = 'gone' }],
     ['unknown operators', (doc: any) => { doc.channels[0].blend = 'unknown' }],
+    ['unknown motion', (doc: any) => { doc.imageLivingForm.behavior = 'unknown' }],
     ['invalid camera', (doc: any) => { doc.camera.quaternion = [0, 0, 0, 0] }],
     ['invalid clipping', (doc: any) => { doc.camera.far = doc.camera.near }],
     ['hostile color values', (doc: any) => { doc.imageAppearance.clay.color = '<script>' }],
