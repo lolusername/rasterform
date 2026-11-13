@@ -5,7 +5,7 @@ import { encodeGlb, encodeStl } from './export'
 import { buildMesh } from './mesh'
 import { buildStrataMesh } from './strata'
 import { createDefaultAppearanceSettings } from './three'
-import type { PixelImage, ScalarField, SourceTexture } from '../types'
+import type { MeshData, PixelImage, ScalarField, SourceTexture } from '../types'
 
 class TestFileReader {
   result: ArrayBuffer | string | null = null
@@ -43,7 +43,7 @@ interface GlbDocument {
     name: string
     pbrMetallicRoughness: { baseColorFactor?: number[]; metallicFactor: number; roughnessFactor: number; baseColorTexture?: { index: number; texCoord: number } }
   }>
-  meshes: Array<{ primitives: Array<{ attributes: Record<string, number>; indices: number; material: number }> }>
+  meshes: Array<{ primitives: Array<{ attributes: Record<string, number>; indices?: number; material: number; mode?: number }> }>
 }
 
 function readGlb(glb: ArrayBuffer) {
@@ -63,6 +63,50 @@ function readGlb(glb: ArrayBuffer) {
 }
 
 describe('portable mesh exports', () => {
+  it.each(['quad', 'relief', 'strata'] as const)('exports every triangle edge of a %s as a nonzero line', async (kind) => {
+    const quad: MeshData = {
+      positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0]),
+      indices: new Uint32Array([0, 2, 1, 1, 2, 3]),
+      colors: new Float32Array(12), uvs: new Float32Array(8), heights: new Float32Array(4),
+      width: 1, height: 1, mode: 'plane',
+    }
+    const source = kind === 'quad' ? quad : kind === 'relief' ? mesh : buildStrataMesh(field, image, 8, { layers: 5 })
+    const before = structuredClone(source)
+    const edgeKey = (a: string, b: string) => [a, b].sort().join('|')
+    const expected = new Set<string>()
+    for (let offset = 0; offset < source.indices.length; offset += 3) {
+      const triangle = Array.from(source.indices.slice(offset, offset + 3), (index) => source.positions.slice(index * 3, index * 3 + 3).join(','))
+      expected.add(edgeKey(triangle[0]!, triangle[1]!))
+      expected.add(edgeKey(triangle[1]!, triangle[2]!))
+      expected.add(edgeKey(triangle[2]!, triangle[0]!))
+    }
+    if (kind === 'quad') expect(expected.size).toBe(5)
+
+    const { document, values } = readGlb(await encodeGlb(source, 'wireframe'))
+    const actual = new Set<string>()
+    expect(document.meshes).toHaveLength(kind === 'strata' ? source.strata!.parts.length : 1)
+    for (const exported of document.meshes) {
+      for (const primitive of exported.primitives) {
+        expect(primitive.mode).toBe(1)
+        const positions = values(primitive.attributes.POSITION!, 3)
+        const indices = primitive.indices === undefined
+          ? Array.from({ length: positions.length / 3 }, (_, index) => index)
+          : values(primitive.indices, 1)
+        expect(indices.length % 2).toBe(0)
+        for (let offset = 0; offset < indices.length; offset += 2) {
+          const start = indices[offset]! * 3
+          const end = indices[offset + 1]! * 3
+          const a = positions.slice(start, start + 3).join(',')
+          const b = positions.slice(end, end + 3).join(',')
+          expect(a).not.toBe(b)
+          actual.add(edgeKey(a, b))
+        }
+      }
+    }
+    expect(actual).toEqual(expected)
+    expect(source).toEqual(before)
+  })
+
   it('encodes an sRGB mid-gray source as linear vertex color', async () => {
     const gray: PixelImage = {
       width: 1, height: 1, sourceWidth: 1, sourceHeight: 1, name: 'middle-gray',
@@ -164,8 +208,8 @@ describe('portable mesh exports', () => {
       expect(material.roughnessFactor).toBe(0.26)
     }
     const gridVertices = (mesh.width + 1) * (mesh.height + 1)
-    const frontIndices = values(front.indices, 1)
-    const backingIndices = values(backing.indices, 1)
+    const frontIndices = values(front.indices!, 1)
+    const backingIndices = values(backing.indices!, 1)
     expect(frontIndices).toHaveLength(mesh.width * mesh.height * 6)
     expect(frontIndices.every((index) => index < gridVertices)).toBe(true)
     for (let index = 0; index < backingIndices.length; index += 3) {
@@ -199,14 +243,14 @@ describe('portable mesh exports', () => {
     expect(document.materials[0]!.pbrMetallicRoughness.roughnessFactor).toBe(0.66)
   })
 
-  it('releases owned geometry and both materials even when the exporter fails', async () => {
+  it.each(['original', 'wireframe'] as const)('releases owned %s geometry and materials even when the exporter fails', async (mode) => {
     const geometryDispose = vi.spyOn(BufferGeometry.prototype, 'dispose')
     const materialDispose = vi.spyOn(Material.prototype, 'dispose')
     const parse = vi.spyOn(GLTFExporter.prototype, 'parseAsync').mockRejectedValueOnce(new Error('test encoding failure'))
     try {
-      await expect(encodeGlb(mesh, 'original', undefined, sourceTexture)).rejects.toThrow('test encoding failure')
-      expect(geometryDispose).toHaveBeenCalledOnce()
-      expect(materialDispose).toHaveBeenCalledTimes(2)
+      await expect(encodeGlb(mesh, mode, undefined, mode === 'original' ? sourceTexture : undefined)).rejects.toThrow('test encoding failure')
+      expect(geometryDispose).toHaveBeenCalledTimes(mode === 'wireframe' ? 2 : 1)
+      expect(materialDispose).toHaveBeenCalledTimes(mode === 'wireframe' ? 1 : 2)
     } finally {
       geometryDispose.mockRestore()
       materialDispose.mockRestore()

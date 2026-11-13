@@ -1,6 +1,6 @@
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
-import { BufferAttribute, Color, Group, type Mesh, type MeshStandardMaterial } from 'three'
+import { BufferAttribute, Color, Group, WireframeGeometry, type Mesh, type MeshStandardMaterial } from 'three'
 import { isStrataData, splitStrataMesh } from './strata'
 import { createThreeMesh } from './three'
 import { scalarFieldPng } from './image'
@@ -55,6 +55,12 @@ export async function encodeGlb(
         mesh.geometry.dispose()
         mesh.geometry = flat
         flat.computeVertexNormals()
+      }
+      if (colorMode === 'wireframe' && !texture) {
+        // GLTFExporter uses LINES for wireframe materials, so it needs edge pairs.
+        const edges = new WireframeGeometry(mesh.geometry)
+        mesh.geometry.dispose()
+        mesh.geometry = edges
       }
       group.add(mesh)
     }
