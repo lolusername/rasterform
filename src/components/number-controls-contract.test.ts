@@ -16,6 +16,7 @@ describe('numeric UI preserves existing authored setting ranges', () => {
     ['textSettings.lineHeight', '0.8', '1.8', '0.02'],
     ['textSettings.resolution', '180', '720', '20'],
     ['strataSettings.layers', '2', '24', '1'],
+    ['strataSettings.startLevel', '0', '0.95', '0.01'],
     ['strataSettings.thickness', '0.005', '0.12', '0.005'],
     ['strataSettings.separation', '0', '0.18', '0.005'],
     ['meshSettings.midpoint', '0', '1', '0.01'],
@@ -45,6 +46,7 @@ describe('numeric UI preserves existing authored setting ranges', () => {
 
   it.each([
     ['selectedChannel.amount', '100'],
+    ['strataSettings.startLevel', '100'],
     ['selectedChannel.hueOrigin', '360'],
     ['textSettings.tracking', '100'],
     ['livingForm.amount', '100'],

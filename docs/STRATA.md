@@ -6,15 +6,15 @@ Strata is an optional geometry mode in the Image workspace. It turns the complet
 
 1. Choose an image and build its height field using the existing Channels and Surface controls.
 2. In Properties → Geometry, choose **Strata**.
-3. Set **Layers** (2–24), **Thickness**, and **Separation**. Thickness and separation use the same normalized model units as the existing relief controls; the image's longer side is 2 units.
+3. Set **Layers** (2–24). Raise **Start level** (0–95%) to leave out regions below the first contour. **Thickness** sets the depth of each sheet and **Separation** sets the gap. The image’s longer side is 2 model units.
 4. Orbit the model to see through the gaps. The camera fits changing stacks inside the existing viewport; the canvas does not become larger than the screen.
 5. Try Surface smoothing or Blob for broader, more organic contours. These remain whole-image controls. There are no brushes or manual masks.
 
-The default is 12 layers, thickness 0.025, and separation 0.055. The regular relief depth, midpoint, and base-thickness settings are retained when switching modes; they are not applied to Strata. Mesh detail remains available and controls contour precision and the density of sampled Photo colors.
+The default is 12 layers with a 0% start level, thickness 0.025 and separation 0.055. The regular relief depth, midpoint, and base-thickness settings are retained when switching modes; they are not applied to Strata. Mesh detail remains available and controls contour precision and the density of sampled Photo colors.
 
 A completely flat height field produces one sheet, not a fabricated stack of identical cards. The layer thresholds span the actual height range in the processed image. A broad, constant-height region can legitimately recur on several lower layers. Holes and disconnected islands follow the height data rather than a semantic interpretation of the picture.
 
-The lowest rectangular sheet belongs to the generated model. It is not a separate background floor; the app still creates no background plane or grid.
+At **0%**, the first sheet covers every sampled pixel, so its outline is rectangular. At **50%**, the first sheet only includes heights from the middle of the sampled range upward. For example, if the field runs from 0.2 to 0.8, the first contour at 50% is 0.5. The remaining layers divide the interval from that starting height toward the maximum.
 
 ## Motion
 

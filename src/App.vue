@@ -850,7 +850,7 @@ const rawField = computed(() => composeChannelStack(image.value, channelLayers))
 const heightField = computed(() => processScalarField(rawField.value, fieldSettings))
 // Gap and thickness edits reuse the contour topology, replacing only positions.
 const strataContours = computed(() => buildStrataMesh(heightField.value, image.value, meshSettings.resolution, {
-  ...DEFAULT_STRATA_SETTINGS, layers: strataSettings.layers,
+  ...DEFAULT_STRATA_SETTINGS, layers: strataSettings.layers, startLevel: strataSettings.startLevel,
 }))
 const imageMesh = computed(() => meshSettings.mode === 'strata'
   ? spaceStrataMesh(strataContours.value, strataSettings)
@@ -1417,31 +1417,35 @@ async function openMonaLisaStudy() {
   const operation = ++sourceImportSequence
   const initialDocument = captureDocument()
   try {
-    const response = await fetch('/studies/mona-lisa-relief.png')
+    const response = await fetch(`${import.meta.env.BASE_URL}studies/mona-lisa-landscape.png`)
     if (!response.ok) throw new Error('Image unavailable')
-    const file = new File([await response.blob()], 'Mona Lisa relief.png', { type: 'image/png' })
-    const portrait = await fileToPixelImage(file)
+    const file = new File([await response.blob()], 'Mona Lisa landscape.png', { type: 'image/png' })
+    const landscape = await fileToPixelImage(file)
     if (operation !== sourceImportSequence || appDisposed || editorBusy.value || comparison.value
       || !editorDocumentsEqual(initialDocument, captureDocument())) return
 
     const study = initialDocument
-    study.image = portrait
-    const luminance = createChannelLayer('luminance')
-    study.channels = [luminance]
-    study.selectedChannelId = luminance.id
-    Object.assign(study.field, { blur: 1, contrast: 0 })
-    Object.assign(study.mesh, { mode: 'solid', alphaCutout: true, depth: 0.28, midpoint: 0.08, baseThickness: 0.06, resolution: 180 })
-    study.imageAppearance.clay = { finish: 'metallic', color: '#a59486' }
+    study.image = landscape
+    const green = createChannelLayer('green')
+    study.channels = [green]
+    study.selectedChannelId = green.id
+    Object.assign(study.field, { finish: 'blob', blur: 7, contrast: 0, quantize: 0, blobDilation: 3, blobSmoothing: 10 })
+    Object.assign(study.mesh, { mode: 'strata', resolution: 156 })
+    study.strata = { layers: 8, startLevel: 0.51, thickness: 0.015, separation: 0.1 }
+    Object.assign(study.imageLivingForm, { enabled: true, behavior: 'flow', frequency: 1.05, amount: 0.46, seed: 1, duration: 6 })
+    study.imageLivingPhase = 0.22
     study.imageColorMode = 'clay'
-    // The three-quarter view used on the studio page.
-    if (study.camera) {
-      study.camera.position = [1.58, -0.18, 3.03]
-      study.camera.target = [0, 0, 0.18]
-      study.camera.quaternion = [0.02670821175, 0.25031317904, -0.00690805143, 0.96777180298]
+    study.imageAppearance.clay = { finish: 'metallic', color: '#536f64' }
+    study.imageAppearance.heightGradient = { low: '#162f27', mid: '#168880', high: '#e8d6a9', midpoint: 0.64 }
+    study.viewportBackground = 'dark-gray'
+    study.camera = {
+      fov: 38, near: 0.01, far: 100, zoom: 1, filmGauge: 35, filmOffset: 0,
+      position: [-1.36, -1.86, 3.07], target: [-0.22, -0.085, 0.3], up: [0, 1, 0],
+      quaternion: [0.25927255002908767, -0.18707797194002118, 0.051266179686152505, 0.9461243871905056],
     }
     await applyDocument(study)
     editorHistory.synchronize(captureDocument())
-    status.value = 'Mona Lisa · metallic relief'
+    status.value = 'Mona Lisa landscape · Strata study'
   } catch {
     if (operation === sourceImportSequence && !appDisposed) status.value = 'Could not open the Mona Lisa study. Reload to try again or choose an image.'
   }
@@ -1949,8 +1953,9 @@ async function downloadLivingFormLoop() {
                 <button v-for="mode in geometryModes" :key="mode.value" type="button" :aria-pressed="meshSettings.mode === mode.value" @click="meshSettings.mode = mode.value"><span>{{ mode.label }}</span><small>{{ mode.note }}</small></button>
               </div>
               <template v-if="isStrata">
-                <p class="inline-note">The whole image becomes stacked height contours—not horizontal strips. Gaps reveal the layers; nothing is painted or selected by hand.</p>
+                <p class="inline-note">Each sheet follows a level in the processed height field.</p>
                 <NumberControl v-model="strataSettings.layers" label="Layers" aria-label="Strata layers" :min="2" :max="24" :step="1" :neutral="DEFAULT_STRATA_SETTINGS.layers" />
+                <NumberControl v-model="strataSettings.startLevel" label="Start level" aria-label="Strata start level" :min="0" :max="0.95" :step="0.01" :display-scale="100" unit="%" :neutral="DEFAULT_STRATA_SETTINGS.startLevel" help="Raise the first contour to leave out lower regions of the height field." />
                 <NumberControl v-model="strataSettings.thickness" label="Thickness" aria-label="Strata thickness" :min="0.005" :max="0.12" :step="0.005" :neutral="DEFAULT_STRATA_SETTINGS.thickness" />
                 <NumberControl v-model="strataSettings.separation" label="Separation" aria-label="Strata separation" :min="0" :max="0.18" :step="0.005" :neutral="DEFAULT_STRATA_SETTINGS.separation" />
                 <p class="inline-note">{{ imageMesh.strata?.parts.length }} contour layers · closed tops, undersides, and edges. Flat images produce a single layer. Use Surface smoothing for broader contours, or Living Form → Expand to animate the gaps.</p>
