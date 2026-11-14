@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { buildMesh } from '../lib/mesh'
 import { PerspectiveCamera } from 'three'
 import { buildStrataMesh, isStrataData } from '../lib/strata'
 import { createDefaultAppearanceSettings } from '../lib/three'
@@ -18,6 +19,29 @@ function fixture() {
     appearance: createDefaultAppearanceSettings(), width: 4096, height: 3072,
     background: 'transparent' as const, studioBackground: 'dark-gray' as const }
 }
+
+describe('Cutout desktop boundaries', () => {
+  it('preserves the cut shell through Final, Cycles Pro, and Blender IPC', () => {
+    const field = { width: 2, height: 2, values: new Float32Array([0, 1, 1, 1]) }
+    const image = { width: 2, height: 2, sourceWidth: 2, sourceHeight: 2, name: 'corner',
+      data: new Uint8ClampedArray(16).fill(255) }
+    image.data[3] = 0
+    const mesh = buildMesh(field, image, { mode: 'solid', resolution: 16, depth: .4, midpoint: .5,
+      baseThickness: .2, alphaCutout: true })
+    const options = { ...fixture(), mesh }
+    const final = createDesktopFinalRenderSnapshot(options)
+    const pro = createDesktopProRenderSnapshot({ ...options, settings: DEFAULT_DESKTOP_PRO_RENDER_SETTINGS })
+    const blend = createDesktopBlenderExportSnapshot({ ...options, topology: 'exact' })
+    for (const snapshot of [final, pro, blend]) expect(snapshot.mesh.alphaCutout).toBe(true)
+    expect(isDesktopFinalRenderSnapshot(final)).toBe(true)
+    expect(isDesktopProRenderSnapshot(pro)).toBe(true)
+    expect(isDesktopBlenderExportSnapshot(blend)).toBe(true)
+    for (const change of [{ mode: 'plane' }, { alphaCutout: 'true' }]) {
+      expect(isDesktopFinalRenderSnapshot({ ...final, mesh: { ...final.mesh, ...change } })).toBe(false)
+      expect(isDesktopBlenderExportSnapshot({ ...blend, mesh: { ...blend.mesh, ...change } })).toBe(false)
+    }
+  })
+})
 
 describe('Strata desktop boundaries', () => {
   it('keeps full Final and Pro quality contracts while carrying immutable contour metadata', () => {

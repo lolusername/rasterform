@@ -961,6 +961,12 @@ const blenderExportHelp = computed(() => {
       ? 'Saves each contour layer as a separately named Blender object, with the visible gaps, source UVs, and material intact. The visible Living Form phase is baked in.'
       : 'Keeps layers separate and simplifies only coplanar faces within each layer. Contour boundaries, holes, source-image UVs, and gaps are preserved; no remeshing across layers. Your open Blender project is untouched.'
   }
+  if (workspace.value === 'image' && mesh.value?.alphaCutout) {
+    if (blenderExportTopology.value === 'exact') return 'Keeps the original triangles, cut outline, holes, and source-image UVs.'
+    return blenderExportTopology.value === 'balanced'
+      ? 'Joins compatible triangles into quads while keeping the cut outline, holes, and source-image UVs.'
+      : 'Simplifies compatible coplanar faces within the outline and retains the holes and source-image UVs.'
+  }
   const method = workspace.value === 'image'
     ? 'Regular image reliefs are rebuilt as an efficient quad grid.'
     : 'Irregular text geometry is rebuilt with sharp borders, open boundaries, and color attributes protected.'

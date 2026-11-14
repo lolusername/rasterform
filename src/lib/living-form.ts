@@ -55,6 +55,7 @@ interface PreparedGeometry {
   readonly width: number
   readonly height: number
   readonly mode: MeshData['mode']
+  readonly alphaCutout?: true
   readonly strata?: MeshData['strata']
 }
 
@@ -240,6 +241,7 @@ function prepareGeometry(mesh: MeshData): PreparedGeometry {
     width: mesh.width,
     height: mesh.height,
     mode: mesh.mode,
+    ...(mesh.alphaCutout ? { alphaCutout: true as const } : {}),
     ...(mesh.strata ? { strata: cloneStrataData(mesh.strata) } : {}),
   }
 }
@@ -454,6 +456,7 @@ export function createLivingFormEngine(mesh: MeshData): LivingFormEngine {
         width: source.width,
         height: source.height,
         mode: source.mode,
+        ...(source.alphaCutout ? { alphaCutout: true as const } : {}),
         ...(source.strata ? { strata: cloneStrataData(source.strata) } : {}),
       }
     },

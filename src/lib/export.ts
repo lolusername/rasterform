@@ -84,7 +84,12 @@ function prepareTexturedMesh(mesh: Mesh, meshData: MeshData): void {
   const vertexCount = meshData.positions.length / 3
   const layers = meshData.mode === 'solid' ? 2 : 1
   const strataPart = meshData.strata?.parts[0]
-  if (!strataPart && (!Number.isInteger(meshData.width) || !Number.isInteger(meshData.height) ||
+  const cutout = meshData.alphaCutout === true
+  if (cutout && (meshData.mode !== 'solid' || vertexCount < 6 || vertexCount % 2 !== 0)) {
+    throw new Error('The cutout no longer has paired front and back vertices.')
+  }
+  const frontVertices = cutout ? vertexCount / 2 : gridVertices
+  if (!cutout && !strataPart && (!Number.isInteger(meshData.width) || !Number.isInteger(meshData.height) ||
       meshData.width < 1 || meshData.height < 1 || gridVertices * layers !== vertexCount)) {
     throw new Error('Source bitmap GLB export requires an image relief with its original image UVs.')
   }
@@ -95,11 +100,11 @@ function prepareTexturedMesh(mesh: Mesh, meshData: MeshData): void {
     const b = meshData.indices[offset + 1]!
     const c = meshData.indices[offset + 2]!
     const isFront = strataPart ? offset < strataPart.surfaceIndexCount
-      : a < gridVertices && b < gridVertices && c < gridVertices
+      : a < frontVertices && b < frontVertices && c < frontVertices
     const target = isFront ? front : sidesBack
     target.push(a, b, c)
   }
-  if (!strataPart && front.length !== meshData.width * meshData.height * 6) {
+  if (!front.length || (!cutout && !strataPart && front.length !== meshData.width * meshData.height * 6)) {
     throw new Error('The mesh no longer has its original source-image topology. Export Current appearance instead.')
   }
   const geometry = mesh.geometry

@@ -42,6 +42,7 @@ export interface DesktopBlenderExportSnapshot {
 export interface DesktopSavedBlenderExportResult {
   fileName: string
   topology: DesktopBlenderTopology
+  alphaCutout?: true
   sourceVertices: number
   sourceFaces: number
   outputVertices: number
@@ -180,6 +181,7 @@ function isBlenderMeshData(value: unknown): value is DesktopBlenderMeshData {
     'height',
     'mode',
     ...(value.mode === 'strata' ? ['strata'] : []),
+    ...(value.mode === 'solid' && value.alphaCutout === true ? ['alphaCutout'] : []),
   ])) return false
   if (!isFloat32Array(value.positions)
     || !isUint32Array(value.indices)
@@ -190,6 +192,7 @@ function isBlenderMeshData(value: unknown): value is DesktopBlenderMeshData {
     || value.indices.length === 0
     || value.indices.length % 3 !== 0) return false
   const vertices = value.positions.length / 3
+  if (value.alphaCutout === true && (vertices < 6 || vertices % 2 !== 0)) return false
   const totalBytes = value.positions.byteLength
     + value.indices.byteLength
     + value.colors.byteLength
@@ -295,6 +298,7 @@ export function isDesktopSavedBlenderExportResult(
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'fileName',
     'topology',
+    ...(value.alphaCutout === true ? ['alphaCutout'] : []),
     'sourceVertices',
     'sourceFaces',
     'outputVertices',
@@ -343,6 +347,7 @@ export function isDesktopSavedBlenderExportResult(
       && value.quads === 0
       && value.ngons === 0
   }
+  if (value.alphaCutout === true) return value.outputTriangleCount <= value.sourceFaces
   return value.quads > 0
     && value.quads >= value.triangles + value.ngons
 }

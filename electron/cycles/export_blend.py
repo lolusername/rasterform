@@ -183,11 +183,14 @@ def parse_manifest(path: Path) -> dict[str, Any]:
 
     raw_mesh = manifest["mesh"]
     strata_mode = isinstance(raw_mesh, dict) and raw_mesh.get("mode") == "strata"
-    mesh = expect_object(raw_mesh, "mesh", MESH_KEYS | ({"strata"} if strata_mode else set()))
+    cutout = isinstance(raw_mesh, dict) and raw_mesh.get("mode") == "solid" and raw_mesh.get("alphaCutout") is True
+    mesh = expect_object(raw_mesh, "mesh", MESH_KEYS | ({"strata"} if strata_mode else set()) | ({"alphaCutout"} if cutout else set()))
     vertex_limit = MAX_STRATA_VERTICES if strata_mode else MAX_VERTICES
     index_limit = MAX_STRATA_INDICES if strata_mode else MAX_INDICES
     vertex_count = expect_integer(mesh["vertexCount"], "mesh.vertexCount", 3, vertex_limit)
     index_count = expect_integer(mesh["indexCount"], "mesh.indexCount", 3, index_limit)
+    if cutout and (vertex_count < 6 or vertex_count % 2):
+        fail("Alpha cutouts must have paired front and back vertices.")
     uv_count = expect_integer(mesh["uvCount"], "mesh.uvCount", 3, vertex_limit)
     width = expect_integer(mesh["width"], "mesh.width", 1, 16_384)
     height = expect_integer(mesh["height"], "mesh.height", 1, 16_384)
@@ -453,7 +456,7 @@ def structured_grid_layout(
 ) -> tuple[int, int, int] | None:
     """Recognize Rasterform's image-grid index contract, never by counts alone."""
     mesh_spec = manifest["mesh"]
-    if mesh_spec["mode"] == "strata":
+    if mesh_spec["mode"] == "strata" or mesh_spec.get("alphaCutout"):
         return None
     columns = mesh_spec["width"]
     rows = mesh_spec["height"]
@@ -849,13 +852,11 @@ def load_source_bitmap(manifest: dict[str, Any]) -> bpy.types.Image:
 def apply_source_bitmap(
     manifest: dict[str, Any],
     model: bpy.types.Object,
-    grid_dimensions: tuple[int, int],
+    front_vertex_count: int,
 ) -> None:
     image = load_source_bitmap(manifest)
     model.data.materials.append(create_material(manifest, image=image))
     model.data.materials.append(create_material(manifest, neutral=True))
-    columns, rows = grid_dimensions
-    front_vertex_count = (columns + 1) * (rows + 1)
     for polygon in model.data.polygons:
         polygon.material_index = 0 if all(
             vertex < front_vertex_count for vertex in polygon.vertices
@@ -1185,7 +1186,8 @@ def export_blend(manifest_path: Path) -> None:
     source_vertices = manifest["mesh"]["vertexCount"]
     source_faces = manifest["mesh"]["indexCount"] // 3
     structured_layout = structured_grid_layout(manifest, values["indices"])
-    if manifest["texture"] is not None and structured_layout is None and manifest["mesh"]["mode"] != "strata":
+    cutout = manifest["mesh"].get("alphaCutout", False)
+    if manifest["texture"] is not None and structured_layout is None and manifest["mesh"]["mode"] != "strata" and not cutout:
         fail("Source bitmap export requires an image relief with its original grid topology.")
     grid_dimensions = structured_layout[:2] if structured_layout is not None else None
 
@@ -1199,7 +1201,33 @@ def export_blend(manifest_path: Path) -> None:
         export_strata_project(manifest, values, started)
         return
 
-    if topology == "exact":
+    if cutout:
+        model = create_mesh_object(manifest, values)
+        if manifest["texture"] is not None:
+            preserve_source_uv(model)
+            apply_source_bitmap(manifest, model, source_vertices // 2)
+        else:
+            model.data.materials.append(create_material(manifest))
+        model["rasterform_retopology_method"] = "exact"
+        if topology != "exact":
+            emit("PROGRESS", {"jobId": job_id, "phase": "retopologizing"})
+            set_active_object(model)
+            bpy.ops.object.mode_set(mode="EDIT")
+            try:
+                bpy.ops.mesh.select_all(action="SELECT")
+                # Merge only compatible faces: the outline, cavities, source UVs
+                # and the boundary between the textured front and the walls survive.
+                if topology == "lightweight" and (manifest["texture"] is not None or manifest["colorMode"] != "original"):
+                    bpy.ops.mesh.dissolve_limited(angle_limit=0.000001, use_dissolve_boundaries=False,
+                                                  delimit={"NORMAL", "MATERIAL", "UV"})
+                bpy.ops.mesh.tris_convert_to_quads(face_threshold=math.radians(20), shape_threshold=math.radians(40),
+                                                   uvs=True, vcols=True, seam=True, sharp=True, materials=True)
+            finally:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            model["rasterform_retopology_method"] = "cutout_planar" if topology == "lightweight" else "cutout_quads"
+            emit("PROGRESS", {"jobId": job_id, "phase": "unwrapping"})
+            unwrap_smart_uv(model)
+    elif topology == "exact":
         model = create_mesh_object(manifest, values)
         model["rasterform_retopology_method"] = "exact"
         if manifest["texture"] is not None:
@@ -1224,11 +1252,13 @@ def export_blend(manifest_path: Path) -> None:
         emit("PROGRESS", {"jobId": job_id, "phase": "unwrapping"})
         unwrap_smart_uv(model)
     shade_smooth_by_angle(model)
-    model.data.materials.clear()
-    if manifest["texture"] is not None:
-        apply_source_bitmap(manifest, model, grid_dimensions)
-    else:
-        model.data.materials.append(create_material(manifest))
+    if not cutout:
+        model.data.materials.clear()
+        if manifest["texture"] is not None:
+            columns, rows = grid_dimensions
+            apply_source_bitmap(manifest, model, (columns + 1) * (rows + 1))
+        else:
+            model.data.materials.append(create_material(manifest))
     model.data.update(calc_edges=True)
     disable_viewport_grids()
     verify_clean_scene(model)
@@ -1251,6 +1281,7 @@ def export_blend(manifest_path: Path) -> None:
         "jobId": job_id,
         "file": manifest["output"],
         "topology": topology,
+        **({"alphaCutout": True} if cutout else {}),
         "sourceVertices": source_vertices,
         "sourceFaces": source_faces,
         "outputVertices": output_vertices,

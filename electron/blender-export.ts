@@ -67,6 +67,7 @@ export interface BlenderExportOutputState {
   readonly expectedTopology: DesktopBlenderExportSnapshot['settings']['topology']
   readonly expectedSourceVertices: number
   readonly expectedSourceFaces: number
+  readonly expectedCutout?: true
   phase: DesktopBlenderExportPhase | null
   completion: BlenderExportCompletion | null
   error: { message: string; errorType: string } | null
@@ -183,6 +184,7 @@ export async function createBlenderExportJob(
         width: snapshot.mesh.width,
         height: snapshot.mesh.height,
         mode: snapshot.mesh.mode,
+        ...(snapshot.mesh.alphaCutout ? { alphaCutout: true as const } : {}),
         ...(snapshot.mesh.strata ? { strata: snapshot.mesh.strata } : {}),
       },
       colorMode: snapshot.colorMode,
@@ -249,6 +251,7 @@ export function createBlenderExportOutputState(job: BlenderExportJob): BlenderEx
     expectedTopology: job.snapshot.settings.topology,
     expectedSourceVertices: job.snapshot.mesh.positions.length / 3,
     expectedSourceFaces: job.snapshot.mesh.indices.length / 3,
+    ...(job.snapshot.mesh.alphaCutout ? { expectedCutout: true } : {}),
     phase: null,
     completion: null,
     error: null,
@@ -306,6 +309,7 @@ export function parseBlenderExportOutput(
         'jobId',
         'file',
         'topology',
+        ...(state.expectedCutout ? ['alphaCutout'] : []),
         'sourceVertices',
         'sourceFaces',
         'outputVertices',
@@ -326,6 +330,7 @@ export function parseBlenderExportOutput(
       || payload.file !== 'outputs/rasterform.blend'
       || payload.topology !== state.expectedTopology
       || payload.sourceVertices !== state.expectedSourceVertices
+      || payload.alphaCutout !== state.expectedCutout
       || payload.sourceFaces !== state.expectedSourceFaces
       || !Number.isInteger(payload.outputBytes)
       || Number(payload.outputBytes) < MIN_BLEND_BYTES
@@ -335,6 +340,7 @@ export function parseBlenderExportOutput(
       || !isDesktopSavedBlenderExportResult({
         fileName: 'rasterform.blend',
         topology: payload.topology,
+        ...(state.expectedCutout ? { alphaCutout: true } : {}),
         sourceVertices: payload.sourceVertices,
         sourceFaces: payload.sourceFaces,
         outputVertices: payload.outputVertices,

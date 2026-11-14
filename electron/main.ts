@@ -1745,6 +1745,7 @@ async function runBlenderExportJob(
     const result: DesktopSavedBlenderExportResult = {
       fileName: basename(committed),
       topology: completion.topology,
+      ...(completion.alphaCutout ? { alphaCutout: true as const } : {}),
       sourceVertices: completion.sourceVertices,
       sourceFaces: completion.sourceFaces,
       outputVertices: completion.outputVertices,

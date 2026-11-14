@@ -7,6 +7,7 @@ import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
 import { sourceBitmapFixture } from './test-fixtures/source-bitmap'
+import { buildMesh } from '../src/lib/mesh'
 import { buildStrataMesh } from '../src/lib/strata'
 
 const execFileAsync = promisify(execFile)
@@ -361,6 +362,42 @@ describe.skipIf(!realBlenderAvailable)('isolated Blender project exporter', () =
       expect(report.depthMax).toBeCloseTo(layer * 0.11 + 0.03)
     })
     expect(data.reports.reduce((sum: number, report: { faces: number }) => sum + report.faces, 0)).toBe(complete.payload.outputFaces)
+  }, 120_000)
+
+  it.each(['exact', 'balanced', 'lightweight'] as const)('retains the cutout silhouette, source UVs, and packed bitmap on %s', async topology => {
+    const fixture = await createFixture(topology, 'structured-grid')
+    const { texture, imagePath, manifest } = await addBitmap(fixture)
+    const width = 32, height = 24
+    const field = { width, height, values: Float32Array.from({ length: width * height }, (_, i) =>
+      0.4 + 0.2 * Math.sin((i % width) / width * 3)) }
+    const image = { width, height, sourceWidth: width, sourceHeight: height, name: 'ring',
+      data: new Uint8ClampedArray(width * height * 4).fill(255) }
+    for (let i = 0; i < width * height; i++) {
+      const r = Math.hypot((i % width) / (width - 1) - .5, Math.floor(i / width) / (height - 1) - .5)
+      image.data[i * 4 + 3] = r > .18 && r < .45 ? 255 : 0
+    }
+    const mesh = buildMesh(field, image, { mode: 'solid', resolution: 32, alphaCutout: true,
+      baseThickness: .2, depth: .3, midpoint: .5 })
+    expect(mesh.alphaCutout).toBe(true)
+    await Promise.all(Object.entries({
+      'positions.f32': mesh.positions, 'indices.u32': mesh.indices, 'colors.f32': mesh.colors, 'uvs.f32': mesh.uvs,
+    }).map(([name, data]) => writeFile(join(fixture.root, 'mesh', name), Buffer.from(data.buffer))))
+    Object.assign(manifest.mesh, { width: mesh.width, height: mesh.height, mode: 'solid', alphaCutout: true,
+      vertexCount: mesh.positions.length / 3, indexCount: mesh.indices.length, uvCount: mesh.uvs.length / 2 })
+    await writeFile(fixture.manifestPath, JSON.stringify(manifest))
+    const { stdout } = await runExporter(fixture)
+    const status = statusLines(stdout).find(({kind}) => kind === 'COMPLETE')!.payload
+    expect(status.alphaCutout).toBe(true)
+    await rm(imagePath)
+    const result = await inspectBlend(fixture, true)
+    expect(result).toMatchObject({ objects: 1, materials: 2, bitmapLinks: true, sideImageNodes: 0,
+      packedSha256: createHash('sha256').update(texture.data).digest('hex') })
+    expect(result.sourceUVError as number).toBeLessThan(1e-5)
+    expect(result.frontFaces as number).toBeGreaterThan(0)
+    expect(result.sideFaces as number).toBeGreaterThan(0)
+    expect(result.xMin as number).toBeGreaterThan(-.99)
+    expect(result.xMax as number).toBeLessThan(.99)
+    if (topology === 'exact') expect(result.surfaceAssignments).toBe(true)
   }, 120_000)
 
   it.each([

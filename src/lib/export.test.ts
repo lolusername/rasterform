@@ -3,6 +3,7 @@ import { BufferGeometry, Material } from 'three'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { encodeGlb, encodeStl } from './export'
 import { buildMesh } from './mesh'
+import { createLivingFormEngine } from './living-form'
 import { buildStrataMesh } from './strata'
 import { createDefaultAppearanceSettings } from './three'
 import type { MeshData, PixelImage, ScalarField, SourceTexture } from '../types'
@@ -105,6 +106,27 @@ describe('portable mesh exports', () => {
     }
     expect(actual).toEqual(expected)
     expect(source).toEqual(before)
+  })
+
+  it('textures only the front of an alpha-cut relief, including after motion', async () => {
+    const pixels = { ...image, data: image.data.slice() }
+    pixels.data[3] = 0
+    const cutout = buildMesh(field, pixels, {
+      mode: 'solid', resolution: 8, depth: 0.4, midpoint: 0.5, baseThickness: 0.4, alphaCutout: true,
+    })
+    const posed = createLivingFormEngine(cutout).sampleMesh(0.25, { enabled: true, behavior: 'ripple' })
+    expect(posed.alphaCutout).toBe(true)
+    const frontCount = posed.positions.length / 6
+    const expectedFront = Array.from(posed.indices).filter((_, offset) => {
+      const i = offset - offset % 3
+      return [0, 1, 2].every(k => posed.indices[i + k]! < frontCount)
+    })
+    const { document, values } = readGlb(await encodeGlb(posed, 'clay', undefined, sourceTexture))
+    const [front, backing] = document.meshes[0]!.primitives
+    expect(values(front!.indices!, 1)).toEqual(expectedFront)
+    expect(values(backing!.indices!, 1)).toHaveLength(posed.indices.length - expectedFront.length)
+    expect(document.materials[front!.material]!.pbrMetallicRoughness.baseColorTexture).toBeDefined()
+    expect(document.materials[backing!.material]!.pbrMetallicRoughness.baseColorTexture).toBeUndefined()
   })
 
   it('encodes an sRGB mid-gray source as linear vertex color', async () => {

@@ -200,6 +200,7 @@ function isMeshData(value: unknown): value is MeshData {
     'height',
     'mode',
     ...(value.mode === 'strata' ? ['strata'] : []),
+    ...(value.mode === 'solid' && value.alphaCutout === true ? ['alphaCutout'] : []),
   ])) return false
   if (!isFloat32Array(value.positions)
     || !isUint32Array(value.indices)
@@ -209,6 +210,7 @@ function isMeshData(value: unknown): value is MeshData {
   if (value.positions.length === 0 || value.positions.length % 3 !== 0) return false
   if (value.indices.length === 0 || value.indices.length % 3 !== 0) return false
   const vertices = value.positions.length / 3
+  if (value.alphaCutout === true && (vertices < 6 || vertices % 2 !== 0)) return false
   if (vertices > (value.mode === 'strata' ? DESKTOP_MAX_STRATA_VERTICES : DESKTOP_MAX_MESH_VERTICES)
     || value.indices.length > (value.mode === 'strata' ? DESKTOP_MAX_STRATA_INDICES : DESKTOP_MAX_MESH_INDICES)) return false
   const totalBytes = value.positions.byteLength
