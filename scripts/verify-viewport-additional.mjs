@@ -90,7 +90,8 @@ async function runCase(dpr) {
   async function loopControls(label) {
     await page.getByRole('button', { name: 'Living loop PNG sequence', exact: true }).click()
     const inspector = page.locator('#export-inspector')
-    assert.equal(await inspector.getByRole('button', { name: '2K', exact: true }).count(), 1)
+    const summary = (await inspector.locator('.export-summary').innerText()).replaceAll(',', '')
+    assert.match(summary, /2048/, `${label}: loop resolution is missing`)
     assert.equal(await inspector.getByRole('button', { name: '4K', exact: true }).count(), 0)
     for (const fps of [12, 24, 30]) {
       const button = inspector.getByRole('button', { name: `${fps} fps`, exact: true })
@@ -100,7 +101,7 @@ async function runCase(dpr) {
     const timing = page.getByRole('slider', { name: 'Living Loop duration', exact: true })
     assert.equal(await timing.getAttribute('min'), '1')
     assert.equal(await timing.getAttribute('max'), '12')
-    assert.equal(await inspector.getByRole('button', { name: 'High 2× Lossless frames', exact: true }).count(), 1)
+    assert.ok(await inspector.getByText(/ZIP contains numbered PNG frames/).isVisible())
     const background = inspector.getByRole('group', { name: 'Background', exact: true })
     await background.getByRole('button', { name: /^Current/ }).click()
     await background.getByRole('button', { name: 'Transparent', exact: true }).click()
