@@ -46,6 +46,28 @@ describe('authored editor documents', () => {
     expect(restored.textLivingForm).toEqual(original.textLivingForm)
   })
 
+  it('round-trips the editor and mesh start levels and supplies zero for older projects', async () => {
+    const original = editorDocumentFixture()
+    original.strata.startLevel = 0.68
+    original.mesh.strata = { ...original.strata, startLevel: 0.25 }
+    const json = await serializeEditorProject(original)
+    expect(parseEditorProject(json)).toEqual(original)
+
+    const legacy = JSON.parse(json)
+    delete legacy.document.strata.startLevel
+    delete legacy.document.mesh.strata.startLevel
+    const restored = parseEditorProject(JSON.stringify(legacy))
+    expect(restored.strata.startLevel).toBe(0)
+    expect(restored.mesh.strata!.startLevel).toBe(0)
+  })
+
+  it.each([-0.01, 0.951, NaN, Infinity, null, '0.5'])('rejects invalid Strata start level %s', (value) => {
+    const original = editorDocumentFixture()
+    const invalid = { ...original.strata, startLevel: value }
+    expect(() => validateEditorDocument({ ...original, strata: invalid })).toThrow(/strata.startLevel/)
+    expect(() => validateEditorDocument({ ...original, mesh: { ...original.mesh, strata: invalid } })).toThrow(/strata.startLevel/)
+  })
+
   it('copies mutable state but retains immutable image/Blob assets', () => {
     const original = editorDocumentFixture()
     original.image.sourceBlob = new Blob(['original bytes'], { type: 'image/png' })
@@ -141,7 +163,7 @@ describe('authored editor documents', () => {
     const document = editorDocumentFixture()
     document.field = { invert: true, blur: 8, contrast: -50, quantize: 12, finish: 'blob', blobDilation: 20, blobSmoothing: 24 }
     document.mesh = { mode: 'strata', resolution: 180, depth: 1.4, midpoint: 1, baseThickness: 0.8 }
-    document.strata = { layers: 24, thickness: 0.12, separation: 0.18 }
+    document.strata = { startLevel: 0.95, layers: 24, thickness: 0.12, separation: 0.18 }
     document.text = { ...document.text, tracking: -0.08, lineHeight: 1.8, depth: 0.9, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 8, resolution: 720 }
     document.imageLivingForm = { enabled: true, behavior: 'expand', amount: 1, frequency: 5, seed: 100, duration: 12 }
     expect(validateEditorDocument(document)).toEqual(document)

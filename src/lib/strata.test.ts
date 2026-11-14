@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three'
 import { buildMesh } from './mesh'
-import { buildStrataMesh, DEFAULT_STRATA_SETTINGS, spaceStrataMesh } from './strata'
+import { buildStrataMesh, DEFAULT_STRATA_SETTINGS, normalizeStrataSettings, spaceStrataMesh } from './strata'
 import { inspectTopology } from './topology'
 import { animateLivingFormMesh } from './living-form'
 import { snapshotMesh } from './image-export-worker'
@@ -61,6 +61,52 @@ describe('Strata height-contour geometry', () => {
     expect(report.watertight).toBe(true)
     for (const part of splitStrataMesh(mesh)) expect(inspectTopology(part).watertight).toBe(true)
     expect(mesh.strata!.parts).toHaveLength(kind === 'flat' ? 1 : 8)
+  })
+
+  it('starts inside the sampled range and redistributes the contours over the remaining heights', () => {
+    const { image } = strataFixture()
+    // The brighter half starts exactly at the middle grid column.
+    const field = { width: 2, height: 2, values: new Float32Array([0.25, 0.75, 0.25, 0.75]) }
+    const options = { layers: 4 }
+    const full = buildStrataMesh(field, image, 16, options)
+    expect(buildStrataMesh(field, image, 16, { ...options, startLevel: 0 })).toEqual(full)
+    expect(full.strata!.parts.map((part) => part.threshold)).toEqual([0.25, 0.375, 0.5, 0.625])
+
+    const cut = buildStrataMesh(field, image, 16, { ...options, startLevel: 0.5 })
+    expect(cut.strata!.parts.map((part) => part.threshold)).toEqual([0.5, 0.5625, 0.625, 0.6875])
+    splitStrataMesh(cut).forEach((piece, layer) => {
+      const x = Array.from(piece.positions).filter((_, i) => i % 3 === 0)
+      expect(Math.min(...x)).toBeCloseTo(layer / 4)
+      expect(Math.max(...x)).toBe(1)
+      expect(inspectTopology(piece)).toMatchObject({ watertight: true, degenerateFaces: 0 })
+    })
+  })
+
+  it('keeps touching highlights closed when a saddle lands exactly on the first contour', () => {
+    const { image } = strataFixture()
+    const field = { width: 3, height: 3, values: new Float32Array([1, 0, 0, 1, 0.5, 1, 0, 0, 1]) }
+    const mesh = buildStrataMesh(field, image, 16, { startLevel: 0.5, layers: 2 })
+    for (const piece of splitStrataMesh(mesh)) {
+      expect(inspectTopology(piece)).toMatchObject({ watertight: true, degenerateFaces: 0 })
+    }
+  })
+
+  it('preserves holes at raised start levels and gives a flat field one closed sheet', () => {
+    const ring = strataFixture('ring', 65)
+    // A plateau leaves a continuous bright ring at every sampled level.
+    ring.field.values = ring.field.values.map((height) => Number(height > 0.4))
+    const mesh = buildStrataMesh(ring.field, ring.image, 32, { startLevel: 0.5, layers: 4 })
+    for (const piece of splitStrataMesh(mesh)) {
+      expect(inspectTopology(piece)).toMatchObject({ eulerCharacteristic: 0, watertight: true, degenerateFaces: 0 })
+    }
+    const flat = strataFixture('flat')
+    const sheet = buildStrataMesh(flat.field, flat.image, 16, { startLevel: 0.95, layers: 24 })
+    expect(sheet.strata!.parts).toHaveLength(1)
+    expect(sheet.strata!.parts[0]!.threshold).toBe(flat.field.values[0])
+    expect(inspectTopology(sheet).watertight).toBe(true)
+    expect(normalizeStrataSettings({ startLevel: 1 }).startLevel).toBe(0.95)
+    expect(normalizeStrataSettings({ startLevel: -1 }).startLevel).toBe(0)
+    expect(normalizeStrataSettings({ startLevel: NaN }).startLevel).toBe(0)
   })
 
   it('makes nested footprints stacked along Z, not strips or identical cards', () => {
@@ -127,7 +173,7 @@ describe('Strata height-contour geometry', () => {
     for (const mode of ['plane', 'centered', 'solid'] as const) {
       const settings = { mode, resolution: 16, depth: 0.6, midpoint: 0.5, baseThickness: 0.3 }
       const mesh = buildMesh(field, image, settings)
-      expect(buildMesh(field, image, { ...settings, strata: { layers: 24, thickness: 0.12, separation: 0.18 } })).toEqual(mesh)
+      expect(buildMesh(field, image, { ...settings, strata: { startLevel: 0.9, layers: 24, thickness: 0.12, separation: 0.18 } })).toEqual(mesh)
       expect(mesh.strata).toBeUndefined()
     }
   })

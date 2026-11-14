@@ -3,6 +3,7 @@ import { gridDimensions, sampleColor } from './mesh-sampling'
 import type { MeshData, PixelImage, ScalarField, StrataData, StrataPart, StrataSettings } from '../types'
 
 export const DEFAULT_STRATA_SETTINGS: Readonly<StrataSettings> = Object.freeze({
+  startLevel: 0,
   layers: 12,
   thickness: 0.025,
   separation: 0.055,
@@ -12,6 +13,7 @@ export function normalizeStrataSettings(settings: Partial<StrataSettings> = {}):
   const finite = (value: number | undefined, fallback: number, low: number, high: number) =>
     Math.min(high, Math.max(low, Number.isFinite(value) ? value! : fallback))
   return {
+    startLevel: finite(settings.startLevel, DEFAULT_STRATA_SETTINGS.startLevel, 0, 0.95),
     layers: Math.round(finite(settings.layers, DEFAULT_STRATA_SETTINGS.layers, 2, 24)),
     thickness: finite(settings.thickness, DEFAULT_STRATA_SETTINGS.thickness, 0.005, 0.12),
     separation: finite(settings.separation, DEFAULT_STRATA_SETTINGS.separation, 0, 0.18),
@@ -57,6 +59,67 @@ function filteredOpacity(field: ScalarField, u: number, v: number, columns: numb
   return sum / 25
 }
 
+function capBoundary(cap: number[], vertexCount: number): Map<number, [number, number]> {
+  const boundary = new Map<number, [number, number]>()
+  for (let offset = 0; offset < cap.length; offset += 3) {
+    for (let corner = 0; corner < 3; corner++) {
+      const a = cap[offset + corner]!
+      const b = cap[offset + (corner + 1) % 3]!
+      const key = Math.min(a, b) * vertexCount + Math.max(a, b)
+      if (boundary.has(key)) boundary.delete(key)
+      else boundary.set(key, [a, b])
+    }
+  }
+  return boundary
+}
+
+// Exactly at a saddle, several closed regions can touch at a single grid point.
+// Give each triangle fan its own vertex so their vertical walls also stay separate.
+function splitTouchingContours(
+  cap: number[], boundary: Map<number, [number, number]>, duplicate: (vertex: number) => number,
+): boolean {
+  const seen = new Set<number>()
+  const touching = new Map<number, number[]>()
+  for (const [a] of boundary.values()) {
+    if (seen.has(a)) touching.set(a, [])
+    seen.add(a)
+  }
+  if (!touching.size) return false
+
+  for (let corner = 0; corner < cap.length; corner++) touching.get(cap[corner]!)?.push(corner)
+  for (const [vertex, corners] of touching) {
+    // Connect incident cap faces only when they share a full edge at this vertex.
+    const neighbors = new Map<number, number[]>()
+    for (const corner of corners) {
+      const offset = corner - corner % 3
+      for (let step = 1; step <= 2; step++) {
+        const other = cap[offset + (corner + step) % 3]!
+        const adjacent = neighbors.get(other)
+        if (adjacent) adjacent.push(corner)
+        else neighbors.set(other, [corner])
+      }
+    }
+    const visited = new Set<number>()
+    for (const corner of corners) {
+      if (visited.has(corner)) continue
+      const index = visited.size ? duplicate(vertex) : vertex
+      const stack = [corner]
+      while (stack.length) {
+        const current = stack.pop()!
+        if (visited.has(current)) continue
+        visited.add(current)
+        cap[current] = index
+        const offset = current - current % 3
+        for (let step = 1; step <= 2; step++) {
+          const other = cap[offset + (current + step) % 3]!
+          stack.push(...neighbors.get(other)!)
+        }
+      }
+    }
+  }
+  return true
+}
+
 function buildContourShells(
   field: ScalarField, image: PixelImage, resolution: number,
   options: Partial<StrataSettings>, cutoff?: number,
@@ -91,15 +154,15 @@ function buildContourShells(
   // A flat field has one level, not a fabricated stack of identical cards.
   const count = cutoff === undefined && maximum > minimum ? settings.layers : 1
 
+  const firstLevel = minimum + (maximum - minimum) * settings.startLevel
   for (let layer = 0; layer < count; layer += 1) {
-    const threshold = cutoff ?? (minimum + (maximum - minimum) * layer / settings.layers)
+    const threshold = cutoff ?? (firstLevel + (maximum - firstLevel) * layer / settings.layers)
     const vertexStart = positions.length / 3
     const indexStart = indices.length
     const bottom = layer * (settings.thickness + settings.separation)
     const top = bottom + settings.thickness
     const vertices = new Map<number, number>()
     const cap: number[] = []
-    const boundary = new Map<number, [number, number]>()
 
     const vertex = (key: number, sourceU: number, sourceV: number): number => {
       const existing = vertices.get(key)
@@ -181,16 +244,19 @@ function buildContourShells(
     uvs.length = (vertexStart + surfaceVertices) * 2
     heights.length = vertexStart + surfaceVertices
     for (let index = 0; index < cap.length; index += 1) cap[index] = remap[cap[index]! - vertexStart]!
-    const edgeBase = positions.length / 3
-    for (let index = 0; index < cap.length; index += 3) {
-      const a = cap[index]!, b = cap[index + 1]!, c = cap[index + 2]!
-      indices.push(a, b, c)
-      for (const [left, right] of [[a, b], [b, c], [c, a]]) {
-        const key = Math.min(left!, right!) * edgeBase + Math.max(left!, right!)
-        if (boundary.has(key)) boundary.delete(key)
-        else boundary.set(key, [left!, right!])
-      }
+    let boundary = capBoundary(cap, positions.length / 3)
+    if (settings.startLevel > 0 && splitTouchingContours(cap, boundary, (source) => {
+      const index = positions.length / 3
+      positions.push(positions[source * 3]!, positions[source * 3 + 1]!, positions[source * 3 + 2]!)
+      colors.push(colors[source * 3]!, colors[source * 3 + 1]!, colors[source * 3 + 2]!)
+      uvs.push(uvs[source * 2]!, uvs[source * 2 + 1]!)
+      heights.push(threshold)
+      return index
+    })) {
+      surfaceVertices = positions.length / 3 - vertexStart
+      boundary = capBoundary(cap, positions.length / 3)
     }
+    for (const index of cap) indices.push(index)
     for (let index = vertexStart; index < vertexStart + surfaceVertices; index += 1) {
       positions.push(positions[index * 3]!, positions[index * 3 + 1]!, bottom)
       colors.push(colors[index * 3]!, colors[index * 3 + 1]!, colors[index * 3 + 2]!)

@@ -155,6 +155,7 @@ function livingForm(value: unknown, name: string): LivingFormSettings {
 function strata(value: unknown): StrataSettings {
   const settings = object(value, 'strata')
   return {
+    startLevel: settings.startLevel === undefined ? 0 : number(settings.startLevel, 'strata.startLevel', 0, 0.95),
     layers: number(settings.layers, 'strata.layers', 2, 24, true),
     thickness: number(settings.thickness, 'strata.thickness', 0.005, 0.12),
     separation: number(settings.separation, 'strata.separation', 0, 0.18),

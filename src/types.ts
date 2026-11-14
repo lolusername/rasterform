@@ -106,6 +106,8 @@ export interface MeshSettings {
 }
 
 export interface StrataSettings {
+  /** Fraction of the sampled height range at the first contour. */
+  startLevel: number
   layers: number
   thickness: number
   separation: number
