@@ -12,7 +12,7 @@ import {
   configureStudioRenderer,
   createFinalRenderScene,
   createThreeMesh,
-  updateSurfaceNormals,
+  refreshGeometryFrame,
   disposeFinalRenderScene,
 } from '../lib/three'
 import { viewportBackgroundPreset } from '../lib/background'
@@ -178,9 +178,9 @@ function applyLivingFormFrame(force = false) {
   const settings = props.livingForm.enabled
     ? props.livingForm
     : { ...props.livingForm, amount: 0 }
-  livingFormEngine.writePositions(position.array, props.livingPhase, settings)
-  position.needsUpdate = true
-  updateSurfaceNormals(object.geometry, props.mesh?.alphaCutout === true)
+  const sourcePositions = position.array.subarray(0, livingFormEngine.vertexCount * 3)
+  livingFormEngine.writePositions(sourcePositions, props.livingPhase, settings)
+  refreshGeometryFrame(object.geometry, props.mesh?.alphaCutout === true)
   appliedLivingFrame = key
   livingFrameDirty = false
   outputCameraDirty = true
@@ -367,7 +367,7 @@ function displayCamera(): THREE.PerspectiveCamera | null {
   } else if (!outputCamera || outputCameraDirty) {
     const position = object?.geometry.getAttribute('position')
     const visibleMesh = position instanceof THREE.BufferAttribute && position.array instanceof Float32Array
-      ? { ...props.mesh, positions: position.array }
+      ? { ...props.mesh, positions: position.array.subarray(0, props.mesh.positions.length) }
       : props.mesh
     outputCamera = createOutputPreviewCamera(visibleMesh, camera, props.outputPreview)
   }

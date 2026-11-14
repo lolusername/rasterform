@@ -195,7 +195,7 @@ describe('Strata height-contour geometry', () => {
     expect(closed.strata).not.toBe(mesh.strata)
     expect(snapshotMesh(mesh).strata!.parts).not.toBe(mesh.strata!.parts)
     const rendered = createThreeMesh(mesh, 'clay')
-    expect((rendered.material as MeshStandardMaterial).flatShading).toBe(true)
+    expect((rendered.material as MeshStandardMaterial).flatShading).toBe(false)
     rendered.geometry.dispose()
   })
 

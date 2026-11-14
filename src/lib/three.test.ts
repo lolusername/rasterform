@@ -6,12 +6,16 @@ import {
   configureStudioRenderer,
   createDefaultAppearanceSettings,
   createFinalRenderScene,
+  createGeometry,
   createMaterial,
   createThreeMesh,
   heightGradientColors,
   updateSurfaceNormals,
+  refreshGeometryFrame,
 } from './three'
 import type { MeshData } from '../types'
+import { buildStrataMesh } from './strata'
+import { createLivingFormEngine } from './living-form'
 
 function meshFixture(): MeshData {
   return {
@@ -57,6 +61,62 @@ describe('viewport materials', () => {
     expect(a[0]).toBeLessThan(0)
     expect(a[1]).toBeLessThan(0)
     expect(a[2]).toBeGreaterThan(0)
+  })
+
+  it('keeps Strata caps planar while wall normals follow each outline independently of triangulation', () => {
+    const values = new Float32Array([0, 1, 0, 1])
+    const field = { width: 2, height: 2, values }
+    const image = { width: 2, height: 2, sourceWidth: 2, sourceHeight: 2, data: new Uint8ClampedArray(16).fill(255), name: 'ramp' }
+    const mesh = buildStrataMesh(field, image, 16, { startLevel: 0.33, layers: 3 })
+    const alternate = { ...mesh, indices: mesh.indices.slice() }
+    for (const part of mesh.strata!.parts) {
+      const start = part.indexStart + 2 * part.surfaceIndexCount
+      for (let i = start; i < part.indexStart + part.indexCount; i += 6) {
+        const [a, belowA, b, , , belowB] = mesh.indices.subarray(i, i + 6)
+        alternate.indices.set([a!, belowA!, belowB!, a!, belowB!, b!], i)
+      }
+    }
+    const geometry = createGeometry(mesh)
+    const other = createGeometry(alternate)
+    for (const part of mesh.strata!.parts) {
+      const firstWall = part.indexStart + 2 * part.surfaceIndexCount
+      const originalCount = mesh.positions.length / 3
+      for (let i = part.indexStart; i < firstWall; i++) {
+        const capIndex = geometry.index!.getX(i)
+        expect(capIndex).toBeLessThan(originalCount)
+        expect(geometry.attributes.normal!.getZ(capIndex)).toBe(i < part.indexStart + part.surfaceIndexCount ? 1 : -1)
+      }
+      const wallNormals = (geo: THREE.BufferGeometry, source: Uint32Array) => {
+        const directions = new Map<number, THREE.Vector3>()
+        for (let i = firstWall; i < part.indexStart + part.indexCount; i++) {
+          const sourceIndex = source[i]!
+          const wallIndex = geo.index!.getX(i)
+          expect(wallIndex).toBeGreaterThanOrEqual(originalCount)
+          directions.set(sourceIndex, new THREE.Vector3().fromBufferAttribute(geo.attributes.normal!, wallIndex))
+        }
+        return directions
+      }
+      const directions = wallNormals(geometry, mesh.indices), flipped = wallNormals(other, alternate.indices)
+      for (const [sourceIndex, direction] of directions) {
+        expect(direction.z).toBeCloseTo(0, 6)
+        expect(direction.length()).toBeCloseTo(1, 6)
+        expect(direction.distanceTo(flipped.get(sourceIndex)!)).toBeLessThan(1e-6)
+      }
+    }
+
+    // An animated preview writes into the original portion of the buffer. A
+    // fresh High or Final export of the same visible phase must agree exactly.
+    const engine = createLivingFormEngine(mesh)
+    const phase = 0.28, settings = { enabled: true, behavior: 'flow' as const, amount: 0.85 }
+    const position = geometry.getAttribute('position').array as Float32Array
+    engine.writePositions(position.subarray(0, mesh.positions.length), phase, settings)
+    refreshGeometryFrame(geometry, false)
+    const offline = createGeometry(engine.sampleMesh(phase, settings))
+    expect(position).toEqual(offline.attributes.position!.array)
+    expect(geometry.attributes.normal!.array).toEqual(offline.attributes.normal!.array)
+    geometry.dispose()
+    other.dispose()
+    offline.dispose()
   })
 
   it('maps the low, movable midpoint, and high gradient colors exactly', () => {

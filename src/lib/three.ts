@@ -76,49 +76,115 @@ export function heightGradientColors(
   return colors
 }
 
+interface StrataRim {
+  /** Each appended wall vertex follows an original cap vertex during motion. */
+  sources: Uint32Array
+  wallCorners: Uint32Array
+}
+
+const strataRims = new WeakMap<THREE.BufferGeometry, StrataRim>()
+
+function splitStrataRims(mesh: MeshData, indices: Uint32Array): StrataRim {
+  const first = mesh.positions.length / 3
+  const mapped = new Map<number, number>()
+  const sources: number[] = []
+  const wallCorners: number[] = []
+  for (const part of mesh.strata!.parts) {
+    const start = part.indexStart + 2 * part.surfaceIndexCount
+    for (let corner = start; corner < part.indexStart + part.indexCount; corner++) {
+      const source = indices[corner]!
+      let index = mapped.get(source)
+      if (index === undefined) {
+        index = first + sources.length
+        mapped.set(source, index)
+        sources.push(source)
+      }
+      indices[corner] = index
+      wallCorners.push(index)
+    }
+  }
+  return { sources: Uint32Array.from(sources), wallCorners: Uint32Array.from(wallCorners) }
+}
+
+function withRimVertices(values: Float32Array, size: number, rim: StrataRim | undefined): Float32Array {
+  if (!rim) return values.slice()
+  const result = new Float32Array(values.length + size * rim.sources.length)
+  result.set(values)
+  for (let i = 0; i < rim.sources.length; i++) {
+    const from = rim.sources[i]! * size
+    for (let j = 0; j < size; j++) result[values.length + i * size + j] = values[from + j]!
+  }
+  return result
+}
+
 export function createGeometry(
   mesh: MeshData,
   colorMode: ColorMode = 'original',
   appearance: AppearanceSettings = createDefaultAppearanceSettings(),
 ): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions.slice(), 3))
-  geometry.setAttribute('uv', new THREE.BufferAttribute(mesh.uvs.slice(), 2))
+  const indices = mesh.indices.slice()
+  // Independent wall normals keep the horizontal sheets crisp all the way to
+  // their edges. Source indices also distinguish coincident, disconnected shells.
+  const rim = mesh.strata ? splitStrataRims(mesh, indices) : undefined
+  if (rim) strataRims.set(geometry, rim)
+  geometry.setAttribute('position', new THREE.BufferAttribute(withRimVertices(mesh.positions, 3, rim), 3))
+  geometry.setAttribute('uv', new THREE.BufferAttribute(withRimVertices(mesh.uvs, 2, rim), 2))
   const colors = colorMode === 'height'
     ? heightGradientColors(mesh.heights, appearance.heightGradient)
-    : mesh.colors.slice()
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  geometry.setIndex(new THREE.BufferAttribute(mesh.indices.slice(), 1))
+    : mesh.colors
+  geometry.setAttribute('color', new THREE.BufferAttribute(withRimVertices(colors, 3, rim), 3))
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1))
   updateSurfaceNormals(geometry, mesh.alphaCutout === true)
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
   return geometry
 }
 
-/** Area-weighting overemphasizes the tall diagonals that triangulate the rim of
- * a cutout. Weight incident face normals by corner angle on that rim, so the
- * finish follows the outline independently of the wall's chosen diagonal. */
+/** The motion engine writes the original indexed geometry in place. Refresh
+ * the additional wall copies before computing shading for this frame. */
+export function refreshGeometryFrame(geometry: THREE.BufferGeometry, cutout: boolean): void {
+  const position = geometry.getAttribute('position')
+  const rim = strataRims.get(geometry)
+  if (rim) {
+    const first = position.count - rim.sources.length
+    for (let i = 0; i < rim.sources.length; i++) {
+      const source = rim.sources[i]!
+      position.setXYZ(first + i, position.getX(source), position.getY(source), position.getZ(source))
+    }
+  }
+  position.needsUpdate = true
+  updateSurfaceNormals(geometry, cutout)
+}
+
+/** Corner-angle weights make rim shading independent of a side quad’s diagonal. */
 export function updateSurfaceNormals(geometry: THREE.BufferGeometry, cutout: boolean): void {
   geometry.computeVertexNormals()
-  if (!cutout || !geometry.index) return
+  const strata = strataRims.get(geometry)
+  if ((!strata && !cutout) || !geometry.index) return
   const position = geometry.getAttribute('position')
   const normal = geometry.getAttribute('normal')
-  const indices = geometry.index.array
-  const capCount = position.count / 2
-  const rim = new Set<number>()
-  for (let i = indices.length - 3; i >= 0; i -= 3) {
-    const a = indices[i]!, b = indices[i + 1]!, c = indices[i + 2]!
-    if ((a < capCount) === (b < capCount) && (b < capCount) === (c < capCount)) break
-    rim.add(a)
-    rim.add(b)
-    rim.add(c)
+  const indices = strata?.wallCorners ?? geometry.index.array
+  const firstWallVertex = position.count - (strata?.sources.length ?? 0)
+  const cutoutRim = new Set<number>()
+  if (strata) {
+    for (let i = firstWallVertex; i < position.count; i++) normal.setXYZ(i, 0, 0, 0)
+  } else {
+    const capCount = position.count / 2
+    for (let i = indices.length - 3; i >= 0; i -= 3) {
+      const a = indices[i]!, b = indices[i + 1]!, c = indices[i + 2]!
+      if ((a < capCount) === (b < capCount) && (b < capCount) === (c < capCount)) break
+      cutoutRim.add(a)
+      cutoutRim.add(b)
+      cutoutRim.add(c)
+    }
+    for (const index of cutoutRim) normal.setXYZ(index, 0, 0, 0)
   }
-  for (const v of rim) normal.setXYZ(v, 0, 0, 0)
   const p = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3(), face = new THREE.Vector3()
   for (let i = 0; i < indices.length; i += 3) {
     for (let j = 0; j < 3; j++) {
       const index = indices[i + j]!
-      if (!rim.has(index)) continue
+      if (!strata && !cutoutRim.has(index)) continue
       p.fromBufferAttribute(position, index)
       u.fromBufferAttribute(position, indices[i + (j + 1) % 3]!).sub(p)
       v.fromBufferAttribute(position, indices[i + (j + 2) % 3]!).sub(p)
@@ -129,9 +195,14 @@ export function updateSurfaceNormals(geometry: THREE.BufferGeometry, cutout: boo
       normal.setXYZ(index, normal.getX(index) + face.x, normal.getY(index) + face.y, normal.getZ(index) + face.z)
     }
   }
-  for (const index of rim) {
+  const normalize = (index: number) => {
     p.fromBufferAttribute(normal, index).normalize()
     normal.setXYZ(index, p.x, p.y, p.z)
+  }
+  if (strata) {
+    for (let i = firstWallVertex; i < position.count; i++) normalize(i)
+  } else {
+    for (const index of cutoutRim) normalize(index)
   }
   normal.needsUpdate = true
 }
@@ -169,8 +240,6 @@ export function createThreeMesh(
   appearance: AppearanceSettings = createDefaultAppearanceSettings(),
 ): THREE.Mesh {
   const material = createMaterial(colorMode, appearance)
-  // Contour sheets have crisp, planar caps and cut edges in High and Final.
-  if (mesh.mode === 'strata') material.flatShading = true
   const object = new THREE.Mesh(
     createGeometry(mesh, colorMode, appearance),
     material,
