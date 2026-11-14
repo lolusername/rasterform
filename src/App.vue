@@ -1193,6 +1193,7 @@ onMounted(() => {
   // history baseline so the very first orbit/Fit action can be undone.
   documentCamera = threePreview.value?.getCameraSnapshot() ?? undefined
   editorHistory.synchronize(captureDocument())
+  if (new URLSearchParams(location.search).get('study') === 'mona-lisa') void openMonaLisaStudy()
   void cleanupStaleStoredZipArchives()
   jobClockTimer = window.setInterval(() => { jobClock.value = Date.now() }, 1000)
   window.addEventListener('keydown', handleGlobalKeydown)
@@ -1411,6 +1412,40 @@ async function updateCanvases() {
 
 // Template refs change on workspace remount even when their source data does not.
 watch([image, heightField, sourceCanvas, sourceThumbCanvas, heightCanvas], updateCanvases, { immediate: true, flush: 'post' })
+
+async function openMonaLisaStudy() {
+  const operation = ++sourceImportSequence
+  const initialDocument = captureDocument()
+  try {
+    const response = await fetch('/studies/mona-lisa-relief.png')
+    if (!response.ok) throw new Error('Image unavailable')
+    const file = new File([await response.blob()], 'Mona Lisa relief.png', { type: 'image/png' })
+    const portrait = await fileToPixelImage(file)
+    if (operation !== sourceImportSequence || appDisposed || editorBusy.value || comparison.value
+      || !editorDocumentsEqual(initialDocument, captureDocument())) return
+
+    const study = initialDocument
+    study.image = portrait
+    const luminance = createChannelLayer('luminance')
+    study.channels = [luminance]
+    study.selectedChannelId = luminance.id
+    Object.assign(study.field, { blur: 1, contrast: 0 })
+    Object.assign(study.mesh, { mode: 'solid', alphaCutout: true, depth: 0.28, midpoint: 0.08, baseThickness: 0.06, resolution: 180 })
+    study.imageAppearance.clay = { finish: 'metallic', color: '#a59486' }
+    study.imageColorMode = 'clay'
+    // The three-quarter view used on the studio page.
+    if (study.camera) {
+      study.camera.position = [1.58, -0.18, 3.03]
+      study.camera.target = [0, 0, 0.18]
+      study.camera.quaternion = [0.02670821175, 0.25031317904, -0.00690805143, 0.96777180298]
+    }
+    await applyDocument(study)
+    editorHistory.synchronize(captureDocument())
+    status.value = 'Mona Lisa · metallic relief'
+  } catch {
+    if (operation === sourceImportSequence && !appDisposed) status.value = 'Could not open the Mona Lisa study. Reload to try again or choose an image.'
+  }
+}
 
 async function openFile(file?: File) {
   if (!file || comparison.value || editorBusy.value) return
