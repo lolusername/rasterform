@@ -9,6 +9,7 @@ import {
   createMaterial,
   createThreeMesh,
   heightGradientColors,
+  updateSurfaceNormals,
 } from './three'
 import type { MeshData } from '../types'
 
@@ -36,6 +37,28 @@ function meshFixture(): MeshData {
 }
 
 describe('viewport materials', () => {
+  it('gives cutout walls the same finish when a side quad is triangulated along its other diagonal', () => {
+    const top = [0, 0, 1, 3, 0, 1, 3, 1, 1, 0, 1, 1]
+    const bottom = [0, 0, 0, 3, 0, 0, 3, 1, 0, 0, 1, 0]
+    function normals(reverse: boolean) {
+      const index = [0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6]
+      for (let a = 0; a < 4; a++) {
+        const b = (a + 1) % 4
+        index.push(...(reverse ? [a, a + 4, b + 4, a, b + 4, b] : [a, a + 4, b, b, a + 4, b + 4]))
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute([...top, ...bottom], 3))
+      geometry.setIndex(index)
+      updateSurfaceNormals(geometry, true)
+      return geometry.getAttribute('normal').array
+    }
+    const a = normals(false), b = normals(true)
+    for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(b[i]!, 5)
+    expect(a[0]).toBeLessThan(0)
+    expect(a[1]).toBeLessThan(0)
+    expect(a[2]).toBeGreaterThan(0)
+  })
+
   it('maps the low, movable midpoint, and high gradient colors exactly', () => {
     const gradient = { low: '#102040', mid: '#40c080', high: '#f0d040', midpoint: 0.25 }
     const colors = heightGradientColors(new Float32Array([0, 0.25, 1]), gradient)

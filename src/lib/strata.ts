@@ -70,6 +70,32 @@ export function buildStrataMesh(
   resolution: number,
   options: Partial<StrataSettings> = {},
 ): MeshData {
+  return buildContourShells(field, image, resolution, options)
+}
+
+/** A single closed footprint from source opacity, using the same contour crossings,
+ * indexed caps and boundary walls as Strata (including internal holes). */
+export function clipAlphaShell(alpha: ScalarField, image: PixelImage, resolution: number): MeshData {
+  // Offset the half-opacity tie slightly to avoid a pinched corner on a grid vertex.
+  return buildContourShells(alpha, image, resolution, {}, 0.50001)
+}
+
+// A hard, high-resolution silhouette sampled only at grid vertices becomes a
+// staircase. Integrate opacity over each mesh sample’s footprint before clipping.
+function filteredOpacity(field: ScalarField, u: number, v: number, columns: number, rows: number): number {
+  let sum = 0
+  for (let y = -2; y <= 2; y++) {
+    for (let x = -2; x <= 2; x++) {
+      sum += bilinearSample(field, u + x / (3 * columns), v + y / (3 * rows))
+    }
+  }
+  return sum / 25
+}
+
+function buildContourShells(
+  field: ScalarField, image: PixelImage, resolution: number,
+  options: Partial<StrataSettings>, cutoff?: number,
+): MeshData {
   const settings = normalizeStrataSettings(options)
   const { columns, rows } = gridDimensions(field, resolution)
   const gridWidth = columns + 1
@@ -79,7 +105,9 @@ export function buildStrataMesh(
   let maximum = 0
   for (let y = 0; y <= rows; y += 1) {
     for (let x = 0; x <= columns; x += 1) {
-      const raw = bilinearSample(field, x / columns, y / rows)
+      const raw = cutoff === undefined
+        ? bilinearSample(field, x / columns, y / rows)
+        : filteredOpacity(field, x / columns, y / rows, columns, rows)
       const value = clamp01(Number.isFinite(raw) ? raw : 0)
       values[y * gridWidth + x] = value
       minimum = Math.min(minimum, values[y * gridWidth + x]!)
@@ -96,10 +124,10 @@ export function buildStrataMesh(
   const indices: number[] = []
   const parts: StrataPart[] = []
   // A flat field has one level, not a fabricated stack of identical cards.
-  const count = maximum > minimum ? settings.layers : 1
+  const count = cutoff === undefined && maximum > minimum ? settings.layers : 1
 
   for (let layer = 0; layer < count; layer += 1) {
-    const threshold = minimum + (maximum - minimum) * layer / settings.layers
+    const threshold = cutoff ?? (minimum + (maximum - minimum) * layer / settings.layers)
     const vertexStart = positions.length / 3
     const indexStart = indices.length
     const bottom = layer * (settings.thickness + settings.separation)
@@ -216,7 +244,8 @@ export function buildStrataMesh(
   return {
     positions: new Float32Array(positions), indices: new Uint32Array(indices),
     colors: new Float32Array(colors), uvs: new Float32Array(uvs), heights: new Float32Array(heights),
-    width: columns, height: rows, mode: 'strata', strata: { ...settings, parts },
+    width: columns, height: rows,
+    ...(cutoff === undefined ? { mode: 'strata', strata: { ...settings, parts } } : { mode: 'solid', alphaCutout: true }),
   }
 }
 

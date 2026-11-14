@@ -27,6 +27,13 @@ describe('authored editor documents', () => {
     expect(original).toEqual(before)
   })
 
+  it('round-trips the optional solid alpha cutout and leaves older project settings alone', async () => {
+    const project = editorDocumentFixture()
+    expect((await parseEditorProject(await serializeEditorProject(project))).mesh.alphaCutout).toBeUndefined()
+    project.mesh.alphaCutout = true
+    expect((await parseEditorProject(await serializeEditorProject(project))).mesh.alphaCutout).toBe(true)
+  })
+
   it.each(LIVING_FORM_BEHAVIORS)('reopens version-1 projects using %s in either workspace', async (behavior) => {
     const original = editorDocumentFixture()
     original.imageLivingForm.behavior = behavior

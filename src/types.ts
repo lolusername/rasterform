@@ -111,6 +111,7 @@ export interface MeshSettings {
   depth: number
   midpoint: number
   baseThickness: number
+  alphaCutout?: boolean
   strata?: StrataSettings
 }
 
@@ -172,6 +173,8 @@ export interface MeshData {
   height: number
   mode: GeometryMode
   strata?: StrataData
+  /** Irregular closed shell with matching front/back vertices, ordered in halves. */
+  alphaCutout?: true
 }
 
 export interface TopologyReport {

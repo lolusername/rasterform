@@ -533,6 +533,7 @@ async function applyDocument(document: EditorDocument) {
     selectedChannelId.value = document.selectedChannelId
     Object.assign(fieldSettings, document.field)
     Object.assign(meshSettings, document.mesh)
+    if (document.mesh.alphaCutout === undefined) delete meshSettings.alphaCutout
     if (!document.mesh.strata) delete meshSettings.strata
     Object.assign(strataSettings, document.strata)
     Object.assign(textSettings, document.text)
@@ -1108,7 +1109,10 @@ const strataContours = computed(() => buildStrataMesh(heightField.value, image.v
 const imageMesh = computed(() => meshSettings.mode === 'strata'
   ? spaceStrataMesh(strataContours.value, strataSettings)
   : buildMesh(heightField.value, image.value, meshSettings))
-const mesh = computed<MeshData | null>(() => workspace.value === 'image' ? imageMesh.value : textMesh.value)
+const mesh = computed<MeshData | null>(() => {
+  if (workspace.value === 'text') return textMesh.value
+  return imageMesh.value.indices.length ? imageMesh.value : null
+})
 const strataTopology = computed(() => isStrata.value ? inspectTopology(strataContours.value) : null)
 const topology = computed(() => isStrata.value ? strataTopology.value : mesh.value ? inspectTopology(mesh.value) : null)
 const activeGeometry = computed(() => workspace.value === 'text'
@@ -2517,6 +2521,10 @@ async function downloadLivingFormLoop() {
             <div class="compact-buttons"><button type="button" :disabled="editorBusy" :aria-pressed="!comparison.showKept" @click="toggleComparison(false)">Current</button><button type="button" :disabled="editorBusy" :aria-pressed="comparison.showKept" @click="toggleComparison(true)">{{ comparison.name }}</button></div>
             <div class="compact-buttons"><button type="button" :disabled="editorBusy" @click="finishComparison(false)">Back to current</button><button type="button" :disabled="editorBusy" @click="finishComparison(true)">Use {{ comparison.name }}</button></div>
           </div>
+          <div v-if="workspace === 'image' && !mesh" class="viewport-message" role="status">
+            <strong>No visible shape at this mesh detail</strong>
+            <small>Increase Mesh detail, or switch off Cut to transparency to keep the full image.</small>
+          </div>
           <div v-if="workspace === 'text' && (textBuilding || !mesh)" class="viewport-message" role="status">
             <span v-if="textBuilding" class="spinner" aria-hidden="true"></span>
             <strong>{{ textBuilding ? 'Building type…' : 'Type something to begin' }}</strong>
@@ -2582,6 +2590,8 @@ async function downloadLivingFormLoop() {
                 <NumberControl v-model="meshSettings.depth" label="Depth" :min="0.02" :max="1.4" :step="0.02" :neutral="0.58" help="Height of the relief; does not change image resolution." />
                 <NumberControl v-model="meshSettings.midpoint" label="Relief midpoint" :min="0" :max="1" :step="0.01" :neutral="0.5" :help="meshSettings.mode === 'plane' ? 'Not used by Raised relief, which starts at zero.' : 'Height-field value used as the reference level for the relief.'" />
               </template>
+              <label v-if="meshSettings.mode === 'solid'" class="check-control"><input v-model="meshSettings.alphaCutout" type="checkbox">Cut to transparency</label>
+              <small v-if="meshSettings.mode === 'solid' && meshSettings.alphaCutout" class="inline-note">The source’s 50% opacity edge shapes the outline and any holes. Mesh detail controls edge precision.</small>
               <NumberControl v-if="meshSettings.mode === 'solid'" v-model="meshSettings.baseThickness" label="Base thickness" :min="0.06" :max="0.8" :step="0.02" :neutral="0.26" />
               <NumberControl v-model="meshSettings.resolution" label="Mesh detail" :min="16" :max="180" :step="4" :neutral="88" help="Geometry density, separate from exported pixels and render samples." />
             </div>

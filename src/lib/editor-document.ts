@@ -237,6 +237,7 @@ export function validateEditorDocument(value: unknown): EditorDocument {
       mode: enumeration(mesh.mode, ['plane', 'centered', 'solid', 'strata'], 'mesh.mode'),
       resolution: number(mesh.resolution, 'mesh.resolution', 2, 1024, true), depth: number(mesh.depth, 'mesh.depth', 0, 100),
       midpoint: number(mesh.midpoint, 'mesh.midpoint', 0, 1), baseThickness: number(mesh.baseThickness, 'mesh.baseThickness', 0, 100),
+      ...(mesh.alphaCutout !== undefined ? { alphaCutout: boolean(mesh.alphaCutout, 'mesh.alphaCutout') } : {}),
       ...(mesh.strata ? { strata: strata(mesh.strata) } : {}),
     },
     strata: strata(document.strata),

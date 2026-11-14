@@ -89,10 +89,51 @@ export function createGeometry(
     : mesh.colors.slice()
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   geometry.setIndex(new THREE.BufferAttribute(mesh.indices.slice(), 1))
-  geometry.computeVertexNormals()
+  updateSurfaceNormals(geometry, mesh.alphaCutout === true)
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
   return geometry
+}
+
+/** Area-weighting overemphasizes the tall diagonals that triangulate the rim of
+ * a cutout. Weight incident face normals by corner angle on that rim, so the
+ * finish follows the outline independently of the wall's chosen diagonal. */
+export function updateSurfaceNormals(geometry: THREE.BufferGeometry, cutout: boolean): void {
+  geometry.computeVertexNormals()
+  if (!cutout || !geometry.index) return
+  const position = geometry.getAttribute('position')
+  const normal = geometry.getAttribute('normal')
+  const indices = geometry.index.array
+  const capCount = position.count / 2
+  const rim = new Set<number>()
+  for (let i = indices.length - 3; i >= 0; i -= 3) {
+    const a = indices[i]!, b = indices[i + 1]!, c = indices[i + 2]!
+    if ((a < capCount) === (b < capCount) && (b < capCount) === (c < capCount)) break
+    rim.add(a)
+    rim.add(b)
+    rim.add(c)
+  }
+  for (const v of rim) normal.setXYZ(v, 0, 0, 0)
+  const p = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3(), face = new THREE.Vector3()
+  for (let i = 0; i < indices.length; i += 3) {
+    for (let j = 0; j < 3; j++) {
+      const index = indices[i + j]!
+      if (!rim.has(index)) continue
+      p.fromBufferAttribute(position, index)
+      u.fromBufferAttribute(position, indices[i + (j + 1) % 3]!).sub(p)
+      v.fromBufferAttribute(position, indices[i + (j + 2) % 3]!).sub(p)
+      face.crossVectors(u, v)
+      const length = face.length()
+      if (length === 0) continue
+      face.multiplyScalar(Math.atan2(length, u.dot(v)) / length)
+      normal.setXYZ(index, normal.getX(index) + face.x, normal.getY(index) + face.y, normal.getZ(index) + face.z)
+    }
+  }
+  for (const index of rim) {
+    p.fromBufferAttribute(normal, index).normalize()
+    normal.setXYZ(index, p.x, p.y, p.z)
+  }
+  normal.needsUpdate = true
 }
 
 export function claySurface(finish: ClayFinish): { roughness: number; metalness: number } {

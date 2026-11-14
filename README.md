@@ -36,7 +36,7 @@ Get the Apple silicon version from the [official Blender 5.2 LTS release page](h
 ## Make a piece
 
 1. **Choose Image or Text.** Use brightness, hue, saturation, RGB channels, alpha, or edges as image height signals. Text has extrusion, bevel, tracking, line-height, and alignment controls.
-2. **Shape the form.** Blend channels, adjust depth and smoothing, or use Blob to round the result. **Strata** builds separately closed contour layers with adjustable thickness and gaps.
+2. **Shape the form.** Blend channels, adjust depth and smoothing, or use Blob to round the result. For artwork with a transparent background, **Solid relief → Cut to transparency** lets the source’s outline and holes define the solid. The selected channels still shape its face. **Strata** builds separately closed contour layers with adjustable thickness and gaps.
 3. **Choose an appearance.** Keep the original colors, map height to a gradient, try matte/glossy/metallic clay, or inspect the wireframe in the HDR studio.
 4. **Add motion.** Living Form makes the mesh breathe, ripple, flow, or melt; Strata's Expand opens and closes the stack. Motion loops exactly and preserves the original source and base geometry.
 5. **Frame and export.** Use the current camera or, for Image stills, a straight-on view. Choose a transparent background or a flat white, gray, or black studio background.

@@ -12,6 +12,7 @@ import {
   configureStudioRenderer,
   createFinalRenderScene,
   createThreeMesh,
+  updateSurfaceNormals,
   disposeFinalRenderScene,
 } from '../lib/three'
 import { viewportBackgroundPreset } from '../lib/background'
@@ -188,7 +189,7 @@ function applyLivingFormFrame(force = false) {
     : { ...props.livingForm, amount: 0 }
   livingFormEngine.writePositions(position.array, props.livingPhase, settings)
   position.needsUpdate = true
-  object.geometry.computeVertexNormals()
+  updateSurfaceNormals(object.geometry, props.mesh?.alphaCutout === true)
   appliedLivingFrame = key
   livingFrameDirty = false
   outputCameraDirty = true

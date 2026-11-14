@@ -1,5 +1,5 @@
-import { bilinearSample } from './channels'
-import { buildStrataMesh } from './strata'
+import { bilinearSample, extractScalarField } from './channels'
+import { buildStrataMesh, clipAlphaShell } from './strata'
 import { gridDimensions, sampleColor } from './mesh-sampling'
 import type { MeshData, MeshSettings, PixelImage, ScalarField } from '../types'
 
@@ -15,6 +15,21 @@ function perimeter(columns: number, rows: number): number[] {
 
 export function buildMesh(field: ScalarField, image: PixelImage, settings: MeshSettings): MeshData {
   if (settings.mode === 'strata') return buildStrataMesh(field, image, settings.resolution, settings.strata)
+  if (settings.mode === 'solid' && settings.alphaCutout) {
+    const alpha = extractScalarField(image, 'alpha')
+    if (alpha.values.some(value => value <= 0.5)) {
+      const shell = clipAlphaShell(alpha, image, settings.resolution)
+      // The cap and back share a UV footprint. Height comes from the selected
+      // channels; alpha determines only the outer edge and any holes.
+      const capCount = shell.heights.length / 2
+      for (let i = 0; i < capCount; i++) {
+        const value = bilinearSample(field, shell.uvs[i * 2]!, 1 - shell.uvs[i * 2 + 1]!)
+        shell.heights[i] = shell.heights[i + capCount] = value
+        shell.positions[i * 3 + 2] = Math.max(0.025, settings.baseThickness + (value - settings.midpoint) * settings.depth)
+      }
+      return shell
+    }
+  }
   const { columns, rows } = gridDimensions(field, settings.resolution)
   const gridVertexCount = (columns + 1) * (rows + 1)
   const layerCount = settings.mode === 'solid' ? 2 : 1
