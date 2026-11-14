@@ -4,14 +4,12 @@ import ThreePreview from './components/ThreePreview.vue'
 import NumberControl from './components/NumberControl.vue'
 import ChannelInspection from './components/ChannelInspection.vue'
 import FieldVariations from './components/FieldVariations.vue'
-import { cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, parseEditorProject, serializeEditorProject, withChannelPreset, type EditorDocument } from './lib/editor-document'
+import { cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, withChannelPreset, type EditorDocument } from './lib/editor-document'
 import { createFieldComparison } from './lib/editor-comparison'
 import type { FieldVariationKey } from './lib/field-variations'
 import { createEditorHistory } from './lib/editor-history'
 import { createEditorSessionPersistence } from './lib/editor-session'
 import type { PreviewCameraSnapshot } from './lib/preview-camera'
-import { getDesktopProjectFilesBridge } from './desktop/project-files'
-import { getDesktopEditorCommandsBridge, type DesktopEditorCommand } from './desktop/editor-commands'
 import {
   VIEWPORT_BACKGROUNDS,
   isViewportBackground,
@@ -36,42 +34,13 @@ import {
   type RegisteredFont,
 } from './lib/local-fonts'
 import { inspectTopology } from './lib/topology'
-import { downloadBlob, exportGlb, exportHeightPng, exportRecipe, exportStl } from './lib/export'
-import { encodeSourceTexture } from './lib/source-texture'
-import { exportProfile, imageDimensionsForEdition } from './lib/export-profile'
-import { isRasterformDesktopBridge } from './desktop/contracts'
+import { downloadBlob, exportHeightPng } from './lib/export'
+import { MAX_IMAGE_EDGE, fitWebImageDimensions } from './lib/export-profile'
 import {
   finalSampleTarget,
   type FinalExportProgress,
   type FinalImagePngResult,
 } from './lib/final-image-export'
-import {
-  DesktopFinalRenderError,
-  beginDesktopLongExport,
-  endDesktopLongExport,
-  type DesktopFinalCaptureResult,
-  type DesktopLongExportSession,
-} from './desktop/client'
-import {
-  DesktopProRenderError,
-  desktopProRendererAvailable,
-  probeDesktopProRenderer,
-} from './desktop/pro-client'
-import {
-  DEFAULT_DESKTOP_PRO_RENDER_SETTINGS,
-  type DesktopProCaptureResult,
-  type DesktopProRendererAvailability,
-  type DesktopProRenderSettings,
-} from './desktop/pro-contracts'
-import {
-  DesktopBlenderExportError,
-  desktopBlenderExporterAvailable,
-  exportBlenderProjectInDesktop,
-} from './desktop/blender-export-client'
-import type {
-  DesktopBlenderExportPhase,
-  DesktopBlenderTopology,
-} from './desktop/blender-export-contracts'
 import { createDefaultAppearanceSettings } from './lib/three'
 import {
   calculateStillImageDimensions,
@@ -81,10 +50,7 @@ import {
 import {
   DEFAULT_LIVING_FORM_SETTINGS,
   LIVING_FORM_BEHAVIORS,
-  animateLivingFormMesh,
-  createLivingFormEngine,
   normalizeLivingFormPhase,
-  type LivingFormEngine,
 } from './lib/living-form'
 import {
   LIVING_FORM_FRAME_RATES,
@@ -103,7 +69,6 @@ import type {
   GeometryMode,
   HeightSource,
   ImageExportBackground,
-  ImageExportLongEdge,
   ImageExportQuality,
   ImageExportView,
   FontChoice,
@@ -112,8 +77,6 @@ import type {
   MeshSettings,
   MeshData,
   StrataSettings,
-  Recipe,
-  TextRecipe,
   TextShapeSettings,
   ViewportBackground,
   WorkspaceMode,
@@ -136,18 +99,9 @@ interface ThreePreviewHandle {
   captureFinalPng: (
     dimensions: { width: number; height: number },
     background: ImageExportBackground,
-    suggestedName?: string,
     livingPhase?: number,
     view?: ImageExportView,
-  ) => Promise<FinalImagePngResult | DesktopFinalCaptureResult>
-  captureProRender: (
-    dimensions: { width: number; height: number },
-    background: ImageExportBackground,
-    settings: DesktopProRenderSettings,
-    suggestedName?: string,
-    livingPhase?: number,
-    view?: ImageExportView,
-  ) => Promise<DesktopProCaptureResult>
+  ) => Promise<FinalImagePngResult>
   cancelImageExport: () => void
 }
 
@@ -159,7 +113,6 @@ interface ImageExportRequestSnapshot {
   viewportBackground: ViewportBackground
   colorMode: ColorMode
   samples: number
-  proSettings: DesktopProRenderSettings
   livingEnabled: boolean
   livingPhase: number
 }
@@ -184,14 +137,6 @@ const threeStage = ref<HTMLElement | null>(null)
 const backgroundMenu = ref<HTMLDivElement | null>(null)
 const backgroundTrigger = ref<HTMLButtonElement | null>(null)
 const status = ref('Demo image · 360 × 270')
-const exporting = ref(false)
-const exportingBlenderProject = ref(false)
-const blenderExportDetails = ref<HTMLDetailsElement | null>(null)
-const blenderExportTopology = ref<DesktopBlenderTopology>('balanced')
-const blenderExportPhase = ref<DesktopBlenderExportPhase>('preparing')
-const blenderExportError = ref('')
-const blenderExportNotice = ref('')
-let blenderExportController: AbortController | null = null
 const dragging = ref(false)
 const workspace = ref<WorkspaceMode>('image')
 const imageColorMode = ref<ColorMode>('original')
@@ -217,27 +162,14 @@ const jobElapsed = computed(() => {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} elapsed`
 })
 const exportingImage = ref(false)
-const isDesktop = isRasterformDesktopBridge(window.rasterformDesktop)
-const desktopProjectFiles = getDesktopProjectFilesBridge()
-const desktopEditorCommands = getDesktopEditorCommandsBridge()
-let unsubscribeEditorCommands: (() => void) | undefined
-const editionExports = exportProfile(isDesktop)
-const modelSurfaceColor = ref<'source' | 'current'>('source')
-const useSourceTexture = computed(() => (
-  isDesktop && workspace.value === 'image' && modelSurfaceColor.value === 'source'
-  && colorMode.value !== 'wireframe'
-))
 const imageExportQuality = ref<ImageExportQuality>('high')
-const imageExportLongEdge = ref<ImageExportLongEdge>(editionExports.defaultStillEdge)
 const imageExportView = ref<ImageExportView>('current')
 const imageExportBackground = ref<ImageExportBackground>('transparent')
 const imageExportKind = ref<'still' | 'loop'>('still')
-const livingLoopLongEdge = ref<2048 | 4096>(2048)
 const livingLoopFps = ref<LivingFormFrameRate>(24)
 const imageExportError = ref('')
 const imageExportNotice = ref('')
 const imageExportAnnouncement = ref('')
-const livingLoopNativeSaving = ref(false)
 const activeImageExportRequest = shallowRef<ImageExportRequestSnapshot | null>(null)
 const activeLivingLoopRequest = shallowRef<LivingLoopExportRequestSnapshot | null>(null)
 const livingLoopProgress = reactive<LivingFormLoopProgress>({
@@ -250,16 +182,6 @@ let livingLoopController: AbortController | null = null
 let activeLivingLoopFrame: { frame: number; frames: number } | null = null
 let livingLoopWakeLock: WakeLockSentinel | null = null
 const BACKGROUND_STORAGE_KEY = 'rasterform:viewport-background'
-const desktopFinalAvailable = window.rasterformDesktop?.protocolVersion === 1
-const desktopProBridgeAvailable = desktopProRendererAvailable()
-const desktopBlenderBridgeAvailable = desktopBlenderExporterAvailable()
-const desktopProRenderer = ref<DesktopProRendererAvailability | null>(null)
-const desktopProProbePending = ref(desktopProBridgeAvailable)
-const desktopProProbeError = ref('')
-const proRenderSettings = reactive<DesktopProRenderSettings>({
-  ...DEFAULT_DESKTOP_PRO_RENDER_SETTINGS,
-})
-
 function initialViewportBackground(): ViewportBackground {
   try {
     const saved = window.localStorage.getItem(BACKGROUND_STORAGE_KEY)
@@ -394,7 +316,6 @@ const selectedFont = computed(() => fontChoices.value.find((font) => font.id ===
 
 const editorMessage = ref('')
 const editorBusy = ref(false)
-const projectFileInput = ref<HTMLInputElement | null>(null)
 const recoverableSession = shallowRef<EditorDocument | null>(null)
 const recoveredAt = ref<number | null>(null)
 const recoveryStatus = ref('Checking recovery on this device…')
@@ -458,7 +379,7 @@ const undoDescription = computed(() => { void historyRevision.value; return edit
 const redoDescription = computed(() => { void historyRevision.value; return editorHistory.redoLabel })
 const keptVersions = computed(() => { void historyRevision.value; return editorHistory.checkpoints })
 watch([editorBusy, fontBusy], ([busy, fontPending]) => {
-  // A native dialog/font operation can outlast the save debounce. Retry when
+  // A history restore or font operation can outlast the save debounce. Retry when
   // it releases the editor instead of dropping the last edit until another
   // change happens. Comparison and pending recovery remain protected below.
   // Returning to the initial document via Undo is still a save-worthy change,
@@ -483,7 +404,7 @@ function releaseActiveEditorFont() {
 async function applyDocument(document: EditorDocument) {
   // Validate font availability before mutating the project: no silent typography changes.
   const requirement = editorFontRequirement(document, fontChoices.value)
-  if (requirement === 'missing') throw new Error(`This project needs ${document.font.label}. Connect that installed font first; the current project is unchanged.`)
+  if (requirement === 'missing') throw new Error(`Connect ${document.font.label} on this device to restore this version.`)
   editorBusy.value = true
   restoringDocument = true
   sourceImportSequence += 1
@@ -499,7 +420,7 @@ async function applyDocument(document: EditorDocument) {
       const source = requestedFontRecords.value.find(font => font.id === selectedChoice!.id)
       if (source) restoredFontBlob = await source.fontData.blob()
       else if (activeFontRegistrationId === selectedChoice.id) restoredFontBlob = activeFontBlob
-      if (!restoredFontBlob) throw new Error(`Reconnect ${document.font.label} before restoring this project. The current project is unchanged.`)
+      if (!restoredFontBlob) throw new Error(`Reconnect ${document.font.label} to restore this version.`)
     }
     if (restoredFontBlob) {
       const registration = await registerLocalFont({
@@ -516,7 +437,7 @@ async function applyDocument(document: EditorDocument) {
       // This branch uses a verified system/detected font, not an unloaded alias.
       releaseActiveEditorFont()
     }
-    if (!selectedChoice) throw new Error(`This project needs ${document.font.label}. The current project is unchanged.`)
+    if (!selectedChoice) throw new Error(`Connect ${document.font.label} to restore this version.`)
     fontOperation += 1 // An older asynchronous font selection must not overwrite this restore.
     fontBusy.value = false
     livingPlaying.value = false
@@ -622,7 +543,7 @@ async function inspectSelectedChannel() {
   await channelInspection.value?.reveal()
 }
 async function previewFieldSetting(key: FieldVariationKey, value: number) {
-  if (comparison.value || editorBusy.value || exportingImage.value || exportingBlenderProject.value) return
+  if (comparison.value || editorBusy.value || exportingImage.value) return
   await endEditorGesture()
   const current = captureDocument()
   const candidate = createFieldComparison(current, key, value)
@@ -684,58 +605,6 @@ function dismissRecovery() {
   recoverableSession.value = null
   scheduleSessionSave()
 }
-async function saveEditorProject() {
-  if (!isDesktop || editorBusy.value || comparison.value) return
-  editorBusy.value = true
-  try {
-    const project = await serializeEditorProject(captureDocument())
-    if (desktopProjectFiles) {
-      const result = await desktopProjectFiles.saveProject({ suggestedName: 'rasterform-project.rasterform', contents: project })
-      editorMessage.value = result.cancelled ? 'Project save cancelled · your design is unchanged' : `${result.fileName} saved · source image, design settings and camera preserved. Export settings stay as currently selected.`
-    } else {
-      downloadBlob('rasterform-project.rasterform', new Blob([project], { type: 'application/json' }))
-      editorMessage.value = 'Design project download started · source image, design settings and camera included. Export settings stay as currently selected.'
-    }
-  } catch (error) { editorMessage.value = String(error) }
-  finally { editorBusy.value = false }
-}
-async function openEditorProject(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file || editorBusy.value || comparison.value) return
-  try {
-    const project = parseEditorProject(await file.text())
-    await applyDocument(project)
-    recoverableSession.value = null
-    editorHistory.record(captureDocument(), 'Open project')
-    editorMessage.value = `${file.name} opened · Undo returns to your previous work`
-  } catch (error) { editorMessage.value = String(error) }
-  finally { input.value = '' }
-}
-
-async function chooseEditorProject() {
-  if (!isDesktop || editorBusy.value || comparison.value) return
-  if (!desktopProjectFiles) { projectFileInput.value?.click(); return }
-  editorBusy.value = true
-  try {
-    const result = await desktopProjectFiles.openProject()
-    if (result.cancelled) return
-    const project = parseEditorProject(result.contents)
-    await applyDocument(project)
-    recoverableSession.value = null
-    editorHistory.record(captureDocument(), 'Open project')
-    editorMessage.value = `${result.fileName} opened · Undo returns to your previous work. Export settings are unchanged.`
-  } catch (error) { editorMessage.value = String(error) }
-  finally { editorBusy.value = false }
-}
-
-async function revealLastExport() {
-  try {
-    const revealed = await desktopProjectFiles?.revealLastExport()
-    if (!revealed) editorMessage.value = 'No completed native save to reveal yet.'
-  } catch (error) { editorMessage.value = String(error) }
-}
-
 function mergeFontChoices(...groups: readonly FontChoice[][]): FontChoice[] {
   const activeChoice = activeFontRegistrationId
     ? fontChoices.value.find((font) => font.id === activeFontRegistrationId)
@@ -877,27 +746,23 @@ const activeFrameSize = computed(() => workspace.value === 'image'
 const effectiveImageExportView = computed<ImageExportView>(() => (
   workspace.value === 'image' ? imageExportView.value : 'current'
 ))
-const imageExportDimensions = computed(() => imageDimensionsForEdition(calculateStillImageDimensions(
+const imageExportDimensions = computed(() => fitWebImageDimensions(calculateStillImageDimensions(
   activeFrameSize.value.width,
   activeFrameSize.value.height,
   image.value.sourceWidth,
   image.value.sourceHeight,
-  imageExportLongEdge.value,
+  MAX_IMAGE_EDGE,
   effectiveImageExportView.value,
-), isDesktop))
+)))
 const straightOnIsLimited = computed(() => (
-  !isDesktop && effectiveImageExportView.value === 'straight-on'
-  && Math.max(image.value.sourceWidth, image.value.sourceHeight) > 2048
-))
-const straightOnExceedsFourK = computed(() => (
   effectiveImageExportView.value === 'straight-on'
-  && Math.max(imageExportDimensions.value.width, imageExportDimensions.value.height) > 4096
+  && Math.max(image.value.sourceWidth, image.value.sourceHeight) > MAX_IMAGE_EDGE
 ))
-const livingLoopDimensions = computed(() => imageDimensionsForEdition(calculateViewportDimensions(
+const livingLoopDimensions = computed(() => calculateViewportDimensions(
   activeFrameSize.value.width,
   activeFrameSize.value.height,
-  livingLoopLongEdge.value,
-), isDesktop))
+  MAX_IMAGE_EDGE,
+))
 const outputPreview = computed(() => imageExportOpen.value ? {
   ...(imageExportKind.value === 'loop' ? livingLoopDimensions.value : imageExportDimensions.value),
   view: imageExportKind.value === 'loop' ? 'current' as const : effectiveImageExportView.value,
@@ -908,76 +773,6 @@ const livingLoopFrameCount = computed(() => calculateLivingFormFrameCount(
   livingForm.value.duration,
   livingLoopFps.value,
 ))
-const desktopProReady = computed(() => Boolean(
-  desktopProBridgeAvailable && desktopProRenderer.value?.available,
-))
-const proRenderSettingsAreProduction = computed(() => (
-  proRenderSettings.maxSamples === DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.maxSamples
-  && proRenderSettings.minSamples === DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.minSamples
-  && proRenderSettings.noiseThreshold === DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.noiseThreshold
-  && proRenderSettings.maxBounces === DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.maxBounces
-  && proRenderSettings.denoise === DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.denoise
-))
-const desktopProStatus = computed(() => {
-  if (desktopProProbePending.value) return 'Checking Blender…'
-  if (desktopProRenderer.value?.available) {
-    const version = desktopProRenderer.value.blenderVersion
-      ? `Blender ${desktopProRenderer.value.blenderVersion}`
-      : 'Blender Cycles'
-    return `${version} · ${desktopProRenderer.value.device ?? 'renderer ready'}`
-  }
-  return desktopProRenderer.value?.message
-    || desktopProProbeError.value
-    || 'Cycles Pro is not available.'
-})
-const blenderTopologyOptions: ReadonlyArray<{
-  value: DesktopBlenderTopology
-  label: string
-  note: string
-}> = [
-  { value: 'exact', label: 'Exact', note: 'No geometry changes' },
-  { value: 'balanced', label: 'Balanced', note: 'Editable quads · recommended' },
-  { value: 'lightweight', label: 'Lightweight', note: 'Lowest working mesh' },
-]
-const activeBlenderTopology = computed(() => (
-  blenderTopologyOptions.find((option) => option.value === blenderExportTopology.value)!
-))
-const blenderExportProgressLabel = computed(() => {
-  if (blenderExportPhase.value === 'preparing') return 'Preparing an isolated Blender project…'
-  if (blenderExportPhase.value === 'retopologizing') return 'Rebuilding editable topology in Blender…'
-  if (blenderExportPhase.value === 'unwrapping') return 'Creating a padded UV layout…'
-  return 'Compressing and saving the Blender project…'
-})
-const blenderExportHelp = computed(() => {
-  if (!desktopBlenderBridgeAvailable) {
-    return 'Blender project export requires an updated Rasterform desktop app and Blender 5.2 or newer.'
-  }
-  if (!desktopProReady.value) return desktopProStatus.value
-  if (colorMode.value === 'wireframe') {
-    return 'Choose Original, Height, or Clay before preparing an editable Blender surface.'
-  }
-  if (isStrata.value) {
-    return blenderExportTopology.value === 'exact'
-      ? 'Saves each contour layer as a separately named Blender object, with the visible gaps, source UVs, and material intact. The visible Living Form phase is baked in.'
-      : 'Keeps layers separate and simplifies only coplanar faces within each layer. Contour boundaries, holes, source-image UVs, and gaps are preserved; no remeshing across layers. Your open Blender project is untouched.'
-  }
-  if (workspace.value === 'image' && mesh.value?.alphaCutout) {
-    if (blenderExportTopology.value === 'exact') return 'Keeps the original triangles, cut outline, holes, and source-image UVs.'
-    return blenderExportTopology.value === 'balanced'
-      ? 'Joins compatible triangles into quads while keeping the cut outline, holes, and source-image UVs.'
-      : 'Simplifies compatible coplanar faces within the outline and retains the holes and source-image UVs.'
-  }
-  const method = workspace.value === 'image'
-    ? 'Regular image reliefs are rebuilt as an efficient quad grid.'
-    : 'Irregular text geometry is rebuilt with sharp borders, open boundaries, and color attributes protected.'
-  if (blenderExportTopology.value === 'exact') {
-    return 'Saves the current source mesh and material in a clean one-object .blend without changing geometry. The visible Living Form phase is baked in.'
-  }
-  const density = blenderExportTopology.value === 'balanced'
-    ? 'Balanced lowers the face count while favoring shape detail.'
-    : 'Lightweight uses the lowest practical working mesh.'
-  return `${method} ${density} A new padded UV map and angle-aware smooth shading are included. Rasterform uses a separate background Blender process and never opens, saves, or closes your current Blender project.`
-})
 const displayLivingLoopRequest = computed<LivingLoopExportRequestSnapshot>(() =>
   activeLivingLoopRequest.value ?? {
     dimensions: livingLoopDimensions.value,
@@ -995,37 +790,22 @@ const displayImageExportRequest = computed<ImageExportRequestSnapshot>(() =>
     background: imageExportBackground.value,
     viewportBackground: viewportBackground.value,
     colorMode: colorMode.value,
-    samples: imageExportQuality.value === 'pro'
-      ? proRenderSettings.maxSamples
-      : imageExportQuality.value === 'final'
-        ? finalSampleTarget(colorMode.value, appearance.value)
-        : 1,
-    proSettings: { ...proRenderSettings },
+    samples: imageExportQuality.value === 'final' ? finalSampleTarget(colorMode.value, appearance.value) : 1,
     livingEnabled: livingForm.value.enabled,
     livingPhase: livingPhase.value,
   })
-const imageExportUnsupported = computed(() => {
-  const request = displayImageExportRequest.value
-  if (request.quality === 'high') return false
-  if (request.colorMode === 'wireframe'
-    || Math.max(request.dimensions.width, request.dimensions.height) > 4096) return true
-  return request.quality === 'pro' && !desktopProReady.value
-})
+const imageExportUnsupported = computed(() => displayImageExportRequest.value.quality === 'final'
+  && displayImageExportRequest.value.colorMode === 'wireframe')
 const imageExportSummary = computed(() => {
   const request = displayImageExportRequest.value
   const { width, height } = request.dimensions
   const background = request.background === 'transparent'
     ? 'transparent'
     : `${viewportBackgroundPreset(request.viewportBackground).label.toLowerCase()} background`
-  const quality = request.quality === 'pro'
-    ? 'Cycles Pro'
-    : request.quality === 'final'
-      ? 'Final'
-      : 'High'
+  const quality = request.quality === 'final' ? 'Final' : 'High'
   const view = request.view === 'straight-on' ? 'Straight on' : 'Current view'
   const living = request.livingEnabled ? ` · Living Form ${Math.round(request.livingPhase * 100)}%` : ''
-  const format = request.quality === 'pro' ? 'PNG + EXR' : 'PNG'
-  return `${quality} · ${view} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} ${format}${living}`
+  return `${quality} · ${view} · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background} PNG${living}`
 })
 const livingLoopSummary = computed(() => {
   const request = displayLivingLoopRequest.value
@@ -1037,73 +817,33 @@ const livingLoopSummary = computed(() => {
     : `${viewportBackgroundPreset(request.studioBackground).label.toLowerCase()} background`
   return `${behavior} · ${request.frameCount} frames · ${request.fps} fps · ${width.toLocaleString()} × ${height.toLocaleString()} px · ${background}`
 })
-const livingLoopHelp = computed(() => {
-  const sizeWarning = Math.max(
-    displayLivingLoopRequest.value.dimensions.width,
-    displayLivingLoopRequest.value.dimensions.height,
-  ) === 4096
-    ? ' 4K sequences can be very large and may take a long time.'
-    : ''
-  return `Lossless PNG master with 2× edge smoothing. Model, material, camera, and background are snapshotted when export starts. Frame zero is not duplicated at the end, so the ZIP loops cleanly in After Effects, Resolve, Blender, or Premiere.${sizeWarning}`
-})
 const livingLoopProgressLabel = computed(() => {
-  if (livingLoopNativeSaving.value) return 'Saving Living Form ZIP to disk · keep Rasterform open…'
   if (livingLoopProgress.phase === 'packaging') return 'Packaging lossless PNG sequence…'
   const frame = Math.min(livingLoopProgress.frames, livingLoopProgress.frame + 1)
   return `Rendering frame ${frame.toLocaleString()} of ${livingLoopProgress.frames.toLocaleString()} · ${Math.round(livingLoopProgress.progress * 100)}%`
 })
-const livingLoopProgressBarValue = computed<number | undefined>(() => livingLoopNativeSaving.value
-  ? undefined
-  : livingLoopProgress.phase === 'packaging'
-    ? 0.98 + livingLoopProgress.progress * 0.02
-    : livingLoopProgress.progress * 0.98)
+const livingLoopProgressBarValue = computed(() => livingLoopProgress.phase === 'packaging'
+  ? 0.98 + livingLoopProgress.progress * 0.02
+  : livingLoopProgress.progress * 0.98)
 const imageExportHelp = computed(() => {
   const request = displayImageExportRequest.value
-  const pose = request.livingEnabled ? ' The visible Living Form phase is baked into this still.' : ''
-  const straightOn = request.view === 'straight-on'
-    ? straightOnIsLimited.value
-      ? ' Renders the complete relief head-on within the web edition’s 2K limit, preserving the image’s proportions. Desktop supports original dimensions. Your orbit and zoom stay unchanged.'
-      : ' Renders the complete relief head-on at the uploaded image’s original dimensions; your orbit and zoom stay unchanged.'
-    : ''
-  if (request.colorMode === 'wireframe') return `Wireframe exports use High quality.${straightOn}${pose}`
-  if (request.quality === 'high') return `Clean 2× edge smoothing. Renders from a background snapshot so you can keep using the studio.${straightOn}${pose}`
-  if (Math.max(request.dimensions.width, request.dimensions.height) > 4096) {
-    const renderer = request.quality === 'pro' ? 'Cycles Pro' : 'Final'
-    return request.view === 'straight-on'
-      ? `The original is ${request.dimensions.width.toLocaleString()} × ${request.dimensions.height.toLocaleString()} px; ${renderer} supports up to 4K. Choose High to keep the exact original dimensions, or switch to Current view. Rasterform will not resize it.`
-      : `${renderer} supports up to 4K. Choose 4K or High quality.`
-  }
-  if (request.quality === 'pro') {
-    return `Blender Cycles renders up to ${request.proSettings.maxSamples.toLocaleString()} samples, waits for at least ${request.proSettings.minSamples.toLocaleString()}, and ${request.proSettings.denoise ? 'finishes with OpenImageDenoise' : 'keeps denoising off'}. It saves a display-ready PNG and a multipart EXR with 16-bit color passes plus full-precision data passes.${straightOn}${pose} Rasterform launches a separate background Blender process and never opens, saves, or changes your open Blender project. It works while Blender is open; simultaneous renders share GPU and memory, so both may run slower.`
-  }
-  return desktopFinalAvailable
-    ? `Path-traced light and shadows · ${request.samples} samples with gentle denoising · renders separately so the studio stays responsive.${straightOn}${pose}`
-    : `Path-traced light and shadows · ${request.samples} samples with gentle denoising · Final may pause the studio while it renders.${straightOn}${pose}`
+  if (request.colorMode === 'wireframe') return 'Wireframe uses High quality.'
+  return request.quality === 'high'
+    ? 'High smooths edges at twice the output resolution.'
+    : `Final uses ${request.samples} path-tracing samples and denoising to refine light and shadows.`
 })
 const imageExportActionLabel = computed(() => {
   if (exportingImage.value) return 'Cancel render'
   const straightOn = effectiveImageExportView.value === 'straight-on' ? ' straight-on' : ''
-  if (imageExportQuality.value === 'pro') return `Render & save${straightOn} PNG + EXR`
   if (imageExportQuality.value === 'final') return `Render & export${straightOn} PNG`
   return `Export${straightOn} PNG`
 })
 const imageExportProgressLabel = computed(() => {
-  const pro = displayImageExportRequest.value.quality === 'pro'
-  if (imageExportProgress.phase === 'preparing') return `${pro ? 'Preparing Blender Cycles scene' : 'Preparing geometry'} · ${Math.round(imageExportProgress.progress * 100)}%`
-  if (imageExportProgress.phase === 'finishing') return pro ? 'Saving PNG + EXR…' : 'Finishing PNG…'
+  if (imageExportProgress.phase === 'preparing') return 'Preparing geometry…'
+  if (imageExportProgress.phase === 'finishing') return 'Finishing PNG…'
   if (displayImageExportRequest.value.quality === 'high') return `Rendering supersampled tiles · ${Math.round(imageExportProgress.progress * 100)}%`
-  if (imageExportProgress.samples === 0) return pro ? 'Starting background Blender Cycles…' : 'Preparing Final renderer…'
-  if (pro) return `Cycles · ${imageExportProgress.samples.toLocaleString()} / ${imageExportProgress.targetSamples.toLocaleString()} samples · ${Math.round(imageExportProgress.progress * 100)}%`
-  return `Refining light and shadows · ${Math.round(imageExportProgress.progress * 100)}%`
-})
-const imageExportProgressBarValue = computed(() => {
-  const request = displayImageExportRequest.value
-  const separateRenderer = request.quality === 'pro'
-    || (request.quality === 'final' && desktopFinalAvailable)
-  if (!separateRenderer) return imageExportProgress.progress
-  if (imageExportProgress.phase === 'preparing') return imageExportProgress.progress * 0.1
-  if (imageExportProgress.phase === 'finishing') return 0.96 + imageExportProgress.progress * 0.04
-  return 0.1 + imageExportProgress.progress * 0.86
+  return imageExportProgress.samples === 0 ? 'Preparing Final renderer…'
+    : `Refining light and shadows · ${Math.round(imageExportProgress.progress * 100)}%`
 })
 
 const rawField = computed(() => composeChannelStack(image.value, channelLayers))
@@ -1273,7 +1013,7 @@ function pauseLivingFormForScrub() {
 }
 
 function switchWorkspace(next: WorkspaceMode) {
-  if (comparison.value || editorBusy.value || exportingImage.value || exportingBlenderProject.value) return
+  if (comparison.value || editorBusy.value || exportingImage.value) return
   livingPlaying.value = false
   livingAnimationElapsed = 0
   workspace.value = next
@@ -1287,7 +1027,7 @@ function switchWorkspace(next: WorkspaceMode) {
 }
 
 function handleWorkspaceTabKeydown(event: KeyboardEvent) {
-  if (comparison.value || editorBusy.value || exportingImage.value || exportingBlenderProject.value) return
+  if (comparison.value || editorBusy.value || exportingImage.value) return
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
   event.preventDefault()
   const next: WorkspaceMode = event.key === 'ArrowLeft' || event.key === 'Home' ? 'image' : 'text'
@@ -1363,37 +1103,10 @@ function isTextEditingTarget(target: EventTarget | null): boolean {
       && ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(target.type)))
 }
 
-async function handleEditorCommand(command: DesktopEditorCommand) {
-  try {
-    if (command === 'undo' || command === 'redo') {
-      if (isTextEditingTarget(document.activeElement)) {
-        await desktopEditorCommands?.editText(command)
-      } else {
-        await undoEditor(command === 'redo')
-      }
-      return
-    }
-    // Committing an in-progress numeric entry is part of saving/opening, just
-    // as clicking the corresponding visible button first leaves the input.
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
-    await endEditorGesture()
-    await nextTick()
-    if (command === 'save-project') await saveEditorProject()
-    else if (command === 'open-project') await chooseEditorProject()
-  } catch (error) {
-    editorMessage.value = error instanceof Error ? error.message : String(error)
-  }
-}
-
 function handleGlobalKeydown(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && !event.altKey) {
     const key = event.key.toLowerCase()
-    // Native accelerators route through one command listener. Do not execute
-    // the same command a second time if Chromium also forwards its key event.
-    if (desktopEditorCommands && ['z', 's', 'o'].includes(key)) return
     if (key === 'z' && !isTextEditingTarget(event.target)) { event.preventDefault(); void undoEditor(event.shiftKey); return }
-    if (key === 's' && isDesktop) { event.preventDefault(); void handleEditorCommand('save-project'); return }
-    if (key === 'o' && isDesktop) { event.preventDefault(); void handleEditorCommand('open-project'); return }
   }
   if (event.key === 'Escape' && backgroundMenuPosition.value) {
     event.preventDefault()
@@ -1457,7 +1170,7 @@ async function acquireLivingLoopWakeLock(): Promise<void> {
   try {
     livingLoopWakeLock = await navigator.wakeLock?.request('screen') ?? null
   } catch {
-    // Wake lock is best-effort on the web; the desktop shell also protects long jobs.
+    // Browsers can deny a wake lock or release it when the tab loses visibility.
     livingLoopWakeLock = null
   }
 }
@@ -1473,40 +1186,17 @@ async function releaseLivingLoopWakeLock(): Promise<void> {
   }
 }
 
-function resetProRenderSettings() {
-  Object.assign(proRenderSettings, DEFAULT_DESKTOP_PRO_RENDER_SETTINGS)
-  imageExportNotice.value = 'Cycles Pro restored to the production preset.'
-  imageExportError.value = ''
-}
-
-async function refreshDesktopProRenderer(): Promise<void> {
-  if (!desktopProBridgeAvailable) return
-  desktopProProbePending.value = true
-  desktopProProbeError.value = ''
-  try {
-    desktopProRenderer.value = await probeDesktopProRenderer()
-  } catch (error) {
-    desktopProRenderer.value = null
-    desktopProProbeError.value = error instanceof Error
-      ? error.message
-      : 'Rasterform could not inspect the Blender renderer.'
-  } finally {
-    desktopProProbePending.value = false
-  }
-}
-
 onMounted(() => {
   appDisposed = false
-  unsubscribeEditorCommands = desktopEditorCommands?.onEditorCommand(command => { void handleEditorCommand(command) })
   // ThreePreview mounts before its parent, so its real startup pose is now
   // available. Setup ran before that camera existed; use this as the initial
   // history baseline so the very first orbit/Fit action can be undone.
   documentCamera = threePreview.value?.getCameraSnapshot() ?? undefined
   editorHistory.synchronize(captureDocument())
   void cleanupStaleStoredZipArchives()
-  void refreshDesktopProRenderer()
   jobClockTimer = window.setInterval(() => { jobClock.value = Date.now() }, 1000)
   window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('paste', handleImagePaste)
   window.addEventListener('resize', handleWindowResize)
   window.addEventListener('pointerup', endEditorGesture)
   window.addEventListener('pointercancel', endEditorGesture)
@@ -1552,8 +1242,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   appDisposed = true
-  unsubscribeEditorCommands?.()
-  unsubscribeEditorCommands = undefined
   window.clearInterval(jobClockTimer)
   window.clearTimeout(sessionSaveTimer)
   window.removeEventListener('pointerup', endEditorGesture)
@@ -1561,12 +1249,12 @@ onBeforeUnmount(() => {
   fontOperation += 1
   passiveFontRequest += 1
   window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('paste', handleImagePaste)
   window.removeEventListener('resize', handleWindowResize)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
   document.removeEventListener('focusin', handleDocumentFocusIn)
   window.cancelAnimationFrame(livingAnimationFrame)
   livingLoopController?.abort()
-  blenderExportController?.abort()
   void releaseLivingLoopWakeLock()
   window.clearTimeout(textBuildTimer)
   cleanupRegisteredFont(activeFontRegistration)
@@ -1584,16 +1272,6 @@ watch(viewportBackground, (background) => {
   }
 })
 
-watch([exportingImage, exportingBlenderProject], ([isExportingImage, isExportingBlender]) => {
-  const isExporting = isExportingImage || isExportingBlender
-  if (isExporting) closeBackgroundMenu()
-  if (isExportingBlender) {
-    void nextTick(() => {
-      if (blenderExportDetails.value) blenderExportDetails.value.open = true
-    })
-  }
-})
-
 watch(imageExportOpen, async (open, previous) => {
   if (styleInspector.value) inspectorScroll[previous ? 'export' : 'edit'] = styleInspector.value.scrollTop
   if (open) compactPanel.value = 'style'
@@ -1602,6 +1280,7 @@ watch(imageExportOpen, async (open, previous) => {
 })
 watch(exportingImage, (active) => {
   if (!active) return
+  closeBackgroundMenu()
   jobStartedAt.value = Date.now()
   jobClock.value = jobStartedAt.value
   jobThumbnail.value = threePreview.value?.capturePreviewThumbnail() ?? null
@@ -1617,10 +1296,6 @@ watch(() => meshSettings.mode, (mode) => {
   if (mode !== 'strata' && imageLivingForm.behavior === 'expand') imageLivingForm.behavior = 'breathe'
 })
 
-watch(() => proRenderSettings.maxSamples, (maximum) => {
-  if (proRenderSettings.minSamples > maximum) proRenderSettings.minSamples = maximum
-})
-
 function selectColorMode(mode: ColorMode) {
   if (mode === 'wireframe' && imageExportQuality.value !== 'high' && !exportingImage.value) {
     imageExportQuality.value = 'high'
@@ -1633,37 +1308,14 @@ function selectImageExportView(view: ImageExportView) {
   if (workspace.value !== 'image' || exportingImage.value) return
   imageExportView.value = view
   imageExportError.value = ''
-  if (view === 'straight-on' && imageExportQuality.value !== 'high'
-    && straightOnExceedsFourK.value) {
-    const renderer = imageExportQuality.value === 'pro' ? 'Cycles Pro' : 'Final'
-    imageExportNotice.value = `${renderer} supports up to 4K. Choose High to keep the exact ${image.value.sourceWidth.toLocaleString()} × ${image.value.sourceHeight.toLocaleString()} original dimensions.`
-  } else {
-    imageExportNotice.value = ''
-  }
+  imageExportNotice.value = ''
 }
 
 function selectImageExportQuality(quality: ImageExportQuality) {
-  if (quality === 'pro' && !desktopProReady.value) {
-    imageExportNotice.value = desktopProStatus.value
-    return
-  }
-  if (quality !== 'high' && colorMode.value === 'wireframe') {
-    imageExportNotice.value = 'Wireframe exports use High quality.'
-    return
-  }
-  if (quality !== 'high' && straightOnExceedsFourK.value) {
-    const renderer = quality === 'pro' ? 'Cycles Pro' : 'Final'
-    imageExportNotice.value = `${renderer} supports up to 4K. Choose High to keep the exact ${imageExportDimensions.value.width.toLocaleString()} × ${imageExportDimensions.value.height.toLocaleString()} original dimensions, or switch to Current view.`
-    return
-  }
-  if (quality !== 'high' && imageExportLongEdge.value === 8192) {
-    imageExportLongEdge.value = 4096
-    imageExportNotice.value = `${quality === 'pro' ? 'Cycles Pro' : 'Final'} supports up to 4K; size changed to 4K.`
-  } else {
-    imageExportNotice.value = ''
-  }
+  if (quality === 'final' && colorMode.value === 'wireframe') return
   imageExportQuality.value = quality
   imageExportError.value = ''
+  imageExportNotice.value = ''
 }
 
 let lastAnnouncedPhase: FinalExportProgress['phase'] | '' = ''
@@ -1780,6 +1432,15 @@ function handleFile(event: Event) {
   input.value = ''
 }
 
+function handleImagePaste(event: ClipboardEvent) {
+  if (exportingImage.value || comparison.value || editorBusy.value || event.defaultPrevented || isTextEditingTarget(event.target)) return
+  const file = Array.from(event.clipboardData?.files ?? []).find(item => ['image/png', 'image/webp', 'image/jpeg'].includes(item.type))
+  if (!file) return
+  event.preventDefault()
+  switchWorkspace('image')
+  void openFile(file)
+}
+
 function handleDrop(event: DragEvent) {
   dragging.value = false
   if (comparison.value || editorBusy.value) return
@@ -1794,199 +1455,7 @@ function resetDemo() {
   status.value = 'Demo restored'
 }
 
-function recipe(): Recipe {
-  return {
-    version: 6,
-    app: 'Rasterform',
-    image: { name: image.value.name, width: image.value.sourceWidth, height: image.value.sourceHeight },
-    channels: channelLayers.map((layer) => ({ ...layer })),
-    field: { ...fieldSettings },
-    mesh: { ...meshSettings, ...(meshSettings.mode === 'strata' ? { strata: { ...strataSettings } } : {}) },
-    appearance: {
-      heightGradient: { ...imageAppearance.heightGradient },
-      clay: { ...imageAppearance.clay },
-    },
-    livingForm: { ...imageLivingForm, phase: imageLivingPhase.value },
-    createdAt: new Date().toISOString(),
-  }
-}
-
-function textRecipe(): TextRecipe {
-  const { text, ...shape } = textSettings
-  return {
-    version: 6,
-    app: 'Rasterform',
-    workspace: 'text',
-    text: { ...shape, value: text },
-    font: {
-      label: selectedFont.value.label,
-      family: selectedFont.value.family,
-      style: selectedFont.value.style,
-      source: selectedFont.value.source,
-      postscriptName: selectedFont.value.postscriptName,
-    },
-    appearance: {
-      heightGradient: { ...textAppearance.heightGradient },
-      clay: { ...textAppearance.clay },
-    },
-    livingForm: { ...textLivingForm, phase: textLivingPhase.value },
-    createdAt: new Date().toISOString(),
-  }
-}
-
-function currentMeshSnapshot(): MeshData | null {
-  if (!mesh.value) return null
-  return livingForm.value.enabled
-    ? animateLivingFormMesh(mesh.value, livingPhase.value, livingForm.value)
-    : mesh.value
-}
-
-const blenderLivingFormEngines = new WeakMap<MeshData, LivingFormEngine>()
-
-function currentBlenderMeshSnapshot(): { mesh: MeshData; owned: boolean } | null {
-  const source = mesh.value
-  if (!source) return null
-  if (!livingForm.value.enabled) return { mesh: source, owned: false }
-  let engine = blenderLivingFormEngines.get(source)
-  if (!engine) {
-    engine = createLivingFormEngine(source)
-    blenderLivingFormEngines.set(source, engine)
-  }
-  // The engine is cached per immutable source mesh. These arrays are created
-  // specifically for this export, so the client can hand them to IPC without
-  // cloning the full animated mesh a second time.
-  return {
-    mesh: {
-      ...source,
-      positions: engine.samplePositions(livingPhase.value, livingForm.value),
-      indices: source.indices.slice(),
-      colors: source.colors.slice(),
-      uvs: source.uvs.slice(),
-    },
-    owned: true,
-  }
-}
-
-async function downloadGlb() {
-  if (!editionExports.modelFiles || exporting.value) return
-  const exportMesh = currentMeshSnapshot()
-  if (!exportMesh) return
-  const exportMode = colorMode.value
-  const exportAppearance: AppearanceSettings = {
-    clay: { ...appearance.value.clay },
-    heightGradient: { ...appearance.value.heightGradient },
-  }
-  const sourceImage = useSourceTexture.value ? image.value : null
-  exporting.value = true
-  status.value = 'Exporting GLB…'
-  try {
-    const texture = sourceImage ? await encodeSourceTexture(sourceImage) : undefined
-    await exportGlb(exportMesh, exportMode, exportAppearance, texture)
-    status.value = texture
-      ? `GLB exported · embedded ${texture.width.toLocaleString()} × ${texture.height.toLocaleString()} source image`
-      : 'GLB exported for Blender / Cycles'
-  } catch (error) {
-    status.value = error instanceof Error ? error.message : 'GLB export failed.'
-  } finally {
-    exporting.value = false
-  }
-}
-
-function friendlyBlenderExportError(error: unknown): string {
-  if (error instanceof DOMException && error.name === 'AbortError') return ''
-  if (error instanceof DesktopBlenderExportError) {
-    if (error.code === 'save-failed') {
-      return 'macOS could not save the Blender project. Choose a writable location and try again; your design is safe.'
-    }
-    if (error.code === 'process-gone') {
-      return 'The isolated Blender exporter stopped unexpectedly. Your Rasterform design and any open Blender project are safe.'
-    }
-    if (error.code === 'request-expired') {
-      return 'The Blender project save reservation expired before preparation started. Try the export again.'
-    }
-    return error.message
-  }
-  return error instanceof Error ? error.message : 'Blender project export failed.'
-}
-
-async function downloadBlenderProject() {
-  if (!editionExports.modelFiles) return
-  if (exportingBlenderProject.value) {
-    blenderExportController?.abort()
-    blenderExportNotice.value = 'Cancelling Blender project export…'
-    return
-  }
-  const sourceMesh = mesh.value
-  if (!sourceMesh || colorMode.value === 'wireframe' || !desktopProReady.value) return
-  const prepared = currentBlenderMeshSnapshot()
-  if (!prepared) return
-  const sourceImage = useSourceTexture.value ? image.value : null
-  const exportMode = colorMode.value
-  const exportAppearance: AppearanceSettings = {
-    clay: { ...appearance.value.clay },
-    heightGradient: { ...appearance.value.heightGradient },
-  }
-  const exportTopology = blenderExportTopology.value
-  const controller = new AbortController()
-  blenderExportController = controller
-  exportingBlenderProject.value = true
-  blenderExportPhase.value = 'preparing'
-  blenderExportError.value = ''
-  blenderExportNotice.value = ''
-  status.value = `Preparing ${activeBlenderTopology.value.label.toLowerCase()} Blender project…`
-  try {
-    const texture = sourceImage ? await encodeSourceTexture(sourceImage) : undefined
-    if (controller.signal.aborted) throw new DOMException('Blender export cancelled.', 'AbortError')
-    const result = await exportBlenderProjectInDesktop({
-      mesh: prepared.mesh,
-      ownedMeshSnapshot: prepared.owned,
-      colorMode: exportMode,
-      appearance: exportAppearance,
-      topology: exportTopology,
-      texture,
-      suggestedName: `rasterform-${exportTopology}.blend`,
-      signal: controller.signal,
-      onProgress: (phase) => {
-        blenderExportPhase.value = phase
-      },
-    })
-    const reduction = result.sourceFaces > 0
-      ? Math.max(0, Math.round((1 - result.outputTriangleCount / result.sourceFaces) * 100))
-      : 0
-    blenderExportNotice.value = result.topology === 'exact'
-      ? `Saved ${result.fileName} · exact ${result.outputFaces.toLocaleString()}-face model · ${result.uvLayerName}`
-      : `Saved ${result.fileName} · ${result.outputFaces.toLocaleString()} editable polygons · ${result.outputTriangleCount.toLocaleString()} render triangles${reduction > 0 ? ` (${reduction}% fewer)` : ''} · ${result.quads.toLocaleString()} quads · ${result.uvLayerName}`
-    status.value = `Blender project saved · ${result.fileName}`
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      blenderExportNotice.value = 'Blender project export cancelled. No destination file was changed.'
-      status.value = 'Blender project export cancelled'
-    } else {
-      blenderExportError.value = friendlyBlenderExportError(error)
-      status.value = 'Blender project export failed'
-    }
-  } finally {
-    if (blenderExportController === controller) blenderExportController = null
-    exportingBlenderProject.value = false
-  }
-}
-
-function keepBlenderExportAccordionOpen(event: Event) {
-  if (!exportingBlenderProject.value) return
-  const details = event.currentTarget as HTMLDetailsElement
-  if (!details.open) details.open = true
-}
-
-function downloadStl() {
-  if (!editionExports.modelFiles) return
-  const exportMesh = currentMeshSnapshot()
-  if (!exportMesh || !topology.value?.watertight) return
-  exportStl(exportMesh)
-  status.value = 'STL exported · geometry only'
-}
-
 function cancelImageExport() {
-  if (livingLoopNativeSaving.value) return
   livingLoopController?.abort()
   threePreview.value?.cancelImageExport()
   imageExportNotice.value = imageExportKind.value === 'loop'
@@ -1996,58 +1465,10 @@ function cancelImageExport() {
 
 function friendlyImageExportError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'AbortError') return ''
-  if (error instanceof DesktopProRenderError) {
-    if (error.code === 'save-failed') {
-      return 'macOS could not save the Cycles Pro PNG + EXR pair. Your design is safe; choose a writable location and try Pro again.'
-    }
-    if (error.code === 'process-gone') {
-      return 'The separate background Blender process stopped unexpectedly. Your open Blender project and Rasterform design are safe; try Pro again.'
-    }
-    if (error.code === 'request-expired') {
-      return 'The Cycles Pro save reservation expired before rendering started. Open Pro and try again.'
-    }
-    return `${error.message} Your design and any open Blender project are safe.`
-  }
-  if (error instanceof DesktopFinalRenderError) {
-    if (error.code === 'save-failed') {
-      return 'macOS could not save the Final PNG. Your design is safe; choose a writable location and try Final again.'
-    }
-    if (error.code === 'process-gone') {
-      return 'The separate Final renderer stopped unexpectedly. Your design is safe; try Final again.'
-    }
-    if (error.code === 'request-expired') {
-      return 'The Final save reservation expired before rendering started. Open Final and try again.'
-    }
-    return 'The separate Final renderer could not finish. Your design is safe; try Final again.'
-  }
   const message = error instanceof Error ? error.message : ''
-  const requestedQuality = activeImageExportRequest.value?.quality
-  const requestedFinal = requestedQuality === 'final'
-  const requestedPro = requestedQuality === 'pro'
-  if (message.includes('Cycles Pro supports')) return 'Cycles Pro supports 2K and 4K still renders. Choose 4K or use High quality for 8K.'
-  if (message.includes('8K Final')) return 'Final quality supports up to 4K. Choose 4K or use High quality for 8K.'
-  if (message.includes('canvas') || message.includes('size')) {
-    return requestedPro
-      ? 'Cycles Pro could not prepare the requested image size. Your design is safe; retry Pro with the same settings.'
-      : requestedFinal
-      ? 'The device could not allocate the requested Final canvas. Close other graphics-heavy apps and retry Final with the same settings.'
-      : 'The device could not allocate this image canvas. Close other graphics-heavy apps and try the export again.'
-  }
-  if (message.includes('context') || message.includes('progress')) {
-    return requestedPro
-      ? 'The background Blender render stopped before it could save both files. Your design is safe; retry Pro with the same settings.'
-      : requestedFinal
-      ? 'Final rendering stopped on this device. Your design is safe; retry Final with the same settings.'
-      : 'High-quality rendering stopped on this device. Your design is safe; try the export again.'
-  }
-  if (message.includes('Transparency check failed')) {
-    return `The transparency check failed, so Rasterform did not save a bad file. Retry ${requestedPro ? 'Pro' : requestedFinal ? 'Final' : 'the export'} with the same settings.`
-  }
-  return requestedPro
-    ? 'Cycles Pro could not finish. Your Rasterform design and any open Blender project are safe; retry Pro with the same settings.'
-    : requestedFinal
-    ? 'Final could not finish on this device. Your design is safe; retry Final with the same settings.'
-    : 'Image export could not finish on this device. Your design is safe; try the export again.'
+  if (/canvas|size/i.test(message)) return 'The browser could not allocate the image canvas. Close other graphics-heavy tabs and try again.'
+  if (message.includes('Transparency check failed')) return 'The PNG transparency check failed. Try rendering again.'
+  return message || 'Rendering stopped before the PNG was ready. Try exporting again.'
 }
 
 async function downloadImagePng() {
@@ -2057,31 +1478,12 @@ async function downloadImagePng() {
     return
   }
   if (imageExportUnsupported.value) return
-  const request: ImageExportRequestSnapshot = {
-    dimensions: { ...imageExportDimensions.value },
-    view: effectiveImageExportView.value,
-    quality: imageExportQuality.value,
-    background: imageExportBackground.value,
-    viewportBackground: viewportBackground.value,
-    colorMode: colorMode.value,
-    samples: imageExportQuality.value === 'pro'
-      ? proRenderSettings.maxSamples
-      : imageExportQuality.value === 'final'
-        ? finalSampleTarget(colorMode.value, appearance.value)
-        : 1,
-    proSettings: { ...proRenderSettings },
-    livingEnabled: livingForm.value.enabled,
-    livingPhase: livingPhase.value,
-  }
+  const request = { ...displayImageExportRequest.value }
   activeImageExportRequest.value = request
   exportingImage.value = true
   imageExportError.value = ''
   imageExportNotice.value = ''
-  imageExportAnnouncement.value = request.quality === 'pro'
-    ? 'Preparing Cycles Pro image.'
-    : request.quality === 'final'
-      ? 'Preparing final image.'
-      : 'Rendering image.'
+  imageExportAnnouncement.value = request.quality === 'final' ? 'Preparing final image.' : 'Rendering image.'
   lastAnnouncedPhase = ''
   lastAnnouncedBucket = -1
   Object.assign(imageExportProgress, {
@@ -2098,29 +1500,13 @@ async function downloadImagePng() {
     const quality = request.quality
     const cameraView = request.view === 'straight-on' ? '-straight-on' : ''
     const fileName = `rasterform-${view}-${quality}${cameraView}-${request.dimensions.width}x${request.dimensions.height}-${background}.png`
-    const result = request.quality === 'pro'
-      ? await threePreview.value.captureProRender(
-          request.dimensions,
-          request.background,
-          request.proSettings,
-          fileName,
-          request.livingPhase,
-          request.view,
-        )
-      : request.quality === 'final'
-        ? await threePreview.value.captureFinalPng(request.dimensions, request.background, fileName, request.livingPhase, request.view)
-        : await threePreview.value.captureHighPng(request.dimensions, request.background, request.livingPhase, request.view)
-    if ('pngFileName' in result) {
-      status.value = `Cycles Pro · ${result.width} × ${result.height} · up to ${result.maxSamples.toLocaleString()} samples · PNG + EXR · ${result.device}`
-      imageExportNotice.value = `PNG + EXR saved together as ${result.pngFileName} and ${result.exrFileName} · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
-    } else {
-      if (!('desktopSaved' in result)) downloadBlob(fileName, result.blob)
-      const sampleDetail = 'samples' in result ? ` · ${result.samples} samples` : ' · 2× edge smoothing'
-      status.value = `PNG · ${result.width} × ${result.height}${sampleDetail} · ${background} · ${result.dpi} PPI`
-      imageExportNotice.value = 'desktopSaved' in result
-        ? `PNG saved as ${result.fileName} · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
-        : `PNG download started · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
-    }
+    const result = request.quality === 'final'
+      ? await threePreview.value.captureFinalPng(request.dimensions, request.background, request.livingPhase, request.view)
+      : await threePreview.value.captureHighPng(request.dimensions, request.background, request.livingPhase, request.view)
+    downloadBlob(fileName, result.blob)
+    const sampleDetail = 'samples' in result ? `${result.samples} samples` : '2× edge smoothing'
+    status.value = `PNG · ${result.width} × ${result.height} · ${sampleDetail} · ${background} · ${result.dpi} PPI`
+    imageExportNotice.value = `PNG download started · ${result.width.toLocaleString()} × ${result.height.toLocaleString()}.`
   } catch (error) {
     const friendly = friendlyImageExportError(error)
     if (friendly) imageExportError.value = friendly
@@ -2138,7 +1524,7 @@ function friendlyLivingFormExportError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'AbortError') return ''
   const message = error instanceof Error ? error.message : ''
   if (message.includes('too large')) {
-    return 'This browser cannot safely store the full lossless sequence. Use Rasterform desktop or a browser with private file storage; render quality was not changed.'
+    return 'This browser ran out of space for the frame sequence. Choose a shorter duration or lower frame rate and try again.'
   }
   if (message.includes('PNG')) {
     return 'A loop frame failed validation, so Rasterform did not save a damaged sequence. Your design is safe; try the export again.'
@@ -2181,19 +1567,8 @@ async function downloadLivingFormLoop() {
     frames: request.frameCount,
   } satisfies LivingFormLoopProgress)
 
-  let desktopLongExport: DesktopLongExportSession | null = null
-  let desktopOutcome: 'completed' | 'cancelled' | 'failed' = 'failed'
-  let completedLoopCleanup: (() => Promise<void>) | null = null
-  let cleanupScheduled = false
-  const scheduleCompletedLoopCleanup = () => {
-    const cleanup = completedLoopCleanup
-    if (!cleanup || cleanupScheduled) return
-    cleanupScheduled = true
-    window.setTimeout(() => void cleanup(), 24 * 60 * 60 * 1000)
-  }
   try {
     threePreview.value.beginLivingFormLoopExport(request.settings)
-    desktopLongExport = await beginDesktopLongExport({ frames: request.frameCount })
     await acquireLivingLoopWakeLock()
     if (controller.signal.aborted) throw new DOMException('Living Form export cancelled.', 'AbortError')
     const result = await exportLivingFormPngSequence({
@@ -2220,23 +1595,18 @@ async function downloadLivingFormLoop() {
         }
       },
     })
-    completedLoopCleanup = result.cleanup
-    downloadBlob(result.fileName, result.blob)
-    // Browsers do not expose download-completion events. Retain a private-file
-    // archive long enough for multi-gigabyte downloads; stale archives are also
-    // scavenged on a later export.
-    if (!desktopLongExport) {
-      if (result.archiveStorage === 'temporary-file') scheduleCompletedLoopCleanup()
+    try {
+      downloadBlob(result.fileName, result.blob)
+    } finally {
+      // A file-backed ZIP must outlive the browser download. On the next visit
+      // cleanupStaleStoredZipArchives also reclaims files from closed tabs.
+      if (result.archiveStorage === 'temporary-file') window.setTimeout(() => void result.cleanup(), 24 * 60 * 60 * 1000)
       else void result.cleanup()
     }
     status.value = `Living Form · ${result.frames} lossless frames · ${result.width} × ${result.height} · ${result.fps} fps`
-    imageExportNotice.value = desktopLongExport
-      ? `All ${result.frames.toLocaleString()} frames are complete · saving the lossless ZIP…`
-      : `PNG sequence download started · ${result.frames.toLocaleString()} frames · seamless ${result.durationSeconds}s loop.`
+    imageExportNotice.value = `PNG sequence download started · ${result.frames.toLocaleString()} frames · ${result.durationSeconds}s loop.`
     imageExportAnnouncement.value = imageExportNotice.value
-    desktopOutcome = 'completed'
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') desktopOutcome = 'cancelled'
     const friendly = friendlyLivingFormExportError(error)
     if (friendly) {
       imageExportError.value = friendly
@@ -2247,42 +1617,6 @@ async function downloadLivingFormLoop() {
     }
   } finally {
     threePreview.value?.endLivingFormLoopExport()
-    if (desktopLongExport && desktopOutcome === 'completed') {
-      livingLoopNativeSaving.value = true
-      imageExportAnnouncement.value = 'Saving Living Form ZIP.'
-    }
-    let nativeCleanupSafe = false
-    try {
-      const desktopSaved = await endDesktopLongExport(desktopLongExport, desktopOutcome)
-      nativeCleanupSafe = desktopSaved
-      if (desktopLongExport && desktopOutcome === 'completed' && desktopSaved) {
-        imageExportNotice.value = `Living Form ZIP saved · ${request.frameCount.toLocaleString()} lossless frames · seamless ${request.settings.duration}s loop.`
-        imageExportAnnouncement.value = imageExportNotice.value
-      }
-      if (desktopLongExport && desktopOutcome === 'completed' && !desktopSaved) {
-        imageExportNotice.value = ''
-        imageExportError.value = 'macOS did not finish saving the Living Form ZIP. Your design and full-quality frames are unchanged; export the loop again.'
-        imageExportAnnouncement.value = imageExportError.value
-        status.value = 'Living Form ZIP was not saved'
-      }
-    } catch {
-      if (desktopLongExport && desktopOutcome === 'completed') {
-        imageExportNotice.value = ''
-        imageExportError.value = 'macOS could not confirm the Living Form ZIP save. Your design is safe; export the loop again.'
-        imageExportAnnouncement.value = imageExportError.value
-        status.value = 'Living Form ZIP save could not be confirmed'
-      }
-    }
-    if (desktopLongExport && nativeCleanupSafe && completedLoopCleanup) {
-      try {
-        await completedLoopCleanup()
-      } catch {
-        // The ZIP is already terminal; stale private storage is scavenged later.
-      }
-    } else if (desktopLongExport && completedLoopCleanup) {
-      scheduleCompletedLoopCleanup()
-    }
-    livingLoopNativeSaving.value = false
     await releaseLivingLoopWakeLock()
     if (livingLoopController === controller) livingLoopController = null
     activeLivingLoopFrame = null
@@ -2318,7 +1652,7 @@ async function downloadLivingFormLoop() {
           role="tab"
           :aria-selected="workspace === 'image'"
           :tabindex="workspace === 'image' ? 0 : -1"
-          :disabled="exportingImage || exportingBlenderProject || Boolean(comparison) || editorBusy"
+          :disabled="exportingImage || Boolean(comparison) || editorBusy"
           aria-controls="workspace-panel"
           @click="switchWorkspace('image')"
         >Image</button>
@@ -2328,7 +1662,7 @@ async function downloadLivingFormLoop() {
           role="tab"
           :aria-selected="workspace === 'text'"
           :tabindex="workspace === 'text' ? 0 : -1"
-          :disabled="exportingImage || exportingBlenderProject || Boolean(comparison) || editorBusy"
+          :disabled="exportingImage || Boolean(comparison) || editorBusy"
           aria-controls="workspace-panel"
           @click="switchWorkspace('text')"
         >Text</button>
@@ -2339,7 +1673,7 @@ async function downloadLivingFormLoop() {
         class="top-export"
         :aria-expanded="imageExportOpen"
         aria-controls="export-inspector"
-        :disabled="Boolean(comparison) || exportingBlenderProject || (exportingImage && imageExportKind === 'loop')"
+        :disabled="Boolean(comparison) || (exportingImage && imageExportKind === 'loop')"
         @click="imageExportOpen = !imageExportOpen"
       >{{ imageExportOpen ? 'Back to edit' : 'Export' }}</button>
     </header>
@@ -2361,12 +1695,6 @@ async function downloadLivingFormLoop() {
           <button type="button" :disabled="!canUndo || editorBusy" @click="undoEditor()" :title="`Undo ${undoDescription} (⌘Z / Ctrl+Z)`">Undo</button>
           <button type="button" :disabled="!canRedo || editorBusy" @click="undoEditor(true)" :title="`Redo ${redoDescription} (⌘⇧Z / Ctrl+Shift+Z)`">Redo</button>
           <button type="button" :disabled="editorBusy || !hasModel || keptVersions.length >= 8" @click="keepVersion">Keep version</button>
-          <template v-if="isDesktop">
-            <button type="button" :disabled="editorBusy" @click="chooseEditorProject">Open project</button>
-            <button type="button" :disabled="editorBusy" @click="saveEditorProject">Save project</button>
-            <button v-if="desktopProjectFiles" type="button" @click="revealLastExport">Reveal last save</button>
-            <input ref="projectFileInput" class="sr-only" type="file" accept=".rasterform" @change="openEditorProject" />
-          </template>
         </div>
         <p v-if="editorMessage" class="inline-note editor-message" role="status">{{ editorMessage }}</p>
         <p class="inline-note editor-message recovery-status" role="status">{{ recoveryStatus }} <span v-if="!recoverableSession">· not a cloud backup</span></p>
@@ -2465,7 +1793,7 @@ async function downloadLivingFormLoop() {
               <label class="stacked-control"><span>Font face</span><select v-model="selectedFontId" :disabled="fontBusy" @change="handleFontChange"><option v-for="font in fontChoices" :key="font.id" :value="font.id">{{ font.label }} · {{ font.style }}</option></select></label>
               <button v-if="fontAccessSupported" type="button" class="wide-control primary-control" :disabled="fontBusy" @click="connectFonts">{{ fontBusy ? 'Loading fonts…' : 'Browse installed fonts' }}</button>
               <p class="inline-note" role="status">{{ fontStatus }}</p>
-              <p class="inline-note">Fonts stay on this device. Granted font bytes can be kept in local recovery and desktop projects; only redistribute fonts when their license permits it.</p>
+              <p class="inline-note">Session recovery stores the selected font on this device.</p>
             </div>
           </details>
 
@@ -2570,9 +1898,9 @@ async function downloadLivingFormLoop() {
           <strong>{{ imageExportKind === 'loop' ? 'Rendering captured loop' : 'Rendering captured version' }}</strong>
           <small>{{ imageExportKind === 'loop' ? livingLoopSummary : imageExportSummary }}</small>
           <span>{{ imageExportKind === 'loop' ? livingLoopProgressLabel : imageExportProgressLabel }}</span>
-          <progress :value="imageExportKind === 'loop' ? livingLoopProgressBarValue : imageExportProgressBarValue" max="1" aria-label="Render progress"></progress>
-          <small>{{ jobElapsed }} · {{ isDesktop || displayImageExportRequest.quality === 'high' ? 'Later edits do not change this job.' : 'Web Final may pause the studio until rendering finishes.' }}</small>
-          <button type="button" :disabled="livingLoopNativeSaving" @click="cancelImageExport">{{ livingLoopNativeSaving ? 'Saving…' : 'Cancel render' }}</button>
+          <progress :value="imageExportKind === 'loop' ? livingLoopProgressBarValue : imageExportProgress.progress" max="1" aria-label="Render progress"></progress>
+          <small>{{ jobElapsed }} · {{ imageExportKind === 'loop' || displayImageExportRequest.quality === 'high' ? 'Rendering the captured composition.' : 'Final may pause the studio while it renders.' }}</small>
+          <button type="button" @click="cancelImageExport">Cancel render</button>
         </div>
         <div v-show="!imageExportOpen">
           <div class="panel-title">
@@ -2706,94 +2034,42 @@ async function downloadLivingFormLoop() {
               <div><span>Non-manifold edges</span><strong>{{ topology.nonManifoldEdges }}</strong></div>
               <div><span>Non-manifold vertices</span><strong>{{ topology.nonManifoldVertices }}</strong></div>
               <div><span>Degenerate</span><strong>{{ topology.degenerateFaces }}</strong></div>
-              <p>{{ isDesktop ? (topology.watertight ? 'Closed geometry, ready for STL.' : 'STL needs closed geometry. GLB and PNG remain available.') : (topology.watertight ? 'Closed geometry, ready to render.' : 'Open surface, ready to render.') }}</p>
+              <p>{{ topology.watertight ? 'Closed geometry' : 'Open surface' }}</p>
             </div>
           </details>
         </div>
 
-        <section v-show="imageExportOpen" id="export-inspector" class="export-inspector" :aria-busy="exportingImage || exportingBlenderProject">
-          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>{{ isDesktop ? 'Export' : 'Export images' }}</h2></div><button type="button" class="icon-control" :disabled="exportingBlenderProject || (exportingImage && imageExportKind === 'loop')" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
+        <section v-show="imageExportOpen" id="export-inspector" class="export-inspector" :aria-busy="exportingImage">
+          <div class="panel-title export-title"><div><span class="panel-kicker">Output</span><h2>Export images</h2></div><button type="button" class="icon-control" :disabled="(exportingImage && imageExportKind === 'loop')" aria-label="Close export" @click="imageExportOpen = false">×</button></div>
           <fieldset class="export-group"><legend>Output</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportKind === 'still'" :disabled="exportingImage" @click="imageExportKind = 'still'; imageExportError = ''; imageExportNotice = ''"><strong>Still</strong><small>PNG image</small></button><button type="button" :aria-pressed="imageExportKind === 'loop'" :disabled="exportingImage" @click="imageExportKind = 'loop'; imageExportError = ''; imageExportNotice = ''"><strong>Living loop</strong><small>PNG sequence</small></button></div></fieldset>
           <p class="inline-note">Composition preview fits this window. Export dimensions do not resize the screen. Final lighting and denoising appear in the finished render.</p>
           <label v-if="imageExportBackground === 'transparent'" class="check-control"><input v-model="showTransparency" type="checkbox" />Show transparency checker · preview only</label>
-          <div v-if="desktopProBridgeAvailable" class="renderer-readiness"><p class="inline-note">{{ desktopProStatus }}</p><button type="button" class="wide-control" :disabled="desktopProProbePending || exportingImage" @click="refreshDesktopProRenderer">{{ desktopProProbePending ? 'Checking Blender…' : 'Recheck Blender / Cycles' }}</button></div>
 
           <template v-if="imageExportKind === 'still'">
             <div class="export-summary">{{ imageExportSummary }}</div>
-            <fieldset v-if="workspace === 'image'" class="export-group"><legend>View</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportView === 'current'" :disabled="exportingImage" @click="selectImageExportView('current')"><strong>Current view</strong><small>Orbit &amp; zoom</small></button><button type="button" :aria-pressed="imageExportView === 'straight-on'" :disabled="exportingImage" @click="selectImageExportView('straight-on')"><strong>Straight on</strong><small>{{ isDesktop ? 'Front face · original size' : 'Front face · up to 2K' }}</small></button></div></fieldset>
-            <fieldset class="export-group"><legend>Render quality</legend><div :class="['segmented', 'cards', 'render-quality-cards', { 'has-pro': desktopProBridgeAvailable }]"><button type="button" :aria-pressed="imageExportQuality === 'high'" :disabled="exportingImage" @click="selectImageExportQuality('high')"><strong>High</strong><small>Clean and quick</small></button><button type="button" :aria-pressed="imageExportQuality === 'final'" :disabled="exportingImage || colorMode === 'wireframe' || straightOnExceedsFourK" :title="straightOnExceedsFourK ? 'Final supports up to 4K. Choose High for exact original dimensions.' : 'Path-traced Final render'" @click="selectImageExportQuality('final')"><strong>Final</strong><small>Refined light</small></button><button v-if="desktopProBridgeAvailable" type="button" :aria-pressed="imageExportQuality === 'pro'" :disabled="exportingImage || colorMode === 'wireframe' || !desktopProReady || straightOnExceedsFourK" :title="straightOnExceedsFourK ? 'Cycles Pro supports up to 4K. Choose High for exact original dimensions.' : desktopProReady ? 'Blender Cycles Pro' : desktopProStatus" @click="selectImageExportQuality('pro')"><strong>Pro</strong><small>{{ desktopProProbePending ? 'Checking Blender' : desktopProReady ? 'Cycles · PNG + EXR' : 'Unavailable' }}</small></button></div></fieldset>
-            <fieldset v-if="effectiveImageExportView === 'straight-on'" class="export-group"><legend>Dimensions</legend><output class="source-dimensions"><span>{{ straightOnIsLimited ? 'Web image · 2K maximum' : 'Original image' }}</span><strong>{{ imageExportDimensions.width.toLocaleString() }} × {{ imageExportDimensions.height.toLocaleString() }} px</strong></output></fieldset>
-            <fieldset v-else class="export-group"><legend>Long edge</legend><div class="segmented"><button v-for="edge in editionExports.stillEdges" :key="edge" type="button" :aria-pressed="imageExportLongEdge === edge" :disabled="exportingImage || (edge === 8192 && imageExportQuality !== 'high')" @click="imageExportLongEdge = edge">{{ edge / 1024 }}K</button></div></fieldset>
+            <fieldset v-if="workspace === 'image'" class="export-group"><legend>View</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportView === 'current'" :disabled="exportingImage" @click="selectImageExportView('current')"><strong>Current view</strong><small>Orbit &amp; zoom</small></button><button type="button" :aria-pressed="imageExportView === 'straight-on'" :disabled="exportingImage" @click="selectImageExportView('straight-on')"><strong>Straight on</strong><small>Front face · up to 2K</small></button></div></fieldset>
+            <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards render-quality-cards"><button type="button" :aria-pressed="imageExportQuality === 'high'" :disabled="exportingImage" @click="selectImageExportQuality('high')"><strong>High</strong><small>Clean and quick</small></button><button type="button" :aria-pressed="imageExportQuality === 'final'" :disabled="exportingImage || colorMode === 'wireframe'" title="Path-traced Final render" @click="selectImageExportQuality('final')"><strong>Final</strong><small>Refined light</small></button></div></fieldset>
+            <fieldset v-if="effectiveImageExportView === 'straight-on'" class="export-group"><legend>Dimensions</legend><output class="source-dimensions"><span>{{ straightOnIsLimited ? '2K maximum' : 'Original image' }}</span><strong>{{ imageExportDimensions.width.toLocaleString() }} × {{ imageExportDimensions.height.toLocaleString() }} px</strong></output></fieldset>
             <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ activeBackground.label }}</small></button></div></fieldset>
-            <details v-if="imageExportQuality === 'pro'" class="pro-render-controls">
-              <summary><span>Advanced Cycles controls</span><small>{{ proRenderSettingsAreProduction ? 'Production' : 'Custom' }}</small></summary>
-              <div class="pro-render-controls__body">
-                <p class="pro-render-status">{{ desktopProStatus }}</p>
-                <NumberControl v-model="proRenderSettings.maxSamples" label="Maximum samples" :min="64" :max="8192" :step="64" :neutral="DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.maxSamples" :disabled="exportingImage" />
-                <NumberControl v-model="proRenderSettings.minSamples" label="Minimum samples" :min="64" :max="proRenderSettings.maxSamples" :step="64" :disabled="exportingImage" />
-                <NumberControl v-model="proRenderSettings.noiseThreshold" label="Noise threshold" :min="0.001" :max="0.05" :step="0.001" :neutral="DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.noiseThreshold" :disabled="exportingImage" />
-                <NumberControl v-model="proRenderSettings.maxBounces" label="Light bounces" :min="2" :max="16" :step="1" :neutral="DEFAULT_DESKTOP_PRO_RENDER_SETTINGS.maxBounces" :disabled="exportingImage" />
-                <label class="check-control"><input v-model="proRenderSettings.denoise" type="checkbox" :disabled="exportingImage" />OpenImageDenoise final pass</label>
-                <button type="button" class="pro-production-reset" :disabled="exportingImage || proRenderSettingsAreProduction" @click="resetProRenderSettings">Reset production preset</button>
-              </div>
-            </details>
             <p class="inline-note">{{ imageExportHelp }}</p>
           </template>
 
           <template v-else>
             <div class="export-summary">{{ livingLoopSummary }}</div>
-            <fieldset class="export-group"><legend>Render quality</legend><div class="segmented cards"><button type="button" aria-pressed="true" disabled><strong>High 2×</strong><small>Lossless frames</small></button><button type="button" aria-pressed="false" disabled><strong>Final</strong><small>Still images only</small></button></div></fieldset>
-            <fieldset class="export-group"><legend>Long edge</legend><div class="segmented cards"><button v-for="edge in editionExports.loopEdges" :key="edge" type="button" :aria-pressed="livingLoopLongEdge === edge" :disabled="exportingImage" @click="livingLoopLongEdge = edge">{{ edge / 1024 }}K</button></div></fieldset>
             <fieldset class="export-group"><legend>Frame rate</legend><div class="segmented"><button v-for="fps in LIVING_FORM_FRAME_RATES" :key="fps" type="button" :aria-pressed="livingLoopFps === fps" :disabled="exportingImage" @click="livingLoopFps = fps">{{ fps }} fps</button></div></fieldset>
             <fieldset class="export-group"><legend>Timing</legend><NumberControl v-model="livingForm.duration" label="Duration" aria-label="Living Loop duration" :min="1" :max="12" :step="0.5" :neutral="DEFAULT_LIVING_FORM_SETTINGS.duration" unit="s" :help="`${displayLivingLoopRequest.frameCount} frames`" :disabled="exportingImage" /></fieldset>
             <fieldset class="export-group"><legend>Background</legend><div class="segmented cards"><button type="button" :aria-pressed="imageExportBackground === 'transparent'" :disabled="exportingImage" @click="imageExportBackground = 'transparent'">Transparent</button><button type="button" :aria-pressed="imageExportBackground === 'studio'" :disabled="exportingImage" @click="imageExportBackground = 'studio'">Current<small>{{ viewportBackgroundPreset(displayLivingLoopRequest.studioBackground).label }}</small></button></div></fieldset>
-            <p class="inline-note">{{ livingLoopHelp }}</p>
+            <p class="inline-note">The ZIP contains numbered PNG frames and loop timing. Import the frames as an image sequence.</p>
             <p v-if="!livingForm.enabled" class="export-message error" role="alert">Enable Living Form in Properties to export a loop.</p>
           </template>
 
           <p class="sr-only" aria-live="polite">{{ imageExportAnnouncement }}</p>
           <p v-if="imageExportError" class="export-message error" role="alert">{{ imageExportError }}</p>
           <p v-else-if="imageExportNotice" class="export-message" role="status">{{ imageExportNotice }}</p>
-          <button v-if="desktopProjectFiles && !exportingImage" type="button" class="wide-control" @click="revealLastExport">Reveal last completed export in Finder</button>
-          <button v-if="!exportingImage && imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel || exportingBlenderProject" @click="downloadImagePng">{{ imageExportActionLabel }}</button>
-          <button v-else-if="!exportingImage" type="button" class="render-button" :disabled="livingLoopNativeSaving || !hasModel || !livingForm.enabled || exportingBlenderProject" @click="downloadLivingFormLoop">Export lossless loop ZIP</button>
+          <button v-if="!exportingImage && imageExportKind === 'still'" type="button" class="render-button" :disabled="imageExportUnsupported || !hasModel" @click="downloadImagePng">{{ imageExportActionLabel }}</button>
+          <button v-else-if="!exportingImage" type="button" class="render-button" :disabled="!hasModel || !livingForm.enabled" @click="downloadLivingFormLoop">Export lossless loop ZIP</button>
 
-          <div v-if="editionExports.modelFiles" class="file-export-section">
-            <h3>3D &amp; project files</h3>
-            <p class="inline-note model-handoff-note">GLB and Blender files carry geometry, selected surface colors or bitmap, and material. Living Form exports the current phase as a static model, not animation. Studio cameras, lights, and the finished render do not transfer; materials can look different in Blender. Use Save project (.rasterform) to reopen the original Rasterform controls.</p>
-            <fieldset v-if="workspace === 'image'" class="export-group">
-              <legend>Surface color</legend>
-              <div class="segmented cards">
-                <button type="button" :aria-pressed="useSourceTexture" :disabled="exporting || exportingBlenderProject || colorMode === 'wireframe'" @click="modelSurfaceColor = 'source'"><strong>Source image</strong><small>Embedded bitmap</small></button>
-                <button type="button" :aria-pressed="!useSourceTexture" :disabled="exporting || exportingBlenderProject" @click="modelSurfaceColor = 'current'"><strong>Current appearance</strong><small>Visible colors</small></button>
-              </div>
-              <p class="inline-note">{{ useSourceTexture ? `Embeds the original ${image.sourceWidth.toLocaleString()} × ${image.sourceHeight.toLocaleString()} image on ${isStrata ? 'each contour layer' : 'the surface'}. Sides and undersides stay neutral. The active material finish is preserved.` : 'Keeps the current color mode and material finish.' }}</p>
-            </fieldset>
-
-            <details v-if="desktopBlenderBridgeAvailable" ref="blenderExportDetails" class="blender-export-controls" @toggle="keepBlenderExportAccordionOpen">
-              <summary><span>Blender project</span><small>{{ activeBlenderTopology.label }} · .blend</small></summary>
-              <div class="blender-export-controls__body">
-                <fieldset class="export-group blender-topology-group">
-                  <legend>Topology</legend>
-                  <div class="segmented cards blender-topology-cards">
-                    <button v-for="option in blenderTopologyOptions" :key="option.value" type="button" :aria-pressed="blenderExportTopology === option.value" :disabled="exportingBlenderProject" @click="blenderExportTopology = option.value; blenderExportError = ''; blenderExportNotice = ''"><strong>{{ option.label }}</strong><small>{{ option.note }}</small></button>
-                  </div>
-                </fieldset>
-                <p id="blender-export-help" class="blender-export-help">{{ blenderExportHelp }}</p>
-                <div v-if="exportingBlenderProject" class="render-progress blender-export-progress" role="status" aria-live="polite" aria-atomic="true"><span>{{ blenderExportProgressLabel }}</span><progress aria-label="Blender project export progress"></progress><button type="button" @click="downloadBlenderProject">Cancel</button></div>
-                <p v-if="blenderExportError" class="export-message error" role="alert">{{ blenderExportError }}</p>
-                <p v-else-if="blenderExportNotice" class="export-message" role="status">{{ blenderExportNotice }}</p>
-                <button v-if="!exportingBlenderProject" type="button" class="blender-export-button" aria-describedby="blender-export-help" :disabled="!hasModel || !desktopProReady || colorMode === 'wireframe' || exporting || exportingImage" @click="downloadBlenderProject">Save Blender project (.blend)</button>
-              </div>
-            </details>
-            <p v-else class="blender-export-help blender-export-help--web">{{ blenderExportHelp }}</p>
-
-            <button type="button" :disabled="exporting || exportingImage || exportingBlenderProject || !hasModel" @click="downloadGlb">{{ exporting ? 'Preparing portable model…' : 'Portable model (.glb)' }}</button>
-            <button type="button" :disabled="exportingImage || exportingBlenderProject || !topology?.watertight" @click="downloadStl">STL geometry</button>
-            <button v-if="workspace === 'image'" type="button" :disabled="exportingImage || exportingBlenderProject" @click="exportHeightPng(heightField)">Height PNG</button>
-            <button type="button" :disabled="exportingImage || exportingBlenderProject" @click="exportRecipe(workspace === 'image' ? recipe() : textRecipe())">Recipe JSON</button>
-          </div>
-          <div v-else-if="workspace === 'image'" class="file-export-section">
+          <div v-if="workspace === 'image'" class="file-export-section">
             <button type="button" :disabled="exportingImage" @click="exportHeightPng(heightField)">Height PNG</button>
           </div>
         </section>
@@ -2803,7 +2079,7 @@ async function downloadLivingFormLoop() {
     <footer class="status-bar">
       <span>{{ status }}</span>
       <span v-if="textBuilding && workspace === 'text'">Updating geometry…</span>
-      <span v-else>{{ topology?.watertight ? 'Closed mesh' : hasModel ? 'Open mesh' : 'No model' }} · {{ faceLabel }} triangles</span>
+      <span v-else>{{ topology?.watertight ? 'Closed mesh' : hasModel ? 'Open mesh' : 'No visible geometry' }} · {{ faceLabel }} triangles</span>
       <span class="shortcut-hint">Right-click · W / G / B background</span>
     </footer>
   </main>
