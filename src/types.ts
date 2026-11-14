@@ -15,10 +15,9 @@ export type ChannelBlendMode = 'normal' | 'add' | 'subtract' | 'multiply' | 'scr
 export type CompositeFinish = 'detail' | 'blob'
 export type ClayFinish = 'matte' | 'glossy' | 'metallic'
 export type ViewportBackground = 'white' | 'dark-gray' | 'black'
-export type ImageExportQuality = 'high' | 'final' | 'pro'
+export type ImageExportQuality = 'high' | 'final'
 export type ImageExportBackground = 'transparent' | 'studio'
 export type ImageExportView = 'current' | 'straight-on'
-export type ImageExportLongEdge = 2048 | 4096 | 8192
 export type ViewportSupersample = 1 | 2
 export type WorkspaceMode = 'image' | 'text'
 export type TextAlignment = 'left' | 'center' | 'right'
@@ -30,22 +29,13 @@ export interface PixelImage {
   /** Working raster dimensions used to build the mesh. */
   width: number
   height: number
-  /** Original decoded file dimensions; the full bitmap is decoded only during export. */
+  /** Original dimensions before scaling the working raster. */
   sourceWidth: number
   sourceHeight: number
-  /** Compressed original upload, retained for lossless full-resolution texture export. */
+  /** Original upload retained with the editable project. */
   sourceBlob?: Blob
   /** sRGB color bytes followed by linear alpha for each working pixel. */
   data: Uint8ClampedArray
-  name: string
-}
-
-/** An orientation-normalized, full-resolution sRGB source image for portable exports. */
-export interface SourceTexture {
-  data: Uint8Array
-  mimeType: 'image/png'
-  width: number
-  height: number
   name: string
 }
 
@@ -165,7 +155,7 @@ export interface FontChoice {
 export interface MeshData {
   positions: Float32Array
   indices: Uint32Array
-  /** Linear-sRGB vertex colors, shared by the preview, GLB and Blender adapters. */
+  /** Linear-sRGB vertex colors used by the preview. */
   colors: Float32Array
   uvs: Float32Array
   heights: Float32Array
@@ -190,27 +180,4 @@ export interface TopologyReport {
   eulerCharacteristic: number
   watertight: boolean
   degenerateFaces: number
-}
-
-export interface Recipe {
-  version: 6
-  app: 'Rasterform'
-  image: { name: string; width: number; height: number }
-  channels: ChannelLayer[]
-  field: FieldSettings
-  mesh: MeshSettings
-  appearance: AppearanceSettings
-  livingForm: LivingFormSettings & { phase: number }
-  createdAt: string
-}
-
-export interface TextRecipe {
-  version: 6
-  app: 'Rasterform'
-  workspace: 'text'
-  text: Omit<TextShapeSettings, 'text'> & { value: string }
-  font: Pick<FontChoice, 'label' | 'family' | 'style' | 'source' | 'postscriptName'>
-  appearance: AppearanceSettings
-  livingForm: LivingFormSettings & { phase: number }
-  createdAt: string
 }

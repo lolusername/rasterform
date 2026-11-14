@@ -33,10 +33,6 @@ describe('numeric UI preserves existing authored setting ranges', () => {
     ['livingForm.duration', '1', '12', '0.5'],
     ['livingPhase', '0', '0.999', '0.001'],
     ['appearance.heightGradient.midpoint', '0.05', '0.95', '0.01'],
-    ['proRenderSettings.maxSamples', '64', '8192', '64'],
-    ['proRenderSettings.minSamples', '64', 'proRenderSettings.maxSamples', '64'],
-    ['proRenderSettings.noiseThreshold', '0.001', '0.05', '0.001'],
-    ['proRenderSettings.maxBounces', '2', '16', '1'],
   ])('%s keeps its original min/max/step', (model, min, max, step) => {
     const matches = controlsFor(model)
     expect(matches.length).toBeGreaterThan(0)
@@ -60,9 +56,6 @@ describe('numeric UI preserves existing authored setting ranges', () => {
 
   it('retains loop scrubbing, export locks and distinct midpoint meanings', () => {
     expect(controlsFor('livingPhase')[0]).toContain('@update:model-value="pauseLivingFormForScrub"')
-    for (const model of ['maxSamples', 'minSamples', 'noiseThreshold', 'maxBounces']) {
-      expect(controlsFor(`proRenderSettings.${model}`)[0]).toContain(':disabled="exportingImage"')
-    }
     expect(controlsFor('livingForm.duration')).toHaveLength(2)
     expect(controlsFor('livingForm.duration')[1]).toContain(':disabled="exportingImage"')
     expect(controlsFor('meshSettings.midpoint')[0]).toContain('label="Relief midpoint"')

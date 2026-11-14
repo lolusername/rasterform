@@ -111,7 +111,7 @@ export function createStraightOnCamera(
   return camera
 }
 
-/** One camera policy shared by High, Final, and Cycles Pro still captures. */
+/** Use the same composition for High and Final still captures. */
 export function createStillExportCamera(
   mesh: MeshData,
   dimensions: ViewportDimensions,

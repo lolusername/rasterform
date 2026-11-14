@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { ImageExportLongEdge, ImageExportView, ViewportSupersample } from '../types'
+import type { ImageExportView, ViewportSupersample } from '../types'
 
 export const GUIDE_LAYER = 31
 export const PNG_DPI = 300
@@ -57,7 +57,7 @@ export interface PngHeader {
 export function calculateViewportDimensions(
   viewportWidth: number,
   viewportHeight: number,
-  longEdge: ImageExportLongEdge,
+  longEdge: number,
 ): ViewportDimensions {
   const sourceWidth = Math.max(1, Number.isFinite(viewportWidth) ? viewportWidth : 1)
   const sourceHeight = Math.max(1, Number.isFinite(viewportHeight) ? viewportHeight : 1)
@@ -78,7 +78,7 @@ export function calculateStillImageDimensions(
   workingHeight: number,
   sourceWidth: number,
   sourceHeight: number,
-  longEdge: ImageExportLongEdge,
+  longEdge: number,
   view: ImageExportView,
 ): ViewportDimensions {
   if (view === 'current') return calculateViewportDimensions(workingWidth, workingHeight, longEdge)

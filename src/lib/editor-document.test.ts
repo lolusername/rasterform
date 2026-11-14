@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { editorDocumentFixture } from '../../tests/fixtures/editor-document'
+import { sourceBitmapFixture } from '../../tests/fixtures/source-bitmap'
 import {
   cloneEditorDocument, editorDocumentsEqual, editorFontRequirement, EditorProjectError,
   parseEditorProject, serializeEditorProject, validateEditorDocument, withChannelPreset,
@@ -68,10 +69,11 @@ describe('authored editor documents', () => {
     const original = editorDocumentFixture()
     original.workspace = 'text'
     original.image.name = 'A photograph – original.png'
-    original.image.sourceWidth = 3072
-    original.image.sourceHeight = 4096
+    const bitmap = sourceBitmapFixture()
+    original.image.sourceWidth = bitmap.width
+    original.image.sourceHeight = bitmap.height
     original.image.data[3] = 127
-    original.image.sourceBlob = new File([new Uint8Array([137, 80, 78, 71, 0, 255, 19])], original.image.name, { type: 'image/png', lastModified: 123456789 })
+    original.image.sourceBlob = new File([bitmap.data], original.image.name, { type: bitmap.mimeType, lastModified: 123456789 })
     original.fontBlob = new Blob([new Uint8Array([0, 2, 5, 255])], { type: 'font/otf' })
     original.font = { ...original.font, id: 'local:test', source: 'local', postscriptName: 'Preserve-Me' }
     original.mesh.strata = { ...original.strata, layers: 24 }

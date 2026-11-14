@@ -14,12 +14,6 @@ interface FontData {
 
 interface Window {
   queryLocalFonts?: (options?: QueryLocalFontsOptions) => Promise<FontData[]>
-  rasterformDesktop?:
-    | import('./desktop/contracts').RasterformDesktopLongExportBridge
-    | import('./desktop/pro-contracts').RasterformDesktopProBridge
-    | import('./desktop/blender-export-contracts').RasterformDesktopBlenderExportBridge
-    | import('./desktop/project-files').RasterformDesktopProjectFilesBridge
-    | import('./desktop/editor-commands').RasterformDesktopEditorCommandsBridge
 }
 
 interface FontFaceSet {

@@ -22,41 +22,6 @@ export function cloneStrataData(data: StrataData): StrataData {
   return { ...data, parts: data.parts.map((part) => ({ ...part })) }
 }
 
-/** Validate object boundaries before accepting layer metadata over desktop IPC. */
-export function isStrataData(value: unknown, vertexCount: number, indices: Uint32Array): value is StrataData {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const data = value as StrataData
-  if (Object.keys(data).sort().join(',') !== 'layers,parts,separation,thickness'
-    || !Number.isInteger(data.layers) || data.layers < 2 || data.layers > 24
-    || !Number.isFinite(data.thickness) || data.thickness < 0.005 || data.thickness > 0.12
-    || !Number.isFinite(data.separation) || data.separation < 0 || data.separation > 0.18
-    || !Array.isArray(data.parts) || data.parts.length < 1 || data.parts.length > data.layers) return false
-  let vertexEnd = 0
-  let indexEnd = 0
-  let previousThreshold = -1
-  for (let layer = 0; layer < data.parts.length; layer += 1) {
-    const part = data.parts[layer]
-    if (!part || typeof part !== 'object' || Array.isArray(part)
-      || Object.keys(part).sort().join(',') !== 'indexCount,indexStart,layer,surfaceIndexCount,threshold,vertexCount,vertexStart'
-      || part.layer !== layer || !Number.isFinite(part.threshold) || part.threshold < 0 || part.threshold > 1
-      || part.threshold < previousThreshold || part.vertexStart !== vertexEnd || part.indexStart !== indexEnd
-      || !Number.isSafeInteger(part.vertexCount) || part.vertexCount < 6 || part.vertexCount % 2 !== 0
-      || !Number.isSafeInteger(part.indexCount) || part.indexCount < 12 || part.indexCount % 3 !== 0
-      || !Number.isSafeInteger(part.surfaceIndexCount) || part.surfaceIndexCount < 3
-      || part.surfaceIndexCount % 3 !== 0 || part.surfaceIndexCount * 2 >= part.indexCount) return false
-    vertexEnd += part.vertexCount
-    indexEnd += part.indexCount
-    if (vertexEnd > vertexCount || indexEnd > indices.length) return false
-    for (let index = part.indexStart; index < indexEnd; index += 1) {
-      if (indices[index]! < part.vertexStart || indices[index]! >= vertexEnd
-        || (index < part.indexStart + part.surfaceIndexCount
-          && indices[index]! >= part.vertexStart + part.vertexCount / 2)) return false
-    }
-    previousThreshold = part.threshold
-  }
-  return vertexEnd === vertexCount && indexEnd === indices.length
-}
-
 /**
  * Clip the same sampled height triangles used by the relief, then cap and close
  * each superlevel set. Shared edge intersections are created once, so holes,
@@ -262,18 +227,4 @@ export function spaceStrataMesh(mesh: MeshData, options: Pick<StrataSettings, 't
     }
   }
   return { ...mesh, positions, strata: { ...settings, parts: mesh.strata.parts } }
-}
-
-/** One named layer per Blender/glTF object, including its disconnected islands. */
-export function splitStrataMesh(mesh: MeshData): MeshData[] {
-  if (!mesh.strata) return [mesh]
-  return mesh.strata.parts.map((part) => ({
-    positions: mesh.positions.slice(part.vertexStart * 3, (part.vertexStart + part.vertexCount) * 3),
-    colors: mesh.colors.slice(part.vertexStart * 3, (part.vertexStart + part.vertexCount) * 3),
-    uvs: mesh.uvs.slice(part.vertexStart * 2, (part.vertexStart + part.vertexCount) * 2),
-    heights: mesh.heights.slice(part.vertexStart, part.vertexStart + part.vertexCount),
-    indices: mesh.indices.slice(part.indexStart, part.indexStart + part.indexCount).map((index) => index - part.vertexStart),
-    width: mesh.width, height: mesh.height, mode: 'strata',
-    strata: { ...mesh.strata!, parts: [{ ...part, vertexStart: 0, indexStart: 0 }] },
-  }))
 }

@@ -1,12 +1,25 @@
 import { describe, expect, it } from 'vitest'
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three'
 import { buildMesh } from './mesh'
-import { buildStrataMesh, DEFAULT_STRATA_SETTINGS, isStrataData, spaceStrataMesh, splitStrataMesh } from './strata'
+import { buildStrataMesh, DEFAULT_STRATA_SETTINGS, spaceStrataMesh } from './strata'
 import { inspectTopology } from './topology'
 import { animateLivingFormMesh } from './living-form'
 import { snapshotMesh } from './image-export-worker'
 import { createThreeMesh } from './three'
-import type { PixelImage, ScalarField } from '../types'
+import type { MeshData, PixelImage, ScalarField } from '../types'
+
+function splitStrataMesh(mesh: MeshData): MeshData[] {
+  if (!mesh.strata) return [mesh]
+  return mesh.strata.parts.map((part) => ({
+    positions: mesh.positions.slice(part.vertexStart * 3, (part.vertexStart + part.vertexCount) * 3),
+    colors: mesh.colors.slice(part.vertexStart * 3, (part.vertexStart + part.vertexCount) * 3),
+    uvs: mesh.uvs.slice(part.vertexStart * 2, (part.vertexStart + part.vertexCount) * 2),
+    heights: mesh.heights.slice(part.vertexStart, part.vertexStart + part.vertexCount),
+    indices: mesh.indices.slice(part.indexStart, part.indexStart + part.indexCount).map((index) => index - part.vertexStart),
+    width: mesh.width, height: mesh.height, mode: 'strata',
+    strata: { ...mesh.strata!, parts: [{ ...part, vertexStart: 0, indexStart: 0 }] },
+  }))
+}
 
 export function strataFixture(kind: 'hill' | 'ring' | 'islands' | 'flat' | 'noise' = 'hill', size = 17) {
   const values = new Float32Array(size * size)
@@ -46,7 +59,6 @@ describe('Strata height-contour geometry', () => {
     expect(report.nonManifoldEdges).toBe(0)
     expect(report.degenerateFaces).toBe(0)
     expect(report.watertight).toBe(true)
-    expect(isStrataData(mesh.strata, mesh.positions.length / 3, mesh.indices)).toBe(true)
     for (const part of splitStrataMesh(mesh)) expect(inspectTopology(part).watertight).toBe(true)
     expect(mesh.strata!.parts).toHaveLength(kind === 'flat' ? 1 : 8)
   })
@@ -141,18 +153,4 @@ describe('Strata height-contour geometry', () => {
     rendered.geometry.dispose()
   })
 
-  it('rejects overlapping, out-of-range and cross-layer export metadata', () => {
-    const { field, image } = strataFixture()
-    const mesh = buildStrataMesh(field, image, 16)
-    const copy = () => structuredClone(mesh.strata!)
-    const overlap = copy()
-    overlap.parts[1]!.indexStart = 0
-    expect(isStrataData(overlap, mesh.positions.length / 3, mesh.indices)).toBe(false)
-    const invalid = copy()
-    invalid.parts[0]!.vertexCount += 2
-    expect(isStrataData(invalid, mesh.positions.length / 3, mesh.indices)).toBe(false)
-    const crossLayer = mesh.indices.slice()
-    crossLayer[0] = mesh.strata!.parts[1]!.vertexStart
-    expect(isStrataData(mesh.strata, mesh.positions.length / 3, crossLayer)).toBe(false)
-  })
 })
