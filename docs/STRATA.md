@@ -1,6 +1,6 @@
-# Strata: contour-cut image layers
+# Strata contour layers
 
-Strata is an optional geometry mode in the Image workspace. It turns the complete processed height field into independently closed, stacked contour sheets. It does not slice the picture into horizontal strips, paint contour lines on a slab, or extract objects with AI.
+Strata is an optional geometry mode in the Image workspace. It turns the complete processed height field into independently closed, stacked contour sheets. The boundaries follow the height values in the picture.
 
 ## Use it
 
@@ -22,47 +22,16 @@ In Living Form, choose **Expand**, enable kinetic form, and press Play. The gaps
 
 Breathe, Ripple, Flow, and Melt remain available when intentional deformation is wanted. Expand is offered only for Strata. The existing lossless PNG-sequence export captures the same procedural motion and visible appearance.
 
-## Images and Blender
+## Render the stack
 
-- **Web:** High and Final still PNGs, optional alpha, straight-on output, and Living Form PNG sequences remain available within the existing 2K web limit. There are still no web model exports.
-- **Desktop:** Existing image dimensions, High, Final, Cycles Pro, alpha, straight-on output, sequences, GLB, `.blend`, STL, and recipe options remain available. No sampling, denoising, bounce, supersampling, or Pro-preset quality settings were lowered for Strata.
-- **GLB:** Each height layer is a named object (`Rasterform_Strata_01`, etc.). Disconnected islands at one height belong to the same layer object. Desktop Source image embeds one full-resolution bitmap shared across every top cap; sides and undersides remain neutral. Current appearance exports the chosen colors and material instead.
-- **Blender Exact:** Preserves the generated triangles, spacing, image UVs, and visible motion phase, with one object per layer.
-- **Blender Balanced:** Joins compatible, coplanar triangles into editable quads within each layer. It does not merge layers or bridge their gaps.
-- **Blender Lightweight:** Dissolves coplanar interior edges when the bitmap or uniform surface color can be preserved. For Photo vertex colors, it retains the color samples and uses compatible quad joining instead.
-- **SourceUV / UVMap:** SourceUV preserves image placement. The retopology options generate an additional padded UVMap for editing. The full bitmap is packed into the `.blend`; reopening does not require the original image file.
-- **STL:** Contains the closed layer shells at the current pose. The shells are separate, not a fused manufacturing-ready union.
+Choose **Export → Still** and use an angled **Current view** to show the air between sheets. A straight-on image projects the contours onto each other and emphasizes their footprints. Pick **Transparent** to isolate the form or **Current** to include the studio backdrop. Both High and Final shaded stills support a long edge up to 2,048 pixels.
 
-Straight-on images can hide much of the separation because the layers overlap in projection. Use an angled current view to emphasize the layered construction.
+For movement, enable **Living Form**, choose **Expand**, and select **Export → Living loop**. This downloads a ZIP of High-quality PNG frames and a timing manifest. For example, a one-second loop at 12 fps contains 12 distinct phases.
 
-Use the original source photograph to recreate a design's height field. A previously rendered PNG is a flattened picture of the model, not its original height map; uploading that render creates new geometry from the rendered pixels. The earlier AI concept was illustrative, not exact computed geometry.
+To share the field itself, use **Height PNG**. It stores the processed grayscale values before the contour layers are built.
 
-## Implementation and verification
+## How the contours are made
 
-`src/lib/strata.ts` clips the same sampled height triangles used by image reliefs against ordered thresholds, creates top and bottom caps, and closes contour and image-boundary edges. Shared intersections, Float32-aware endpoint handling, and removal of unused vertices prevent cracks and collapsed facets. Interior cap vertices preserve sampled Photo colors. Gap/thickness changes reuse the contour topology.
+Rasterform samples the height field as a triangle mesh. At each threshold it keeps the portions of triangles that meet the level, creates top and bottom faces, and joins the boundaries with side walls. An island may be detached from the rest of its sheet. Interior vertices carry sampled image colors in Photo view. Changing thickness or separation can reuse the contour shapes.
 
-`MeshData.strata` records contiguous layer boundaries. Desktop validators reject missing, overlapping, cross-layer, and out-of-range metadata. The 256 MiB native mesh-byte limit is unchanged; Strata has a separate vertex/index allowance for its repeated caps. There is no automatic detail or render-quality reduction.
-
-Useful checks:
-
-```sh
-npm test
-npm run build
-npm run desktop:check
-npm run desktop:package:arm64
-npm run desktop:smoke:packaged:arm64
-```
-
-The tests cover nested footprints, holes, disconnected islands, zero-area triangle prevention, closed topology, UVs and bitmap materials, loop closure, camera fitting, unchanged relief modes, and desktop contracts. Real Blender tests create temporary projects, export all three topology options, remove the external texture, then reopen in a fresh process and inspect every layer. They never open or modify an existing user Blender project.
-
-### Executed release checks — September 14, 2026
-
-- The full suite passed: 41 test files, 308 tests, including 14 real Blender export/reopen cases and a maximum-detail, 24-layer stress case.
-- The web build and desktop TypeScript checks passed.
-- The web UI produced and downloaded 2,048 × 1,536 transparent High and Final PNGs. Final completed all 6,144 samples; both outputs were visually inspected. Browser controls were temporarily unavailable during Final rendering, then recovered on completion.
-- Straight-on High export also completed at the demo source's original 360 × 270 dimensions with alpha, without changing the orbit view.
-- Expand was scrubbed to its fully closed middle phase and exported through the web UI as a one-second, 12-frame, 2,048 × 1,536 lossless RGBA PNG sequence. The ZIP manifest, dimensions, alpha, and collapsed frame were checked.
-- The unchanged desktop Pro preset rendered the 12-layer demo through an isolated Blender 5.2.0 LTS process on the Apple M3 Max Metal GPU: all 8,192 samples, minimum 512 samples, 0.001 noise threshold, 12 bounces, and denoising. The 2,048 × 1,536 PNG and multilayer EXR passed production output validation; the PNG was visually inspected. That specific render reported 151.567 seconds, not a general performance guarantee.
-- A new arm64 `.app` was packaged. All 15 native binaries were arm64, signature integrity and hardened fuses passed verification, and the packaged startup smoke passed its editor/hidden-renderer, HDR, worker, Cycles, and Blender-export bridge checks. Packaging did not replace the installed app or deploy the website.
-
-For macOS installation and rebuild instructions, see [Installing Rasterform](INSTALLING_MACOS.md).
+See [the contour builder](../src/lib/strata.ts), [animation of the layer positions](../src/lib/strata-frame.ts), and [the topology inspector](../src/lib/topology.ts).

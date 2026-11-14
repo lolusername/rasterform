@@ -1,5 +1,7 @@
 # Rasterform interview packet
 
+**Historical teaching case study.** This packet documents source revision `7f49da7`. For the current browser studio, see the [artist guide](../../output/pdf/Rasterform_From_Image_to_Form.pdf).
+
 The editable teaching source is [RASTERFORM_TEACHING_REPORT.md](RASTERFORM_TEACHING_REPORT.md). The generated PDF is [Rasterform_CoreWeave_Teaching_Report.pdf](../../output/pdf/Rasterform_CoreWeave_Teaching_Report.pdf).
 
 The report is grounded in application source commit `7f49da7`. Its diagrams are explanatory. The three-panel cover image calls the real demo-image, channel-extraction, and mesh-building functions but is **not** a production render or a GPU benchmark.
@@ -8,7 +10,7 @@ The supplied interview PDF is not copied into this repository, altered, or treat
 
 ## Rebuild
 
-From the repository root, install the existing Node dependencies if necessary. The Python build needs `reportlab`, `Pillow`, and `pypdf`. It needs DejaVu Sans fonts; set `RASTERFORM_REPORT_FONTS` to their directory if not found automatically.
+To reproduce this historical packet, check out the documented revision and run the commands from its repository root. The Python build needs `reportlab`, `Pillow`, and `pypdf`. It needs DejaVu Sans fonts; set `RASTERFORM_REPORT_FONTS` to their directory if not found automatically.
 
 ```sh
 ./node_modules/.bin/esbuild docs/interview/create_fixture.ts --bundle --platform=node --format=cjs --outfile=tmp/pdfs/interview/fixture.cjs

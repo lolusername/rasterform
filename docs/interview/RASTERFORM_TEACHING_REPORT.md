@@ -1,5 +1,7 @@
 # Rasterform
 
+**Historical teaching case study.** This packet documents source revision `7f49da7`. For the current browser studio, see the [artist guide](../../output/pdf/Rasterform_From_Image_to_Form.pdf).
+
 ## From pixels to reliable GPU-rendered assets
 
 A technical teaching case study and interview preparation packet for Atilio Barreda II.
