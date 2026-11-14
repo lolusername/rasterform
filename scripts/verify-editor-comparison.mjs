@@ -4,7 +4,7 @@
  * to compare the existing document/history and public camera snapshot.
  * TEST_URL=http://127.0.0.1:5187 PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs \
  *   node scripts/verify-editor-comparison.mjs
- * An isolated browser context owns all recovery data. No Electron or user files.
+ * An isolated browser context owns all recovery data. No user files.
  */
 import assert from 'node:assert/strict'
 
@@ -55,7 +55,7 @@ async function state() {
       document: window.__comparisonQaDocument(app.captureDocument()),
       history: { undo: app.editorHistory.undoCount, redo: app.editorHistory.redoCount },
       comparison: Boolean(app.comparison),
-      exporting: Boolean(app.exportingImage || app.exportingBlenderProject || app.exporting),
+      exporting: Boolean(app.exportingImage),
       geometry: window.__comparisonQaFingerprint(app.mesh.positions),
     }
   })

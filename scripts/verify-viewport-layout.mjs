@@ -3,10 +3,7 @@
  * Start the app, then run with Playwright available:
  *   TEST_URL=http://127.0.0.1:5178 node scripts/verify-viewport-layout.mjs
  * PLAYWRIGHT_MODULE may point to an existing Playwright ESM installation.
- * Uses fresh browser contexts for web and a desktop-capability fixture. Desktop
- * render-job events are simulated through the actual renderer bridge contract;
- * this verifies UI containment, NOT native rendering, quality, or file saving.
- * No existing app data or output settings are touched by this check.
+ * Uses a fresh browser context with isolated data.
  * QA_ARTIFACTS optionally selects a screenshot/report directory.
  */
 import assert from 'node:assert/strict'
@@ -27,49 +24,9 @@ const sizes = [
 ]
 let checks = 0
 
-// The real UI receives protocol-valid preparation/progress/cancel events. No
-// Electron processes, Blender instances, or expensive render jobs are started.
-function installDesktopFixture() {
-  const listeners = new Set()
-  const jobId = 'viewport_fixture_final'
-  const fixture = {
-    snapshot: null,
-    emit(phase) {
-      for (const listener of listeners) listener({
-        type: 'progress', jobId,
-        progress: {
-          phase, progress: phase === 'finishing' ? 1 : 0.5,
-          tile: 1, tiles: 1,
-          samples: phase === 'preparing' ? 0 : 3072,
-          targetSamples: 6144,
-        },
-      })
-    },
-  }
-  window.__viewportQa = fixture
-  window.rasterformDesktop = {
-    protocolVersion: 1,
-    prepareFinalSave: async () => ({ cancelled: false, jobId }),
-    submitFinalRender: async (_jobId, snapshot) => {
-      fixture.snapshot = {
-        width: snapshot.width, height: snapshot.height,
-        camera: snapshot.camera, colorMode: snapshot.colorMode,
-      }
-      fixture.emit('preparing')
-      return { accepted: true }
-    },
-    cancelFinalRender: async () => ({ state: 'cancelled' }),
-    onFinalRenderEvent: (listener) => {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
-    },
-  }
-}
-
-async function checkEdition(desktop) {
-  const edition = desktop ? 'desktop-fixture' : 'web'
+async function checkViewport() {
+  const edition = 'web'
   const context = await browser.newContext({ reducedMotion: 'reduce' })
-  if (desktop) await context.addInitScript(installDesktopFixture)
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (error) => errors.push(error.message))
@@ -157,18 +114,8 @@ async function checkEdition(desktop) {
       }
       await page.getByRole('button', { name: 'Export', exact: true }).first().click()
       await checkInspectorScroll(`${sizeLabel} exporting`)
-      assert.equal(await page.getByRole('button', { name: '4K', exact: true }).count(), desktop ? 1 : 0, `${sizeLabel}: incorrect edition-specific 4K availability`)
-      assert.equal(await page.getByRole('button', { name: /Portable model \(\.glb\)/ }).count(), desktop ? 1 : 0, `${sizeLabel}: incorrect edition-specific model export availability`)
-      if (desktop) {
-        const twoK = await page.locator('.three-preview').boundingBox()
-        await page.getByRole('button', { name: '4K', exact: true }).click()
-        await checkBounds(`${sizeLabel} 4K output`)
-        assert.deepEqual(await page.locator('.three-preview').boundingBox(), twoK, `${sizeLabel}: 4K changed visible canvas size`)
-        await page.getByRole('button', { name: '8K', exact: true }).click()
-        await checkBounds(`${sizeLabel} 8K High output`)
-        assert.deepEqual(await page.locator('.three-preview').boundingBox(), twoK, `${sizeLabel}: 8K changed visible canvas size`)
-        await page.getByRole('button', { name: '2K', exact: true }).click()
-      }
+      assert.equal(await page.getByRole('button', { name: '4K', exact: true }).count(), 0, `${sizeLabel}: incorrect edition-specific 4K availability`)
+      assert.equal(await page.getByRole('button', { name: /Portable model \(\.glb\)/ }).count(), 0, `${sizeLabel}: incorrect edition-specific model export availability`)
       if ((width === 1600 && height === 1000) || (width === 1440 && height === 240) || width === 320) {
         await page.screenshot({ path: join(artifacts, `${edition}-${width}x${height}-export.png`) })
       }
@@ -233,7 +180,7 @@ async function checkEdition(desktop) {
   await page.getByRole('button', { name: 'Export', exact: true }).first().click()
   await page.getByRole('button', { name: /Straight on/ }).click()
   const dimensions = await page.locator('.source-dimensions strong').innerText()
-  assert.equal(dimensions.replace(/,/g, ''), desktop ? '3072 × 4096 px' : '1536 × 2048 px', `${edition}: portrait output dimensions changed`)
+  assert.equal(dimensions.replace(/,/g, ''), '1536 × 2048 px', `${edition}: portrait output dimensions changed`)
   for (const [width, height] of [[1280, 800], [768, 1024], [390, 844], [1440, 240]]) {
     await page.setViewportSize({ width, height })
     await checkInspectorScroll(`${edition} ${width}×${height} portrait straight-on`)
@@ -242,32 +189,6 @@ async function checkEdition(desktop) {
     await page.screenshot({ path: join(artifacts, `${edition}-${width}x${height}-portrait.png`) })
   }
 
-  if (desktop) {
-    await page.setViewportSize({ width: 1280, height: 800 })
-    await page.getByRole('button', { name: 'Final Refined light', exact: true }).click()
-    await page.locator('#export-inspector .render-button').click()
-    await page.waitForFunction(() => Boolean(window.__viewportQa.snapshot))
-    const captured = await page.evaluate(() => window.__viewportQa.snapshot)
-    assert.deepEqual({ width: captured.width, height: captured.height }, { width: 3072, height: 4096 }, 'Fixture received incorrect portrait Final request')
-    for (const phase of ['preparing', 'rendering', 'finishing']) {
-      await page.evaluate((phase) => window.__viewportQa.emit(phase), phase)
-      for (const [width, height] of [[1280, 800], [390, 844], [1440, 240]]) {
-        await page.setViewportSize({ width, height })
-        await page.locator('.render-job').waitFor()
-        await checkInspectorScroll(`${edition} ${width}×${height} ${phase} job in Export`)
-        await page.getByRole('button', { name: 'Back to edit', exact: true }).click()
-        if (width <= 900) await page.locator('.compact-panel-tabs button').nth(1).click()
-        await page.locator('.render-job').waitFor()
-        await checkInspectorScroll(`${edition} ${width}×${height} ${phase} job in Edit`)
-        if (phase === 'rendering') await page.screenshot({ path: join(artifacts, `${edition}-${width}x${height}-render-job.png`) })
-        await page.getByRole('button', { name: 'Export', exact: true }).first().click()
-      }
-    }
-    await page.getByRole('button', { name: 'Cancel render', exact: true }).click()
-    await page.locator('.render-job').waitFor({ state: 'detached' })
-    await checkBounds(`${edition} after fixture cancellation`)
-    console.log('Desktop bridge fixture: 4K portrait job card fits through preparation, rendering, finishing, Edit/Export switching, and cancellation. No rendering or native saving was performed.')
-  }
   assert.deepEqual(errors, [], `${edition}: uncaught browser exceptions`)
   } finally {
     await context.close()
@@ -275,16 +196,9 @@ async function checkEdition(desktop) {
 }
 
 try {
-  for (const desktop of [false, true]) {
-    try { await checkEdition(desktop) }
-    catch (error) {
-      const message = `${desktop ? 'desktop-fixture' : 'web'}: ${error instanceof Error ? error.stack : String(error)}`
-      failures.push(message)
-      console.error(message)
-    }
-  }
+  await checkViewport()
   assert.deepEqual(failures, [], failures.join('\n'))
-  console.log(`Viewport containment passed: ${checks} checks; ${sizes.length} window sizes in both web and desktop fixture; real portrait upload, edition-specific output sizes, inspector scrolling, comparison, and simulated job states. Artifacts: ${artifacts}`)
+  console.log(`Viewport containment passed: ${checks} checks; ${sizes.length} window sizes in the browser; portrait upload, output sizes, inspector scrolling and comparison. Artifacts: ${artifacts}`)
 } finally {
   await writeFile(join(artifacts, 'viewport-results.json'), JSON.stringify({ checks, failures, results }, null, 2))
   await browser.close()

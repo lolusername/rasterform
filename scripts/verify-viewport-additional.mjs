@@ -2,7 +2,6 @@
  * Complements verify-viewport-layout.mjs with Text, Living Loop, and DPR 2.
  * TEST_URL=http://127.0.0.1:5197 PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs \
  *   node scripts/verify-viewport-additional.mjs
- * Desktop capability discovery is a fixture; no native/render jobs are run.
  * Fresh contexts isolate all app/session state. QA_ARTIFACTS retains evidence.
  */
 import assert from 'node:assert/strict'
@@ -17,20 +16,9 @@ await mkdir(artifacts, { recursive: true })
 const results = []
 const failures = []
 
-function installDesktopCapabilityFixture() {
-  window.rasterformDesktop = {
-    protocolVersion: 1,
-    prepareFinalSave: async () => ({ cancelled: true }),
-    submitFinalRender: async () => { throw new Error('Layout QA must not render') },
-    cancelFinalRender: async () => ({ state: 'cancelled' }),
-    onFinalRenderEvent: () => () => {},
-  }
-}
-
-async function runCase(desktop, dpr) {
-  const edition = desktop ? 'desktop-fixture' : 'web'
+async function runCase(dpr) {
+  const edition = 'web'
   const context = await browser.newContext({ reducedMotion: 'reduce', deviceScaleFactor: dpr })
-  if (desktop) await context.addInitScript(installDesktopCapabilityFixture)
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (error) => errors.push(error.message))
@@ -103,7 +91,7 @@ async function runCase(desktop, dpr) {
     await page.getByRole('button', { name: 'Living loop PNG sequence', exact: true }).click()
     const inspector = page.locator('#export-inspector')
     assert.equal(await inspector.getByRole('button', { name: '2K', exact: true }).count(), 1)
-    assert.equal(await inspector.getByRole('button', { name: '4K', exact: true }).count(), desktop ? 1 : 0)
+    assert.equal(await inspector.getByRole('button', { name: '4K', exact: true }).count(), 0)
     for (const fps of [12, 24, 30]) {
       const button = inspector.getByRole('button', { name: `${fps} fps`, exact: true })
       await button.click()
@@ -116,7 +104,6 @@ async function runCase(desktop, dpr) {
     const background = inspector.getByRole('group', { name: 'Background', exact: true })
     await background.getByRole('button', { name: /^Current/ }).click()
     await background.getByRole('button', { name: 'Transparent', exact: true }).click()
-    if (desktop) await inspector.getByRole('button', { name: '4K', exact: true }).click()
     await page.waitForFunction(() => Boolean(document.querySelector('#export-inspector .render-button:not(:disabled)')))
     assert.equal(await page.getByRole('button', { name: 'Export lossless loop ZIP', exact: true }).isEnabled(), true)
     await scrollCheck(label)
@@ -160,18 +147,16 @@ async function runCase(desktop, dpr) {
 }
 
 try {
-  for (const desktop of [false, true]) {
-    for (const dpr of [1, 2]) {
-      try { await runCase(desktop, dpr) }
-      catch (error) {
-        const message = `${desktop ? 'desktop-fixture' : 'web'} DPR${dpr}: ${error.stack || error}`
-        failures.push(message)
-        console.error(message)
-      }
+  for (const dpr of [1, 2]) {
+    try { await runCase(dpr) }
+    catch (error) {
+      const message = `web DPR${dpr}: ${error.stack || error}`
+      failures.push(message)
+      console.error(message)
     }
   }
   assert.deepEqual(failures, [], failures.join('\n'))
-  console.log(`Additional viewport QA passed: ${results.length} bounds checks; Text and Living Loop, web/desktop fixture, DPR1/DPR2. No loop renders performed. Artifacts: ${artifacts}`)
+  console.log(`Additional viewport QA passed: ${results.length} bounds checks; Text and Living Loop, browser, DPR1/DPR2. No loop renders performed. Artifacts: ${artifacts}`)
 } finally {
   await writeFile(join(artifacts, 'additional-viewport-results.json'), JSON.stringify({ checks: results.length, failures, results }, null, 2))
   await browser.close()
