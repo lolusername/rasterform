@@ -1417,35 +1417,35 @@ async function openMonaLisaStudy() {
   const operation = ++sourceImportSequence
   const initialDocument = captureDocument()
   try {
-    const response = await fetch(`${import.meta.env.BASE_URL}studies/mona-lisa-landscape.png`)
+    const response = await fetch(`${import.meta.env.BASE_URL}studies/mona-lisa-sleeve.png`)
     if (!response.ok) throw new Error('Image unavailable')
-    const file = new File([await response.blob()], 'Mona Lisa landscape.png', { type: 'image/png' })
-    const landscape = await fileToPixelImage(file)
+    const file = new File([await response.blob()], 'Mona Lisa sleeve.png', { type: 'image/png' })
+    const sleeve = await fileToPixelImage(file)
     if (operation !== sourceImportSequence || appDisposed || editorBusy.value || comparison.value
       || !editorDocumentsEqual(initialDocument, captureDocument())) return
 
     const study = initialDocument
-    study.image = landscape
-    const green = createChannelLayer('green')
-    study.channels = [green]
-    study.selectedChannelId = green.id
-    Object.assign(study.field, { finish: 'blob', blur: 7, contrast: 0, quantize: 0, blobDilation: 3, blobSmoothing: 10 })
-    Object.assign(study.mesh, { mode: 'strata', resolution: 156 })
-    study.strata = { layers: 8, startLevel: 0.51, thickness: 0.015, separation: 0.1 }
-    Object.assign(study.imageLivingForm, { enabled: true, behavior: 'flow', frequency: 1.05, amount: 0.46, seed: 1, duration: 6 })
-    study.imageLivingPhase = 0.22
+    study.image = sleeve
+    const alpha = createChannelLayer('alpha')
+    const red = createChannelLayer('red', { blend: 'multiply', amount: 0.9 })
+    study.channels = [alpha, red]
+    study.selectedChannelId = alpha.id
+    Object.assign(study.field, { finish: 'blob', blur: 5, contrast: 0, quantize: 0, blobDilation: 3, blobSmoothing: 10 })
+    Object.assign(study.mesh, { mode: 'solid', alphaCutout: true, resolution: 180, depth: 1.4, midpoint: 0.14, baseThickness: 0.06 })
+    Object.assign(study.imageLivingForm, { enabled: false, behavior: 'flow', frequency: 1.25, amount: 0.42, seed: 0, duration: 6 })
+    study.imageLivingPhase = 0
     study.imageColorMode = 'clay'
-    study.imageAppearance.clay = { finish: 'metallic', color: '#536f64' }
+    study.imageAppearance.clay = { finish: 'metallic', color: '#8d7a6b' }
     study.imageAppearance.heightGradient = { low: '#162f27', mid: '#168880', high: '#e8d6a9', midpoint: 0.64 }
     study.viewportBackground = 'dark-gray'
     study.camera = {
       fov: 38, near: 0.01, far: 100, zoom: 1, filmGauge: 35, filmOffset: 0,
-      position: [-1.36, -1.86, 3.07], target: [-0.22, -0.085, 0.3], up: [0, 1, 0],
-      quaternion: [0.25927255002908767, -0.18707797194002118, 0.051266179686152505, 0.9461243871905056],
+      position: [1.4, 1.04, 2.26], target: [0.27, -0.22, 0.17], up: [0, 1, 0],
+      quaternion: [-0.23402117360059219, 0.23804257943747345, 0.05921375089785117, 0.9407781632170058],
     }
     await applyDocument(study)
     editorHistory.synchronize(captureDocument())
-    status.value = 'Mona Lisa landscape · Strata study'
+    status.value = 'Mona Lisa · sleeve study'
   } catch {
     if (operation === sourceImportSequence && !appDisposed) status.value = 'Could not open the Mona Lisa study. Reload to try again or choose an image.'
   }

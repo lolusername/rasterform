@@ -1,12 +1,12 @@
 # Rasterform
 
-Rasterform turns color values into forms you can edit in your browser. Choose an image channel, such as brightness or green, and use its values as heights. Make a raised surface or cut a stack of contour sheets. The geometry is deterministic. The same working pixels and settings produce the same mesh. You can also extrude type and render stills or animated PNG sequences. Your artwork stays on your device.
+Rasterform turns an image into a form you can shape, turn in the light, and save as a still or a loop. You can work with photographs, graphics, or type. Your artwork stays on your device.
 
-[Open Rasterform](https://rasterform-atilio.web.app/) · [Open the editable landscape study](https://rasterform-atilio.web.app/?study=mona-lisa)
+[Open Rasterform](https://rasterform-atilio.web.app/) · [Open the sleeve study](https://rasterform-atilio.web.app/?study=mona-lisa)
 
-The featured study starts with a 625 × 690 pixel detail of the winding road on the left of Leonardo da Vinci’s *Mona Lisa*. Each pixel’s green value, divided by 255, supplies a height from 0 to 1. After smoothing and dilation, the first sheet keeps the areas at or above 51% of the processed range. Seven more sheets use progressively higher thresholds. Open **Properties → Geometry**, raise **Start level**, and watch the low regions disappear. **Living Form → Flow** bends the stack. The same variation and phase reproduce the same pose. [Download the source crop](public/studies/mona-lisa-landscape.png)
+The featured piece starts with the gold folds of a sleeve in Leonardo da Vinci’s *Mona Lisa*. A soft edge isolates the fabric. Turn it in the light or try your own version. [Download the study image](public/studies/mona-lisa-sleeve.png)
 
-The crop preserves the pixels from **(0, 1170)** to **(625, 1860)** in the 1920 × 2861 reproduction. The painting is in the Musée du Louvre. The C2RMF photograph, retouched by Dcoetzee, is public domain on Wikimedia Commons. [Source and licensing](https://commons.wikimedia.org/wiki/File:Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg)
+Painting by Leonardo da Vinci, Musée du Louvre. Photograph by C2RMF, retouched by Dcoetzee. [Public-domain reproduction on Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg)
 
 ![A source image, its luminance height field, and the resulting relief](docs/interview/assets/pipeline-example.png)
 
